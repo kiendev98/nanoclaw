@@ -94,6 +94,54 @@ const AUTH_OVERRIDE_ENV_VARS = [
 ] as const;
 
 /**
+ * Claude Code's own session environment, scrubbed before the agent starts.
+ *
+ * A container never saw these. A host process inherits whatever launched it,
+ * and the overwhelmingly likely launcher during development is a terminal
+ * inside Claude Code — which exports a session identity, a live control
+ * socket, and an effort override. The runner passes `{...process.env}` to the
+ * SDK, so every one of them reaches the nested `claude`, and it then believes
+ * it is a CHILD of the launching session rather than its own agent.
+ *
+ * That is not cosmetic. A session started this way reported a 165,000-token
+ * context window on a model whose id ends in `[1m]` — smaller than the
+ * standard 200k — and carried a messaging socket pointing back at the
+ * launching session.
+ *
+ * `CLAUDE_CONFIG_DIR` is deliberately NOT here: it is how claude-swap selects
+ * an account, and scrubbing it would pin the agent to the default profile —
+ * the same failure `AUTH_OVERRIDE_ENV_VARS` exists to prevent, from the other
+ * direction.
+ */
+const CLAUDE_SESSION_ENV_VARS = [
+  'CLAUDECODE',
+  'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_CHILD_SESSION',
+  'CLAUDE_CODE_BRIDGE_SESSION_ID',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_CODE_AGENT',
+  'CLAUDE_CODE_EXECPATH',
+  'CLAUDE_CODE_MESSAGING_SOCKET',
+  'CLAUDE_CODE_MESSAGING_TOKEN',
+  'CLAUDE_EFFORT',
+  'CLAUDE_PID',
+  'CLAUDE_JOB_DIR',
+] as const;
+
+/**
+ * Remove every inherited Claude identity from an agent's environment.
+ *
+ * Exported so the two lists can be asserted without spawning a process. The
+ * failure both prevent is silent: the agent starts, answers, and is simply
+ * wrong about which account it is or whose session it belongs to.
+ */
+export function stripInheritedClaudeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  for (const key of AUTH_OVERRIDE_ENV_VARS) delete env[key];
+  for (const key of CLAUDE_SESSION_ENV_VARS) delete env[key];
+  return env;
+}
+
+/**
  * Environment the host owns, which a composed spec may never override.
  *
  * `HOME` is the one that matters and the reason this list exists. Composition
@@ -355,7 +403,7 @@ export class LocalSessionDriver implements SessionDriver {
       if (hostEnv[key] !== undefined) env[key] = hostEnv[key];
       else delete env[key];
     }
-    for (const key of AUTH_OVERRIDE_ENV_VARS) delete env[key];
+    stripInheritedClaudeEnv(env);
 
     const executable = resolveClaudeExecutable(env.PATH);
     if (executable) env.NANOCLAW_CLAUDE_EXECUTABLE = executable;
