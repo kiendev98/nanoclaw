@@ -7,7 +7,7 @@
  */
 import './core.js';
 import './interactive.js';
-import './agents.js';
+import './workers.js';
 import './self-mod.js';
 // Module barrel — loads registration modules, including the singular mailbox slot.
 import '../modules/index.js';

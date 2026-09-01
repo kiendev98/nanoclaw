@@ -8,6 +8,13 @@
  * default `group` scope, and unknown/missing config, fail-closed — holds for
  * the requesting group's admin chain.
  *
+ * workers.create — the same trust split as agents.create, defined
+ * separately because a grant is bound to the pending_approvals row's action
+ * name and the two hold through different approval handlers. It binds on the
+ * REQUEST ID rather than the name: `create_worker` answers a blocking tool by
+ * requestId, and a grant bound to a name would let one approval satisfy a
+ * different request that happened to ask for the same worker name.
+ *
  * a2a.send — the decision moved verbatim out of routeAgentMessage, in its
  * original check order: a missing destination row denies; a missing target
  * group denies; self-sends allow without a destination row; an
@@ -53,6 +60,29 @@ export const agentsCreate = defineGuardedAction({
     // unknown config value, fail-closed — requires an admin before any
     // central-DB write.
     return HOLD('agent-initiated create_agent requires admin approval');
+  },
+});
+
+export const workersCreate = defineGuardedAction({
+  action: 'workers.create',
+  grantActionName: 'create_worker',
+  grantCoversRequest: (grant, input) => {
+    try {
+      return (JSON.parse(grant.payload) as { requestId?: string }).requestId === input.payload.requestId;
+    } catch {
+      return false;
+    }
+  },
+  decide: async (input) => {
+    if (input.actor.kind !== 'agent') return DENY('create_worker is a container-originated action.');
+    const cliScope = (await getContainerConfig(input.actor.agentGroupId))?.cli_scope ?? 'group';
+    // A worker is a privileged central-DB write plus a git worktree of a real
+    // repository on the host, so it holds wherever create_agent holds: a
+    // trusted owner group acts directly, and the realistic prompt-injection
+    // victim (the default `group` scope, and any unknown value, fail-closed)
+    // needs an admin first.
+    if (cliScope === 'global') return ALLOW('trusted global-scope agent group');
+    return HOLD('agent-initiated create_worker requires admin approval');
   },
 });
 

@@ -549,7 +549,7 @@ export function registerPostDeliveryHook(hook: PostDeliveryHook): void {
  * Modules register handlers for system-kind outbound message actions via
  * `registerDeliveryAction`. Unknown actions log "Unknown system action".
  *
- * Privileged delivery actions (create_agent, install_packages,
+ * Privileged delivery actions (create_agent, create_worker, install_packages,
  * add_mcp_server) register with a guard spec: every path to the handler body
  * — dispatch, approved replay, test lookup — goes through the guard consult
  * (allow / hold / deny), so there is no unguarded route to it. On approve,

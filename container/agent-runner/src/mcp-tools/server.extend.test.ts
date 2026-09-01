@@ -5,15 +5,20 @@
  *
  * Uses synthetic fixture tools for the merge/passthrough semantics (module
  * state is process-wide, so each fixture gets a unique name), plus one
- * end-to-end fixture extension of the real `create_agent` tool proving the
+ * end-to-end fixture extension of the real `create_worker` tool proving the
  * mechanism covers the motivating case: an installed module adding params
  * that must land in the payload the host reads from outbound.db.
+ *
+ * `create_worker` blocks on the host's answer, which never comes here, so
+ * these cases pin the wait to a millisecond and read the row it wrote before
+ * degrading. What the payload carries is the whole point; how long it waited
+ * is another file's subject.
  */
 import { describe, it, expect, afterAll, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages, writeMessageOut } from '../db/messages-out.js';
-import { createAgent } from './agents.js';
+import { createWorker } from './workers.js';
 import { extendTool, registerTools, resetToolExtensions } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -21,7 +26,7 @@ let fixtureCount = 0;
 
 /**
  * Register a fresh fixture tool that writes one system-action payload the
- * way real system tools do (create_agent, scheduling, self-mod): base args
+ * way real system tools do (create_worker, scheduling, self-mod): base args
  * only — anything an extension adds is invisible to the handler.
  */
 function fixtureTool(): McpToolDefinition {
@@ -201,59 +206,56 @@ describe('extendTool — passthrough keys land in the written payload', () => {
   });
 });
 
-describe('extendTool — fixture extension of create_agent (end to end)', () => {
+describe('extendTool — fixture extension of create_worker (end to end)', () => {
   beforeEach(() => {
     initTestSessionDb();
+    process.env.NANOCLAW_CREATE_WORKER_WAIT_MS = '1';
   });
 
   afterEach(() => {
+    delete process.env.NANOCLAW_CREATE_WORKER_WAIT_MS;
     closeSessionDb();
   });
 
   // Restored at FILE scope, not per test: the second case below deliberately
   // depends on the first one's extension still being in place, because tool
   // state is process-wide. Without this, that same process-wide state follows
-  // the run into other files — `rooms.ts` applies its own
-  // `extendTool('create_agent')` at import time and threw a collision against
-  // the property installed here.
+  // the run into other files and throws a collision there.
   afterAll(() => {
-    resetToolExtensions('create_agent');
+    resetToolExtensions('create_worker');
   });
 
-  it('extends the real create_agent schema/description and passes params into its payload', async () => {
+  it('extends the real create_worker schema/description and passes params into its payload', async () => {
     // What an installed feature module would run at import time instead of
-    // editing agents.ts (fixture values — the real extension ships with the
-    // feature payload, never on trunk).
-    extendTool('create_agent', {
+    // editing workers.ts.
+    extendTool('create_worker', {
       properties: {
-        purpose: { type: 'string', description: 'One short public line saying what this agent is for.' },
+        purpose: { type: 'string', description: 'One short public line saying what this worker is for.' },
       },
       passthroughKeys: ['purpose'],
       descriptionSuffix: 'The purpose line is shown publicly.',
     });
 
-    const props = schemaProps(createAgent);
-    // The base properties plus the fixture's. `repo` is base: it scopes a new
-    // agent to a git worktree of a named repository.
-    expect(Object.keys(props).sort()).toEqual(['instructions', 'name', 'purpose', 'repo']);
-    expect(createAgent.tool.description?.endsWith('The purpose line is shown publicly.')).toBe(true);
+    const props = schemaProps(createWorker);
+    expect(Object.keys(props).sort()).toEqual(['name', 'purpose', 'repo', 'task']);
+    expect(createWorker.tool.description?.endsWith('The purpose line is shown publicly.')).toBe(true);
 
-    await createAgent.handler({ name: 'Scout', purpose: 'Deep research' });
+    await createWorker.handler({ repo: 'saber', task: 'audit the gates', purpose: 'Deep research' });
 
     const payload = lastPayload();
-    expect(payload.action).toBe('create_agent');
-    expect(payload.name).toBe('Scout');
-    expect(payload.instructions).toBeNull();
+    expect(payload.action).toBe('create_worker');
+    expect(payload.repo).toBe('saber');
+    expect(payload.task).toBe('audit the gates');
     expect(payload.purpose).toBe('Deep research');
   });
 
   it('omits extension keys from the payload when the caller does not pass them', async () => {
-    // create_agent is already extended by the previous test (module state is
+    // create_worker is already extended by the previous test (module state is
     // process-wide); a call without the param must stay byte-identical to base.
-    await createAgent.handler({ name: 'Plain' });
+    await createWorker.handler({ repo: 'saber', task: 'audit the gates' });
 
     const payload = lastPayload();
-    expect(payload.name).toBe('Plain');
+    expect(payload.repo).toBe('saber');
     expect(payload).not.toHaveProperty('purpose');
   });
 });

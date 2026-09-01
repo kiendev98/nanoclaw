@@ -232,11 +232,20 @@ async function resolveTargetSession(
   return (await resolveSession(targetAgentGroupId, null, null, 'agent-shared')).session;
 }
 
+/**
+ * What became of an a2a message: delivered to the target's inbox, or held on
+ * an `agent_message_policies` card. Reported rather than inferred because a
+ * caller that speaks for the sender — `create_worker`, which delivers a brief
+ * on the orchestrator's behalf — must not tell it the brief arrived when an
+ * admin is still holding it.
+ */
+export type AgentRouteOutcome = 'delivered' | 'held';
+
 export async function routeAgentMessage(
   msg: RoutableAgentMessage,
   session: Session,
   opts: { grant?: PendingApproval } = {},
-): Promise<void> {
+): Promise<AgentRouteOutcome> {
   const sourceAgentGroupId = session.agent_group_id;
   const targetAgentGroupId = msg.platform_id;
   if (!targetAgentGroupId) {
@@ -284,10 +293,11 @@ export async function routeAgentMessage(
       to: targetAgentGroupId,
       msgId: msg.id,
     });
-    return;
+    return 'held';
   }
 
   await performAgentRoute(msg, session, targetAgentGroupId);
+  return 'delivered';
 }
 
 const GATE_CARD_BODY_MAX = 1500;

@@ -1,15 +1,16 @@
 /**
  * Room MCP tool tests: create_room / add_to_room arg validation and
- * system-action row shape, plus the extendTool-based create_agent extension
- * (schema/description growth + purpose/allow_guests/room payload
- * passthrough) — all fire-and-forget writes to messages_out (authorization
- * is host-side). Importing ./rooms.js applies the extension, so these tests
- * exercise the same wiring the barrel produces.
+ * system-action row shape — fire-and-forget writes to messages_out
+ * (authorization is host-side).
+ *
+ * The extendTool-based `create_agent` extension is gone with the tool it
+ * extended: an agent inside a container now creates only repo workers
+ * (`create_worker`), and the host-side `create_agent` delivery action is
+ * reached from the CLI and setup paths instead.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getOutboundDb } from '../mailbox/sqlite/connection.js';
-import { createAgent } from './agents.js';
 import { addToRoom, createRoom } from './rooms.js';
 
 function outboundActions(): Array<{ id: string; kind: string; content: Record<string, unknown> }> {
@@ -95,37 +96,5 @@ describe('add_to_room', () => {
     expect(rows[0].kind).toBe('system');
     expect(rows[0].content).toMatchObject({ action: 'add_to_room', room: 'Website Team', agent: 'Devin' });
     expect(rows[0].content.requestId).toBe(rows[0].id);
-  });
-});
-
-describe('create_agent — Slack extension (extendTool)', () => {
-  it('extends the base tool schema and description without editing agents.ts', () => {
-    const props = (createAgent.tool.inputSchema as { properties: Record<string, unknown> }).properties;
-    expect(Object.keys(props)).toEqual(
-      expect.arrayContaining(['name', 'instructions', 'purpose', 'allow_guests', 'room']),
-    );
-    expect(createAgent.tool.description).toContain('acknowledge the user in this SAME turn');
-  });
-
-  it('passes the registered keys through into the written system payload', async () => {
-    await createAgent.handler({ name: 'Pixel', room: 'none', purpose: 'design things' });
-    await createAgent.handler({ name: 'Solo' });
-    await createAgent.handler({ name: 'Own', room: 'own' });
-
-    const rows = outboundActions();
-    expect(rows).toHaveLength(3);
-    expect(rows[0].content).toMatchObject({
-      action: 'create_agent',
-      name: 'Pixel',
-      room: 'none',
-      purpose: 'design things',
-    });
-    // No extension args → the payload stays byte-identical to the base tool's.
-    expect(rows[1].content.room).toBeUndefined();
-    expect(rows[1].content.purpose).toBeUndefined();
-    // The passthrough copies provided values verbatim; the host reads an
-    // explicit 'own' exactly as an absent room (both mean the default
-    // own-room policy), so nothing normalizes it away container-side.
-    expect(rows[2].content.room).toBe('own');
   });
 });

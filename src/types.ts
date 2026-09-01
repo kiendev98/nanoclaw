@@ -31,7 +31,7 @@ export interface AgentGroup {
    * this says whose work it is doing. Together they are the REUSE key:
    * `workspace_path` is derived from (repo, origin session), so
    * `(origin_session_id, workspace_path)` IS the (repo, thread) pair. A second
-   * `create_agent({ repo })` in the same thread finds the first worker instead
+   * `create_worker` in the same thread finds the first worker instead
    * of minting a rival on a branch that cannot see its work.
    *
    * NULL / absent means "not a worker", which is every group that predates the

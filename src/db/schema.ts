@@ -18,7 +18,7 @@ export const SCHEMA = `
 -- origin_session_id (migration 026) is the other half of a worker's identity:
 -- the session it was created for. Together with workspace_path -- which is
 -- itself derived from (repo, origin session) -- it is the (repo, thread) key
--- that makes a second create_agent for the same repo in the same thread return
+-- that makes a second create_worker for the same repo in the same thread return
 -- the FIRST worker instead of minting a rival on a second branch. NULL means
 -- "not a worker". Not an FK: an ON DELETE CASCADE would delete the worker when
 -- its origin session row goes, orphaning a worktree that may hold uncommitted
