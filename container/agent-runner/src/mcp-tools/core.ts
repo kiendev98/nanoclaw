@@ -117,7 +117,7 @@ export const sendFile: McpToolDefinition = {
       type: 'object' as const,
       properties: {
         to: { type: 'string', description: 'Destination name.' },
-        path: { type: 'string', description: 'File path (relative to /workspace/agent/ or absolute)' },
+        path: { type: 'string', description: 'File path (absolute, or relative to your working directory)' },
         text: { type: 'string', description: 'Optional accompanying message' },
         filename: { type: 'string', description: 'Display name (default: basename of path)' },
       },

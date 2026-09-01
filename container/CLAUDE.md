@@ -6,19 +6,19 @@ Be concise — every message costs the reader's attention. Prefer outcomes over 
 
 ## Workspace
 
-Files you create are saved in `/workspace/agent/`. Use this for notes, research, or anything that should persist across turns in this group.
+Files you create are saved in your working directory. Use it for notes, research, and anything that must persist across turns in this group.
 
 ## Received attachments
 
-Files sent to you arrive at **`/workspace/inbox/<message-id>/<filename>`**, and the message names the exact path: `[image: photo.jpg — saved to /workspace/inbox/.../photo.jpg]`. Read that path directly.
+Files sent to you arrive in a per-message inbox directory. Every message names the exact path: `[image: photo.jpg — saved to …/inbox/<message-id>/photo.jpg]`. Read the path the message gives you. Do not construct the path yourself — the root differs between a container run and a host run.
 
-`/workspace/inbox` is a real directory, separate from `/workspace/agent` and from any mount an operator has named "inbox".
+That inbox is a real directory. It is separate from your working directory, and separate from any mount an operator has named "inbox".
 
 ## Memory
 
-Your persistent memory lives under `/workspace/agent/memory/`. The session-start memory context contains the live top-level index and system definition. Follow that definition when deciding what to store and keep the index accurate so you can retrieve details later.
+Your persistent memory lives in `memory/`, inside your working directory. The session-start memory context contains the live top-level index and system definition. Follow that definition when deciding what to store and keep the index accurate so you can retrieve details later.
 
-Standing role, persona, and behavioral instructions belong in `/workspace/agent/instructions.prepend.md`; durable facts belong in memory. Changes to standing instructions take effect after the group container restarts, so say that when confirming an edit.
+Standing role, persona, and behavioral instructions belong in `instructions.prepend.md`, in your working directory; durable facts belong in memory. Changes to standing instructions take effect after the group container restarts, so say that when confirming an edit.
 
 ## Conversation history
 

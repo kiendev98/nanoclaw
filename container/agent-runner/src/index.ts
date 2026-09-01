@@ -3,20 +3,31 @@
  *
  * Runs inside a container. All message IO goes through the registered mailbox.
  *
- * Config is read from /workspace/agent/container.json (mounted RO).
- * Only TZ and OneCLI networking vars come from env.
+ * Config is read from <AGENT_DIR>/container.json. Only TZ and OneCLI
+ * networking vars come from env.
  *
- * Mount structure:
- *   /workspace/
- *     mailbox state     ← selected implementation
- *     .heartbeat        ← container touches for liveness detection
- *     outbox/           ← outbound files
- *     agent/            ← agent group folder (CLAUDE.md, container.json, working files)
- *       CLAUDE.md       ← composed project document (RO nested mount)
- *       container.json  ← per-group config (RO nested mount)
- *   /app/src/           ← shared agent-runner source (RO)
- *   /app/skills/        ← shared skills (RO)
- *   /home/node/.claude/ ← Claude SDK state + skill symlinks (RW)
+ * Every root below resolves through `roots.ts`, NOT through the literal paths
+ * shown here. The container paths are the defaults; a host run overrides each
+ * one with an env var, because the container layout nests `/workspace/agent`
+ * inside `/workspace` while the two map to unrelated host directories. Never
+ * hardcode one of these — see the attachment-path bug that shipped from
+ * exactly that (`formatter.ts`, `formatAttachments`).
+ *
+ * Layout, with the container default and its override:
+ *   /workspace/                   NANOCLAW_WORKSPACE_DIR
+ *     mailbox state               ← selected implementation
+ *     .heartbeat                  ← touched for liveness detection
+ *     outbox/                     ← outbound files
+ *     inbox/<messageId>/          ← received attachments, written by the host
+ *     agent/                      NANOCLAW_AGENT_DIR — the group folder, and cwd
+ *       CLAUDE.md                 ← composed project document
+ *       container.json            ← per-group config
+ *       memory/                   ← persistent memory tree
+ *     extra/                      NANOCLAW_EXTRA_DIR — operator mounts
+ *   /app/.nanoclaw-session.json   NANOCLAW_SESSION_CONTEXT_PATH
+ *   /app/src/                     ← agent-runner source (container only)
+ *   /app/skills/                  ← shared skills (container only)
+ *   /home/node/.claude/           ← SDK state (container only; a host run uses $HOME)
  */
 
 import fs from 'fs';

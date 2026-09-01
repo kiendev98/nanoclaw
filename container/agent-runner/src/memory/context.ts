@@ -20,8 +20,12 @@ export function renderMemorySection(baseDir = AGENT_DIR): string {
     '',
     'These files are loaded at startup, after clear, and after compaction:',
     '',
-    '- `/workspace/agent/memory/index.md` - top-level memory index and Core Memory',
-    '- `/workspace/agent/memory/system/definition.md` - memory system behavior',
+    // Rendered from `memoryDir`, never hardcoded: `/workspace/agent` is the
+    // container mount point, and a host run resolves elsewhere. The agent is
+    // told to edit these files directly, so a wrong path here sends it to
+    // create a second, unread memory tree.
+    `- \`${path.join(memoryDir, 'index.md')}\` - top-level memory index and Core Memory`,
+    `- \`${path.join(memoryDir, 'system', 'definition.md')}\` - memory system behavior`,
     '',
     'The files on disk are authoritative. Edit them directly; follow links from',
     'the index when more detail is relevant.',

@@ -8,8 +8,9 @@ import { AGENT_DIR } from '../roots.js';
  * Create the agent's persistent memory scaffold, container-side, at boot.
  *
  * The runner owns its own workspace: it writes the memory tree straight into
- * `/workspace/agent` (the host-backed, RW group dir, so it persists across the
- * ephemeral container). No host-side step, nothing mounted in.
+ * AGENT_DIR (see roots.ts) — the group folder, which the host owns, so it
+ * persists after the session process exits. No host-side step, nothing
+ * mounted in.
  *
  * The default memory files live as real markdown templates next to this module
  * (under `templates/`) — not as strings in code — so the

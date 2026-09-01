@@ -1,5 +1,8 @@
+import path from 'path';
+
 import { findByRouting } from './destinations.js';
 import type { MessageInRow } from './db/messages-in.js';
+import { WORKSPACE_DIR } from './roots.js';
 import { TIMEZONE, formatLocalTime, formatLocalStamp } from './timezone.js';
 
 /**
@@ -351,13 +354,33 @@ function formatLinks(links: any[] | undefined, text: string): string {
   return urls.length === 0 ? '' : `\n${urls.map((url) => `[link: ${escapeXml(url)}]`).join('\n')}`;
 }
 
+/**
+ * Absolute path the agent is told to read an attachment from.
+ *
+ * The host stores `localPath` RELATIVE to the session workspace
+ * (`inbox/<messageId>/<file>`) and never writes the root, so the root has to
+ * come from `roots.ts`. It was once the literal `/workspace`, which is right
+ * only inside a container: on a host run the file was written correctly and
+ * the agent was pointed at a path that does not exist. Nothing raised — the
+ * agent simply could not open the attachment.
+ *
+ * `root` is a parameter because `bunfig.toml` preloads the modules barrel,
+ * which pulls in `roots.ts` before any test file runs. No test can set
+ * NANOCLAW_WORKSPACE_DIR, so a test that went through the module graph could
+ * only ever observe the container default — and would pass against the very
+ * bug this replaced.
+ */
+export function attachmentDisplayPath(localPath: string, root: string = WORKSPACE_DIR): string {
+  return path.join(root, localPath);
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function formatAttachments(attachments: any[] | undefined): string {
   if (!Array.isArray(attachments) || attachments.length === 0) return '';
   const parts = attachments.map((a) => {
     const name = a.name || a.filename || 'attachment';
     const type = a.type || 'file';
-    const localPath = a.localPath ? `/workspace/${a.localPath}` : '';
+    const localPath = a.localPath ? attachmentDisplayPath(a.localPath) : '';
     const url = a.url || '';
     if (localPath) {
       return `[${type}: ${escapeXml(name)} — saved to ${escapeXml(localPath)}]`;
