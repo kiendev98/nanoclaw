@@ -1,6 +1,6 @@
 ## Companion and collaborator agents (`create_agent`)
 
-`mcp__nanoclaw__create_agent({ name, instructions })` spins up a new long-lived agent and wires it as a destination — bidirectional, so you can send it tasks and it can message you back.
+`mcp__nanoclaw__create_agent({ name, instructions, repo })` spins up a new long-lived agent and wires it as a destination — bidirectional, so you can send it tasks and it can message you back. `repo` is optional; it puts the new agent inside a git worktree of that repository (see "Delegating work in a repository" below).
 
 ### How it works
 
@@ -20,6 +20,14 @@ The right frame is: does this agent need its own memory and context that builds 
 
 - **One-off lookups or short tasks** — use the SDK `Agent` tool instead. It's stateless, spins up and completes in one shot, and leaves no persistent footprint.
 - **Work that finishes before the user's next message** — agents persist indefinitely. Don't create one for something you could do inline.
+
+### Delegating work in a repository
+
+Give an agent a `repo` and it works inside a git worktree of that repository, with that repository's `CLAUDE.md`, skills and settings loaded. You stay where you are and hold the conversation. Three rules:
+
+- **Never delegate a session-state command.** `/compact`, `/context`, `/cost` and `/clear` act on the session they are typed in. Run them here, in this session, always. Sending `/compact` to a worker compacts an empty session and leaves yours untouched.
+- **Delegate repository work only when the user names the repository.** Do not infer one from the topic, from the last repository you worked in, or from a file path. If no repository is named, ask which one.
+- **Write a brief that stands alone.** The worker starts with an empty context and cannot read this thread. Expand every reference — "this feature", "the bug above", "as discussed" — into explicit text: what to change, in which files, and what the result must be.
 
 ### Writing good `instructions`
 
