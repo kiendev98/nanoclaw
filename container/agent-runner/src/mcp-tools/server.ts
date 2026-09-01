@@ -75,6 +75,25 @@ const passthroughKeysByTool = new Map<string, Set<string>>();
  * Must be called after the base tool's module has registered it (the
  * barrel imports base tool modules before extension modules).
  */
+/**
+ * Each extended tool's state as it was BEFORE any extension, so a test can put
+ * it back.
+ *
+ * Extensions are applied at module import time and `toolMap` is process-wide,
+ * so a test that extends a real tool leaves it extended for every later file
+ * in the run. That is how `rooms.ts`'s import-time `extendTool('create_agent')`
+ * came to throw a collision against a property a *test* had installed —
+ * order-dependent, invisible in isolation, and reported as an uncaught
+ * module-evaluation error rather than a failed assertion.
+ *
+ * Recorded on first extension only: the point is the pristine state, not the
+ * state after some earlier extension.
+ */
+const preExtensionState = new Map<
+  string,
+  { properties: Record<string, unknown> | undefined; description: string | undefined; handler: McpToolDefinition['handler'] }
+>();
+
 export function extendTool(name: string, extension: ToolExtension): void {
   const def = toolMap.get(name);
   if (!def) {
@@ -82,6 +101,15 @@ export function extendTool(name: string, extension: ToolExtension): void {
   }
 
   const { properties, passthroughKeys, descriptionSuffix } = extension;
+
+  if (!preExtensionState.has(name)) {
+    const schema = def.tool.inputSchema as { properties?: Record<string, unknown> };
+    preExtensionState.set(name, {
+      properties: schema.properties ? { ...schema.properties } : undefined,
+      description: def.tool.description,
+      handler: def.handler,
+    });
+  }
 
   if (properties) {
     const schema = def.tool.inputSchema as { type: 'object'; properties?: Record<string, unknown> };
@@ -143,4 +171,30 @@ export async function startMcpServer(
   const transport = new StdioServerTransport();
   await server.connect(transport);
   log(`MCP server started with ${allTools.length} tools: ${allTools.map((t) => t.tool.name).join(', ')}`);
+}
+
+/**
+ * Test seam: undo every extension applied to a tool, restoring the schema,
+ * description and handler recorded before the first one.
+ *
+ * A test that extends a REAL tool must call this when its file is done, or the
+ * mutation leaks into every later file in the run — see `preExtensionState`.
+ * The passthrough registry is cleared too, otherwise the next `extendTool`
+ * with passthrough keys finds a live key set, assumes a wrapper is already in
+ * place, and installs none — so its keys would silently stop reaching the
+ * payload.
+ */
+export function resetToolExtensions(name: string): void {
+  const recorded = preExtensionState.get(name);
+  if (!recorded) return;
+  const def = toolMap.get(name);
+  if (def) {
+    const schema = def.tool.inputSchema as { properties?: Record<string, unknown> };
+    if (recorded.properties) schema.properties = { ...recorded.properties };
+    else delete schema.properties;
+    def.tool.description = recorded.description;
+    def.handler = recorded.handler;
+  }
+  passthroughKeysByTool.delete(name);
+  preExtensionState.delete(name);
 }

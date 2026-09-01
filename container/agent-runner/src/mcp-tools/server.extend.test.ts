@@ -9,12 +9,12 @@
  * mechanism covers the motivating case: an installed module adding params
  * that must land in the payload the host reads from outbound.db.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, it, expect, afterAll, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages, writeMessageOut } from '../db/messages-out.js';
 import { createAgent } from './agents.js';
-import { extendTool, registerTools } from './server.js';
+import { extendTool, registerTools, resetToolExtensions } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
 let fixtureCount = 0;
@@ -210,6 +210,16 @@ describe('extendTool — fixture extension of create_agent (end to end)', () => 
     closeSessionDb();
   });
 
+  // Restored at FILE scope, not per test: the second case below deliberately
+  // depends on the first one's extension still being in place, because tool
+  // state is process-wide. Without this, that same process-wide state follows
+  // the run into other files — `rooms.ts` applies its own
+  // `extendTool('create_agent')` at import time and threw a collision against
+  // the property installed here.
+  afterAll(() => {
+    resetToolExtensions('create_agent');
+  });
+
   it('extends the real create_agent schema/description and passes params into its payload', async () => {
     // What an installed feature module would run at import time instead of
     // editing agents.ts (fixture values — the real extension ships with the
@@ -243,5 +253,51 @@ describe('extendTool — fixture extension of create_agent (end to end)', () => 
     const payload = lastPayload();
     expect(payload.name).toBe('Plain');
     expect(payload).not.toHaveProperty('purpose');
+  });
+});
+
+/**
+ * The seam that keeps a test's extension from following the run into other
+ * files. This is the mechanism that was missing when `rooms.ts` threw an
+ * uncaught collision during module evaluation.
+ */
+describe('resetToolExtensions', () => {
+  it('restores the schema, description and handler recorded before the first extension', () => {
+    const def = fixtureTool();
+    const baseDescription = def.tool.description;
+    const baseKeys = Object.keys(schemaProps(def)).sort();
+
+    extendTool(def.tool.name, {
+      properties: { purpose: { type: 'string' } },
+      descriptionSuffix: 'Extended.',
+      passthroughKeys: ['purpose'],
+    });
+    expect(Object.keys(schemaProps(def)).sort()).toEqual(['name', 'purpose']);
+
+    resetToolExtensions(def.tool.name);
+
+    expect(Object.keys(schemaProps(def)).sort()).toEqual(baseKeys);
+    expect(def.tool.description).toBe(baseDescription);
+  });
+
+  it('lets the same extension be applied again afterwards', () => {
+    // The collision guard is deliberately strict — re-adding a key throws even
+    // with an identical definition — so a reset that left the property behind
+    // would make the tool permanently un-extendable.
+    const def = fixtureTool();
+    const extension = { properties: { purpose: { type: 'string' } } };
+
+    extendTool(def.tool.name, extension);
+    resetToolExtensions(def.tool.name);
+
+    expect(() => extendTool(def.tool.name, extension)).not.toThrow();
+  });
+
+  it('is a no-op for a tool that was never extended', () => {
+    const def = fixtureTool();
+    const before = Object.keys(schemaProps(def)).sort();
+
+    expect(() => resetToolExtensions(def.tool.name)).not.toThrow();
+    expect(Object.keys(schemaProps(def)).sort()).toEqual(before);
   });
 });
