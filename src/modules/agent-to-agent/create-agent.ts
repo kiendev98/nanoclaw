@@ -351,8 +351,8 @@ async function performCreateAgent(
     created_at: now,
     workspace_path: workspacePath,
     // Only a repo-scoped worker belongs to a conversation. An ordinary
-    // sub-agent is the creator's, not the thread's, and NULL here keeps it
-    // exactly as unreaped and unrelayed as it was before this column existed.
+    // sub-agent is the creator's, not the thread's, and NULL here means no
+    // later `create_agent` in any thread can be handed it as a reused worker.
     origin_session_id: workspacePath ? session.id : null,
   };
   await createAgentGroup(newGroup);

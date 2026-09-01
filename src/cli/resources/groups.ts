@@ -219,9 +219,8 @@ registerResource({
         const exists = await getDb().get('SELECT 1 FROM agent_groups WHERE id = ? LIMIT 1', id);
         if (!exists) throw new Error(`group not found: ${id}`);
 
-        // The cascade itself lives in db/agent-groups.ts because the worker
-        // reaper runs the identical one. Two hand-written copies is how a
-        // table gets missed in one of them.
+        // The cascade itself lives in db/agent-groups.ts: FK order is easy to
+        // get wrong, and a table missed here is left dangling in silence.
         const removed = await deleteAgentGroupCascade(id);
         return { deleted: id, removed };
       },

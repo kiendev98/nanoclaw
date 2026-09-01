@@ -25,7 +25,6 @@ export {
   getAgentGroup,
   getAgentGroupByFolder,
   getAllAgentGroups,
-  getWorkerAgentGroups,
   updateAgentGroup,
   deleteAgentGroup,
 } from './agent-groups.js';

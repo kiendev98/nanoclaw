@@ -16,13 +16,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   createWorktree,
-  inspectWorktree,
   parseProjectRoots,
-  removeWorktree,
   resolveRepo,
   sanitizeSegment,
   worktreePath,
-  worktreeRepoName,
   WORKTREES_DIR,
 } from './worktree.js';
 
@@ -206,13 +203,13 @@ describe('worktreePath', () => {
 });
 
 /**
- * These four touch the REAL `WORKTREES_DIR`, because `git worktree add` cannot
+ * These three touch the REAL `WORKTREES_DIR`, because `git worktree add` cannot
  * be faked and the constant is resolved from HOME at module load — the same
  * shape as `GROUPS_DIR` in config.ts. Kept safe by pid-namespaced branch names
  * and an afterEach that removes what it made, so a parallel run cannot collide
  * and a failed run leaves nothing behind.
  */
-describe('createWorktree / removeWorktree', () => {
+describe('createWorktree', () => {
   let repo: string;
   let created: string | null;
 
@@ -222,10 +219,7 @@ describe('createWorktree / removeWorktree', () => {
   });
 
   afterEach(() => {
-    if (created) {
-      removeWorktree(created);
-      fs.rmSync(created, { recursive: true, force: true });
-    }
+    if (created) fs.rmSync(created, { recursive: true, force: true });
   });
 
   it('creates a worktree on a new branch, outside the repository', () => {
@@ -251,106 +245,5 @@ describe('createWorktree / removeWorktree', () => {
 
     created = createWorktree(repo, branch);
     expect(fs.existsSync(created)).toBe(true);
-  });
-
-  it('removes a worktree', () => {
-    const worktree = createWorktree(repo, `ncl-test-${process.pid}-d`);
-    removeWorktree(worktree);
-    expect(fs.existsSync(worktree)).toBe(false);
-  });
-
-  it('tolerates removing a path that is already gone', () => {
-    expect(() => removeWorktree(path.join(tmp, 'never-existed'))).not.toThrow();
-  });
-
-  /**
-   * The relay label names the repository, and it is asked of git rather than
-   * parsed out of the worktree's own directory name — that name is
-   * `<repo>-<branch>` after both halves were flattened, so a dash in either one
-   * makes the split ambiguous and the reader is told the wrong repository.
-   */
-  it('names the repository a worktree belongs to', () => {
-    created = createWorktree(repo, `ncl-test-${process.pid}-name`);
-    expect(worktreeRepoName(created)).toBe(path.basename(repo));
-  });
-
-  it('falls back to the path basename when git cannot answer', () => {
-    // A label is decoration; losing it must never cost the message it labels.
-    const notAWorktree = path.join(tmp, 'plain-dir');
-    fs.mkdirSync(notAWorktree, { recursive: true });
-    expect(worktreeRepoName(notAWorktree)).toBe('plain-dir');
-  });
-
-  /**
-   * `inspectWorktree` is the only thing standing between the reaper and a
-   * deleted day of someone's work, so every answer it can give is asserted
-   * against real git rather than a mock.
-   */
-  describe('inspectWorktree', () => {
-    function inWorktree(worktree: string, args: string[]): void {
-      execFileSync('git', ['-C', worktree, ...args], { stdio: 'ignore' });
-    }
-
-    it('calls a fresh worktree clean', () => {
-      created = createWorktree(repo, `ncl-test-${process.pid}-clean`);
-      expect(inspectWorktree(created).clean).toBe(true);
-    });
-
-    it('calls an untracked file work', () => {
-      created = createWorktree(repo, `ncl-test-${process.pid}-untracked`);
-      fs.writeFileSync(path.join(created, 'notes.md'), 'half-finished\n');
-
-      const state = inspectWorktree(created);
-      expect(state.clean).toBe(false);
-      expect(state.reason).toContain('uncommitted or untracked');
-    });
-
-    it('calls a modified tracked file work', () => {
-      created = createWorktree(repo, `ncl-test-${process.pid}-modified`);
-      fs.writeFileSync(path.join(created, 'README.md'), '# edited\n');
-
-      expect(inspectWorktree(created).clean).toBe(false);
-    });
-
-    it('calls a commit that exists nowhere else work', () => {
-      // `status --porcelain` is empty here. The danger is not dirt, it is a
-      // commit that would be stranded — the branch has no upstream to compare
-      // against, so the question is asked as "reachable from no other ref".
-      created = createWorktree(repo, `nanoclaw/ncl-test-${process.pid}-unmerged`);
-      fs.writeFileSync(path.join(created, 'feature.ts'), 'export const x = 1;\n');
-      inWorktree(created, ['add', '.']);
-      inWorktree(created, ['-c', 'user.email=t@e.com', '-c', 'user.name=T', 'commit', '-m', 'agent work']);
-
-      const state = inspectWorktree(created);
-      expect(state.clean).toBe(false);
-      expect(state.reason).toContain('exist nowhere else');
-    });
-
-    it('calls a commit that another branch already holds safe', () => {
-      created = createWorktree(repo, `nanoclaw/ncl-test-${process.pid}-merged`);
-      fs.writeFileSync(path.join(created, 'feature.ts'), 'export const x = 1;\n');
-      inWorktree(created, ['add', '.']);
-      inWorktree(created, ['-c', 'user.email=t@e.com', '-c', 'user.name=T', 'commit', '-m', 'agent work']);
-      // Someone merged it. Nothing would be lost by deleting the directory.
-      execFileSync('git', ['-C', repo, 'branch', `keeper-${process.pid}`, 'HEAD'], { stdio: 'ignore' });
-      execFileSync('git', ['-C', repo, 'fetch', created, `+HEAD:refs/heads/kept-${process.pid}`], { stdio: 'ignore' });
-
-      expect(inspectWorktree(created).clean).toBe(true);
-    });
-
-    it('calls a path git cannot inspect NOT clean', () => {
-      // A failed inspection is dirty. Proving safety is the only thing that
-      // authorizes a delete.
-      const plain = path.join(tmp, 'not-a-repo');
-      fs.mkdirSync(plain, { recursive: true });
-      expect(inspectWorktree(plain).clean).toBe(false);
-    });
-
-    it('calls an absent worktree clean, and says so exactly', () => {
-      // The one "clean" that means gone rather than empty — the reaper reads
-      // this reason to tell removal from refusal.
-      const state = inspectWorktree(path.join(tmp, 'never-existed'));
-      expect(state).toEqual({ clean: true, reason: 'the worktree is already gone' });
-    });
   });
 });

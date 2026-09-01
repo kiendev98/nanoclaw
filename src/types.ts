@@ -28,17 +28,11 @@ export interface AgentGroup {
    * The session this group was created FOR — set only on a repo-scoped worker.
    *
    * `workspace_path` says which repository a worker stands in;
-   * this says whose work it is doing. A worker exists for one repository and
-   * one conversation, and the pair is what three separate behaviours need:
-   *
-   * - **Reuse.** `workspace_path` is derived from (repo, origin session), so
-   *   `(origin_session_id, workspace_path)` IS the (repo, thread) key. A second
-   *   `create_agent({ repo })` in the same thread finds the first worker
-   *   instead of minting a rival on a branch that cannot see its work.
-   * - **Relay bound.** A worker's reply goes to the thread named by THIS
-   *   session row, never to one the worker names.
-   * - **Reaping.** "Is the originating thread done with it?" is a question
-   *   about this column.
+   * this says whose work it is doing. Together they are the REUSE key:
+   * `workspace_path` is derived from (repo, origin session), so
+   * `(origin_session_id, workspace_path)` IS the (repo, thread) pair. A second
+   * `create_agent({ repo })` in the same thread finds the first worker instead
+   * of minting a rival on a branch that cannot see its work.
    *
    * NULL / absent means "not a worker", which is every group that predates the
    * column. Optional for the same reason `workspace_path` is: absence and NULL

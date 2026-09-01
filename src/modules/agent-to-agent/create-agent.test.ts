@@ -15,7 +15,6 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { PendingApproval, Session } from '../../types.js';
-import { removeWorktree } from '../../worktree.js';
 
 // The folder-dedupe loop is disk-aware (A4): point GROUPS_DIR at a temp root
 // so the residue-skip test controls what is on disk. Absent for every other
@@ -331,10 +330,7 @@ describe('create_agent — repo-scoped workers', () => {
   });
 
   afterEach(() => {
-    if (created) {
-      removeWorktree(created);
-      fs.rmSync(created, { recursive: true, force: true });
-    }
+    if (created) fs.rmSync(created, { recursive: true, force: true });
     fs.rmSync(A2A_TEST_ROOT, { recursive: true, force: true });
   });
 
@@ -470,7 +466,6 @@ describe('create_agent — worker reuse for one (repo, thread) pair', () => {
   afterEach(() => {
     // Some cases below deliberately DO create a worker, so the worktree has to
     // go even though the reuse cases never make one.
-    removeWorktree(WORKTREE);
     fs.rmSync(WORKTREE, { recursive: true, force: true });
     fs.rmSync(A2A_TEST_ROOT, { recursive: true, force: true });
   });
@@ -558,8 +553,8 @@ describe('create_agent — worker reuse for one (repo, thread) pair', () => {
 
     mockCreateAgentGroup.mockClear();
     await runCreateAgent({ name: 'Plain' });
-    // An ordinary sub-agent belongs to its creator, not to a conversation:
-    // nothing relays for it and nothing reaps it.
+    // An ordinary sub-agent belongs to its creator, not to a conversation, so
+    // it can never be handed back as a reused worker.
     expect(mockCreateAgentGroup.mock.calls[0][0]).toMatchObject({ origin_session_id: null });
   });
 });

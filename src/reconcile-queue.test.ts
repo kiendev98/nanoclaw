@@ -16,7 +16,6 @@ function deferred(): { promise: Promise<void>; resolve: () => void; reject: (err
 const noopSingletons: Record<SingletonKey, () => Promise<void>> = {
   'singleton:egress-reheal': async () => {},
   'singleton:approvals-scan': async () => {},
-  'singleton:worker-reap': async () => {},
 };
 
 beforeEach(() => {
@@ -185,17 +184,13 @@ describe('reconcile queue', () => {
         'singleton:approvals-scan': async () => {
           calls.push('approvals');
         },
-        'singleton:worker-reap': async () => {
-          calls.push('worker-reap');
-        },
       },
     });
 
     queue.add('singleton:egress-reheal');
     queue.add(sessionKey('s-1'));
     queue.add('singleton:approvals-scan');
-    queue.add('singleton:worker-reap');
     await queue.idle();
-    expect(calls).toEqual(['egress', 'session', 'approvals', 'worker-reap']);
+    expect(calls).toEqual(['egress', 'session', 'approvals']);
   });
 });

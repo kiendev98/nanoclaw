@@ -48,11 +48,6 @@ export async function findWorkerForOrigin(
   );
 }
 
-/** Every repo-scoped worker — the reaper's candidate set. */
-export async function getWorkerAgentGroups(): Promise<AgentGroup[]> {
-  return getDb().all<AgentGroup>('SELECT * FROM agent_groups WHERE origin_session_id IS NOT NULL ORDER BY created_at');
-}
-
 export async function updateAgentGroup(
   id: string,
   updates: Partial<Pick<AgentGroup, 'name' | 'agent_provider' | 'workspace_path' | 'origin_session_id'>>,
@@ -94,13 +89,11 @@ export interface AgentGroupCascadeCounts {
  * Delete an agent group and every row that depends on it, FK-ordered, in one
  * transaction (#2525).
  *
- * Two callers need the identical cascade and must not drift: `ncl groups
- * delete`, and the worker reaper, which retires a worker whose originating
- * thread is finished. A second hand-written cascade is how a table gets missed
- * in one of them and left dangling.
+ * `ncl groups delete` is the caller. It is one function rather than an inline
+ * statement list because a second hand-written cascade is how a table gets
+ * missed in one copy and left dangling.
  *
- * OUT OF SCOPE, deliberately, in both cases: killing running containers, and
- * on-disk cleanup of `groups/<folder>/` or `data/v2-sessions/<group-id>/`. The
+ * OUT OF SCOPE, deliberately: killing running containers, and on-disk cleanup of `groups/<folder>/` or `data/v2-sessions/<group-id>/`. The
  * leftover `groups/<folder>/` is what stops a later create from adopting a dead
  * group's data under a new identity.
  *

@@ -19,9 +19,7 @@ export const SCHEMA = `
 -- the session it was created for. Together with workspace_path -- which is
 -- itself derived from (repo, origin session) -- it is the (repo, thread) key
 -- that makes a second create_agent for the same repo in the same thread return
--- the FIRST worker instead of minting a rival on a second branch. It also
--- bounds the reply relay (a worker reaches exactly one conversation, read from
--- this row, never one it names) and is what the reaper asks about. NULL means
+-- the FIRST worker instead of minting a rival on a second branch. NULL means
 -- "not a worker". Not an FK: an ON DELETE CASCADE would delete the worker when
 -- its origin session row goes, orphaning a worktree that may hold uncommitted
 -- work.

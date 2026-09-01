@@ -12,7 +12,6 @@ import {
   updateAgentGroup,
   deleteAgentGroup,
   findWorkerForOrigin,
-  getWorkerAgentGroups,
   createMessagingGroup,
   getMessagingGroup,
   getMessagingGroupByPlatform,
@@ -200,24 +199,10 @@ describe('agent groups', () => {
   });
 
   it('defaults the origin session to NULL, which means "not a worker"', async () => {
-    // Every group that predates the column is in exactly this state: nothing
-    // relays for it and nothing reaps it.
+    // Every group that predates the column is in exactly this state, and it is
+    // the state every group that is not a repo worker stays in.
     await createAgentGroup(ag());
     expect((await getAgentGroup('ag-1'))!.origin_session_id).toBeNull();
-  });
-
-  it('lists only workers — the reaper candidate set', async () => {
-    await createAgentGroup(ag());
-    await createAgentGroup({
-      ...ag(),
-      id: 'ag-2',
-      folder: 'worker',
-      workspace_path: '/worktrees/saber-nanoclaw-sess-7',
-      origin_session_id: 'sess-7',
-    });
-
-    const workers = await getWorkerAgentGroups();
-    expect(workers.map((w) => w.id)).toEqual(['ag-2']);
   });
 });
 
