@@ -705,6 +705,16 @@ export class ClaudeProvider implements AgentProvider {
           // `model` is optional, so an install that pins nothing would
           // otherwise have no model to show.
           recordModel((message as { model?: string }).model);
+          // The betas actually negotiated for this session, and the CLI that
+          // negotiated them. A model id ending in [1m] with a 165k window is
+          // either a missing beta or a server-side cap, and this line is what
+          // tells the two apart.
+          {
+            const init = message as { betas?: string[]; claude_code_version?: string; model?: string };
+            log(
+              `session: model=${init.model} betas=[${(init.betas ?? []).join(', ')}] cli=${init.claude_code_version}`,
+            );
+          }
           // What nanoclaw asked for. init reports the model but not the
           // effort, so this is the request, not a confirmation. Read from a
           // captured const, never `this`: `translateEvents` is a plain
