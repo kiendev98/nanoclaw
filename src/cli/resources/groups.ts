@@ -11,7 +11,7 @@ import { buildAgentGroupImage, killContainer } from '../../container-runner.js';
 import { requestWake } from '../../request-wake.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { createAgentGroup, deleteAgentGroupCascade, getAgentGroupByFolder } from '../../db/agent-groups.js';
-import { getDb, hasTable } from '../../db/connection.js';
+import { getDb } from '../../db/connection.js';
 import { getSession } from '../../db/sessions.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import {

@@ -259,6 +259,91 @@ export function worktreeRepoName(worktree: string): string {
   return path.basename(worktree);
 }
 
+/** Whether a worktree can be deleted without destroying anything. */
+export interface WorktreeState {
+  /** True only when deleting the directory would lose nothing at all. */
+  clean: boolean;
+  /** Why, in words a human reading a chat message can act on. */
+  reason: string;
+}
+
+/**
+ * Can this worktree be deleted without destroying work?
+ *
+ * The default answer is NO, and every path that cannot prove otherwise returns
+ * NO. Deleting an agent's uncommitted work is unrecoverable, while keeping a
+ * directory that could have gone costs a few megabytes and one log line, so the
+ * two errors are not remotely comparable.
+ *
+ * Three things count as work:
+ *
+ * - **Uncommitted changes and untracked files.** `status --porcelain` reports
+ *   both, which is why it is one call and not two. Ignored files (build output,
+ *   `node_modules`) deliberately do not count — they are not work, and treating
+ *   them as work would retain every worktree forever.
+ * - **Commits that exist nowhere else.** Not "unpushed": the branch a worker
+ *   gets has no upstream, so there is nothing to compare against. The real
+ *   question is whether any commit would VANISH, and that is answered by asking
+ *   git for the commits reachable from HEAD and from no other branch, remote or
+ *   tag. `nanoclaw/*` branches are excluded from that set, so another worker's
+ *   branch never counts as a safe home for these commits.
+ * - **Anything git refuses to talk about.** A failed inspection is dirty, not
+ *   clean.
+ *
+ * Note that `git worktree remove` does NOT delete the branch, so removing a
+ * CLEAN worktree loses nothing even in hindsight: every commit is contained
+ * elsewhere, and the ref survives for a later worktree to check out again.
+ *
+ * @param worktree The worktree path, as stored on `agent_groups.workspace_path`.
+ */
+export function inspectWorktree(worktree: string): WorktreeState {
+  if (!fs.existsSync(worktree)) return { clean: true, reason: 'the worktree is already gone' };
+
+  let status: string;
+  try {
+    status = git(worktree, ['status', '--porcelain']);
+  } catch (err) {
+    return { clean: false, reason: `git could not inspect it (${errText(err)})` };
+  }
+  const changed = status.split('\n').filter((line) => line.trim().length > 0);
+  if (changed.length > 0) {
+    return { clean: false, reason: `${changed.length} uncommitted or untracked file(s)` };
+  }
+
+  let unmerged: number;
+  try {
+    // `--exclude` applies to the NEXT ref selector only, so it narrows
+    // `--branches` and leaves `--remotes` and `--tags` whole. A worker branch
+    // that was pushed therefore counts as contained, which is correct: the
+    // commits survive the directory.
+    const counted = git(worktree, [
+      'rev-list',
+      '--count',
+      'HEAD',
+      '--not',
+      // `--exclude` strips the `refs/heads/` prefix before matching against
+      // `--branches`, so the pattern is bare. Written as `refs/heads/…` it
+      // matches nothing, the worker's OWN branch stays in the set, and every
+      // worktree reads as clean — verified against git.
+      '--exclude=nanoclaw/*',
+      '--branches',
+      '--remotes',
+      '--tags',
+    ]).trim();
+    unmerged = Number.parseInt(counted, 10);
+  } catch (err) {
+    return { clean: false, reason: `git could not count its commits (${errText(err)})` };
+  }
+  if (!Number.isFinite(unmerged)) return { clean: false, reason: 'git did not report a commit count' };
+  if (unmerged > 0) return { clean: false, reason: `${unmerged} commit(s) that exist nowhere else` };
+
+  return { clean: true, reason: 'no uncommitted changes and no commits that exist nowhere else' };
+}
+
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message.split('\n')[0] : String(err);
+}
+
 /**
  * Remove a worktree, tolerating one that is already gone.
  *

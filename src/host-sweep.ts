@@ -97,6 +97,22 @@ export function startHostSweep(): void {
         }
       },
       // MODULE-HOOK:approvals-reason-sweep:end
+      // Retire repo-scoped workers whose conversation is finished. Nothing
+      // else in the host removes them, because nothing else knows they were
+      // temporary. Central-DB scan, once per tick — and deliberately NOT a
+      // second timer: the host has one, and a second is a second thing to
+      // start, stop and reason about at shutdown.
+      // MODULE-HOOK:agent-to-agent-worker-reap:start
+      'singleton:worker-reap': async () => {
+        try {
+          const { reapFinishedWorkers } = await import('./modules/agent-to-agent/worker-reap.js');
+          const reaped = await reapFinishedWorkers();
+          if (reaped > 0) log.info('Retired finished repo workers', { reaped });
+        } catch (err) {
+          log.error('Worker reap sweep failed', { err });
+        }
+      },
+      // MODULE-HOOK:agent-to-agent-worker-reap:end
     },
   });
   // Event feeds — additive over the resync floor: mail writes and runtime
@@ -144,6 +160,7 @@ async function sweep(): Promise<void> {
     log.error('Host sweep error', { err });
   }
   tickQueue.add('singleton:approvals-scan');
+  tickQueue.add('singleton:worker-reap');
 
   // The tick ends — and the next one is armed — only after everything this
   // tick enqueued has run. Delayed backoff retries don't hold the tick open.
