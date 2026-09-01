@@ -6,6 +6,7 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
+import { recordContextUsage, recordContextWindow, recordModel, recordUtilization } from '../message-footer.js';
 import { AGENT_DIR } from '../roots.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
 import { shimCwd } from './cwd-shim.js';
@@ -608,6 +609,10 @@ export class ClaudeProvider implements AgentProvider {
         yield { type: 'activity' };
 
         if (message.type === 'system' && message.subtype === 'init') {
+          // init reports the model the turn actually ran on. container.json's
+          // `model` is optional, so an install that pins nothing would
+          // otherwise have no model to show.
+          recordModel((message as { model?: string }).model);
           yield { type: 'init', continuation: message.session_id };
         } else if (message.type === 'assistant') {
           // Surface each assistant message's text as it streams in. The final
@@ -626,6 +631,13 @@ export class ClaudeProvider implements AgentProvider {
           // result reports. Blocks split across ASSISTANT MESSAGES (a tool
           // call between them) remain unparseable mid-turn by design; the
           // poll-loop's midTurnSent===0 fallback and wrap-nudge cover that.
+          // Window occupancy, refreshed per assistant message rather than per
+          // result. Messages are delivered mid-turn, before any result
+          // exists, so reading it only from the result would put a
+          // turn-old percentage in every footer.
+          recordContextUsage(
+            (message as { message?: { usage?: Parameters<typeof recordContextUsage>[0] } }).message?.usage,
+          );
           const content = (message as { message?: { content?: Array<{ type?: string; text?: string }> } }).message
             ?.content;
           if (Array.isArray(content)) {
@@ -640,7 +652,22 @@ export class ClaudeProvider implements AgentProvider {
           // (e.g. a non-retryable 403 billing_error) carry their message in
           // `errors[]` instead. Surface either so the poll-loop can deliver a
           // billing/quota notice to the user rather than dropping the turn.
-          const m = message as { result?: string; is_error?: boolean; errors?: string[] };
+          const m = message as {
+            result?: string;
+            is_error?: boolean;
+            errors?: string[];
+            modelUsage?: Record<string, { contextWindow?: number }>;
+          };
+          // Only the result carries the model's window size. Take the largest
+          // reported: `modelUsage` also holds subagent and compaction models,
+          // and dividing the main loop's tokens by a small auxiliary model's
+          // window would overstate the percentage.
+          recordContextWindow(
+            Object.values(m.modelUsage ?? {}).reduce<number | undefined>(
+              (max, entry) => (entry?.contextWindow && (!max || entry.contextWindow > max) ? entry.contextWindow : max),
+              undefined,
+            ),
+          );
           const text = m.result ?? (m.errors && m.errors.length > 0 ? m.errors.join('\n') : null);
           yield { type: 'result', text, isError: m.is_error === true };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
@@ -659,6 +686,12 @@ export class ClaudeProvider implements AgentProvider {
           //   'out_of_credits'  → genuinely out of credits (billing)
           //   otherwise         → a transient window limit that resets.
           const info = (message as { rate_limit_info?: SdkRateLimitInfo }).rate_limit_info;
+          // Recorded for the message footer before any classification. These
+          // events fire only when a value CHANGES, so an 'allowed' event is
+          // the only place the current utilization is ever reported —
+          // dropping it because the turn is healthy is how the footer would
+          // end up permanently blank.
+          recordUtilization(info?.rateLimitType, info?.utilization);
           const blocked = classifyRateLimitEvent(info);
           if (!blocked) {
             // Informational ('allowed' / 'allowed_warning') — never kill the turn.
