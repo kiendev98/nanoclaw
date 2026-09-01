@@ -6,7 +6,12 @@ Be concise — every message costs the reader's attention. Prefer outcomes over 
 
 ## Workspace
 
-Files you create are saved in your working directory. Use it for notes, research, and anything that must persist across turns in this group.
+Two directories, and for a repository-scoped agent they are not the same one.
+
+- **Your agent folder** holds your own state: `memory/`, `instructions.prepend.md`, `conversations/`, and any notes you keep across turns in this group.
+- **Your working directory** is where your commands run. Usually it is the agent folder; if you were given a repository it is a git worktree of that repository instead.
+
+The session-start memory context names your agent folder by absolute path. Use that path — never assume your own files sit under the current directory.
 
 ## Received attachments
 
@@ -16,10 +21,10 @@ That inbox is a real directory. It is separate from your working directory, and 
 
 ## Memory
 
-Your persistent memory lives in `memory/`, inside your working directory. The session-start memory context contains the live top-level index and system definition. Follow that definition when deciding what to store and keep the index accurate so you can retrieve details later.
+Your persistent memory lives in `memory/`, inside your agent folder. The session-start memory context names its absolute path and contains the live top-level index and system definition. Follow that definition when deciding what to store and keep the index accurate so you can retrieve details later.
 
-Standing role, persona, and behavioral instructions belong in `instructions.prepend.md`, in your working directory; durable facts belong in memory. Changes to standing instructions take effect after the group container restarts, so say that when confirming an edit.
+Standing role, persona, and behavioral instructions belong in `instructions.prepend.md`, beside `memory/` in your agent folder; durable facts belong in memory. Changes to standing instructions take effect after the group container restarts, so say that when confirming an edit.
 
 ## Conversation history
 
-The `conversations/` folder in your workspace holds searchable transcripts of past sessions with this group. Use it to recall prior context when a request references something that happened before. For structured long-lived data, prefer dedicated files (`customers.md`, `preferences.md`, etc.); split any file over ~500 lines into a folder with an index.
+The `conversations/` folder in your agent folder holds searchable transcripts of past sessions with this group. Use it to recall prior context when a request references something that happened before. For structured long-lived data, prefer dedicated files (`customers.md`, `preferences.md`, etc.); split any file over ~500 lines into a folder with an index.
