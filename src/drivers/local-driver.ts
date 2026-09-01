@@ -93,6 +93,26 @@ const AUTH_OVERRIDE_ENV_VARS = [
   'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
 ] as const;
 
+/**
+ * Environment the host owns, which a composed spec may never override.
+ *
+ * `HOME` is the one that matters and the reason this list exists. Composition
+ * sets `HOME=/home/node` whenever the spec carries a `runAs`
+ * (`container-runner.ts`), because inside the image that uid has no passwd
+ * entry and HOME would otherwise resolve to `/`. Copied onto a host process it
+ * is simply wrong: the directory does not exist, and the first thing that tries
+ * to create it dies with `ENOTSUP` on macOS.
+ *
+ * The quieter failure is the one worth naming. `HOME` is how the SDK finds
+ * `~/.claude` and how Claude Code derives its keychain entry, so a spec-supplied
+ * HOME does not only break a mkdir — it detaches the agent from the user's
+ * harness and from the credentials this whole driver exists to reuse.
+ *
+ * The rest are listed for the same reason: they describe the container's
+ * filesystem and identity, not this machine's.
+ */
+const HOST_OWNED_ENV = ['HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR'] as const;
+
 /** Container paths this driver understands, mapped to the runner's root variables. */
 const ROOT_ENV_BY_CONTAINER_PATH: Record<string, string> = {
   '/workspace': 'NANOCLAW_WORKSPACE_DIR',
@@ -110,6 +130,33 @@ interface SessionRecord {
   key: SessionKey;
   labels: Record<string, string>;
   startedAt: string;
+}
+
+/**
+ * Find the `claude` binary on the host's PATH.
+ *
+ * The runner defaults to `/pnpm/claude`, where the agent image installs it.
+ * Nothing is there on a host, so the driver has to say where the real one is.
+ * That process is also what reads the OS keychain, which is what lets a host
+ * run authenticate as the user with no token — so failing to find it is not a
+ * missing convenience, it is the whole credential story gone.
+ *
+ * Returns undefined rather than throwing: the runner then falls back to its
+ * container default and fails with the SDK's own message, which names the path
+ * it looked for. That is a better error than one invented here.
+ */
+function resolveClaudeExecutable(pathEnv: string | undefined): string | undefined {
+  for (const dir of (pathEnv ?? '').split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, 'claude');
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // not here, keep looking
+    }
+  }
+  return undefined;
 }
 
 /** Is this pid still ours and alive? Signal 0 tests without delivering. */
@@ -292,14 +339,27 @@ export class LocalSessionDriver implements SessionDriver {
     contributedEnv: Record<string, string> | undefined,
     rootEnv: Record<string, string>,
   ): ChildProcess {
-    const env: Record<string, string> = {};
+    const hostEnv: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined) env[k] = v;
+      if (v !== undefined) hostEnv[k] = v;
     }
+
+    const env = { ...hostEnv };
     // Composed env first, then the contributed lane, matching the seam's
     // stated collision order.
     Object.assign(env, containerEnv, contributedEnv ?? {}, rootEnv);
+
+    // Then take the host's own back, unconditionally. These describe this
+    // machine, and a spec composed for a container cannot know them.
+    for (const key of HOST_OWNED_ENV) {
+      if (hostEnv[key] !== undefined) env[key] = hostEnv[key];
+      else delete env[key];
+    }
     for (const key of AUTH_OVERRIDE_ENV_VARS) delete env[key];
+
+    const executable = resolveClaudeExecutable(env.PATH);
+    if (executable) env.NANOCLAW_CLAUDE_EXECUTABLE = executable;
+    else log.warn('No `claude` on PATH — the agent will fail with the container default path', { name });
 
     const child = spawn(this.#runtimeBin, ['run', this.#runnerEntry], {
       cwd: rootEnv.NANOCLAW_AGENT_DIR,

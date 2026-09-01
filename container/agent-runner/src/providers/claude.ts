@@ -562,7 +562,14 @@ export class ClaudeProvider implements AgentProvider {
         cwd: input.cwd,
         additionalDirectories: this.additionalDirectories,
         resume: input.continuation,
-        pathToClaudeCodeExecutable: '/pnpm/claude',
+        // `/pnpm/claude` is where the agent image installs the CLI, and it
+        // stays the default so a container passes exactly what it always did.
+        // A host process has no such path: the binary is wherever the user
+        // installed it, and the driver resolves that and names it here. It
+        // matters beyond the path — this is the process that reads the OS
+        // keychain, so it is also what makes the host run authenticate as the
+        // user with no token.
+        pathToClaudeCodeExecutable: process.env.NANOCLAW_CLAUDE_EXECUTABLE || '/pnpm/claude',
         systemPrompt: instructions
           ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions }
           : undefined,
