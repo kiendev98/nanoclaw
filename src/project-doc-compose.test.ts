@@ -301,7 +301,7 @@ describe('composeGroupProjectDoc spec', () => {
     });
 
     expect(doc.indexOf('# NanoClaw Runtime Contract')).toBeLessThan(doc.indexOf('# Memory System'));
-    expect(doc.indexOf('# Memory System')).toBeLessThan(doc.indexOf('# NanoClaw Module: agents'));
+    expect(doc.indexOf('# Memory System')).toBeLessThan(doc.indexOf('# NanoClaw Module: core'));
   });
 
   // Tolerated so a partial payload install still spawns, but never silent: an

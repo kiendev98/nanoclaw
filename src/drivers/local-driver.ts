@@ -135,6 +135,27 @@ const CLAUDE_SESSION_ENV_VARS = [
  * failure both prevent is silent: the agent starts, answers, and is simply
  * wrong about which account it is or whose session it belongs to.
  */
+/**
+ * The agent's working directory.
+ *
+ * NOT necessarily the group folder. cwd is what Claude Code walks up from to
+ * discover a project's `CLAUDE.md`, `.claude/skills/` and
+ * `.claude/settings.json` — verified empirically, and it does not stop at a git
+ * repository root. So cwd is the ONLY lever that puts an agent inside a given
+ * repository with that repository's context loaded.
+ *
+ * `NANOCLAW_AGENT_DIR` stays the agent's own state directory (memory, footer
+ * telemetry) in every case. The two were one value, which is precisely what
+ * bound an agent to a single repository.
+ *
+ * Falls back to the group folder, so an install that sets no override keeps
+ * its exact previous behaviour.
+ */
+export function resolveSpawnCwd(env: NodeJS.ProcessEnv, rootEnv: NodeJS.ProcessEnv): string | undefined {
+  const projectDir = (env.NANOCLAW_PROJECT_DIR ?? '').trim();
+  return projectDir || rootEnv.NANOCLAW_AGENT_DIR;
+}
+
 export function stripInheritedClaudeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   for (const key of AUTH_OVERRIDE_ENV_VARS) delete env[key];
   for (const key of CLAUDE_SESSION_ENV_VARS) delete env[key];
@@ -410,7 +431,7 @@ export class LocalSessionDriver implements SessionDriver {
     else log.warn('No `claude` on PATH — the agent will fail with the container default path', { name });
 
     const child = spawn(this.#runtimeBin, ['run', this.#runnerEntry], {
-      cwd: rootEnv.NANOCLAW_AGENT_DIR,
+      cwd: resolveSpawnCwd(env, rootEnv),
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: false,

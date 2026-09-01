@@ -2,6 +2,7 @@ import path from 'path';
 
 import { findByRouting } from './destinations.js';
 import type { MessageInRow } from './db/messages-in.js';
+import { stripLeadingMentions } from './mention-strip.js';
 import { WORKSPACE_DIR } from './roots.js';
 import { TIMEZONE, formatLocalTime, formatLocalStamp } from './timezone.js';
 
@@ -26,13 +27,28 @@ export function isSessionEcho(msg: MessageInRow): boolean {
  */
 export type CommandCategory = 'admin' | 'filtered' | 'passthrough' | 'none';
 
-const ADMIN_COMMANDS = new Set(['/remote-control', '/clear', '/compact', '/context', '/cost', '/files', '/upload-trace']);
+const ADMIN_COMMANDS = new Set([
+  '/remote-control',
+  '/clear',
+  '/compact',
+  '/context',
+  '/cost',
+  '/files',
+  '/upload-trace',
+]);
 const FILTERED_COMMANDS = new Set(['/help', '/login', '/logout', '/doctor', '/config', '/start']);
 
 export interface CommandInfo {
   category: CommandCategory;
   command: string; // the command name (e.g., '/clear')
-  text: string; // full original text
+  /**
+   * The text to act on. For a command this is the message with any leading
+   * channel mention removed, because `formatMessagesWithCommands` hands it
+   * STRAIGHT to the SDK as the prompt — `<@U123> /compact` is not a command the
+   * SDK dispatches. For a non-command it is the original text, mention intact:
+   * who was addressed is part of what the agent should read.
+   */
+  text: string;
   senderId: string | null;
 }
 
@@ -49,13 +65,20 @@ export interface CommandInfo {
  */
 export function categorizeMessage(msg: MessageInRow): CommandInfo {
   const content = parseContent(msg.content);
-  const text = (content.text || '').trim();
+  const original = (content.text || '').trim();
+  // Slack swallows a bare leading '/', so tagging the bot is the ONLY way a
+  // user can send one — and that makes the text `<@U123> /compact`, which fails
+  // the test below. Without this strip every slash command silently degraded to
+  // prose. See ./mention-strip.ts.
+  const text = stripLeadingMentions(original);
   const senderId = extractSenderId(msg, content);
 
   // Cross-session echo rows are ambient copies of another conversation —
   // a copied "/clear" etc. must never execute here.
   if (isSessionEcho(msg) || !text.startsWith('/')) {
-    return { category: 'none', command: '', text, senderId };
+    // Not a command: hand back what the sender actually wrote. The mention is
+    // information here, not noise.
+    return { category: 'none', command: '', text: original, senderId };
   }
 
   // Extract the command name (e.g., '/clear' from '/clear some args')
@@ -80,7 +103,10 @@ export function categorizeMessage(msg: MessageInRow): CommandInfo {
 export function isClearCommand(msg: MessageInRow): boolean {
   if (isSessionEcho(msg)) return false;
   const content = parseContent(msg.content);
-  const text = (content.text || '').trim();
+  // Same mention strip as categorizeMessage — this is a separate read of the
+  // same text, and a `@bot /clear` that categorized as admin but failed here
+  // would reach the SDK without the session ever being cleared.
+  const text = stripLeadingMentions((content.text || '').trim());
   return text.toLowerCase().startsWith('/clear');
 }
 
@@ -139,9 +165,7 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
     inReplyTo: first?.id ?? null,
     // Echo rows riding along with a task must not disable one-door delivery:
     // taskRun as long as at least one task row and no non-task/non-echo row.
-    taskRun:
-      messages.some((m) => m.kind === 'task') &&
-      messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
+    taskRun: messages.some((m) => m.kind === 'task') && messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
   };
 }
 

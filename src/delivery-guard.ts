@@ -21,8 +21,13 @@ export interface DeliveryGuardSpec {
    * answered (notify) without ever creating a hold. Return false to stop.
    */
   precheck?: (content: Record<string, unknown>, session: Session) => boolean | Promise<boolean>;
-  /** Create the hold (the domain's requestApproval call — card text lives with the domain). */
-  requestHold: (content: Record<string, unknown>, session: Session) => Promise<void>;
+  /**
+   * Create the hold (the domain's requestApproval call — card text lives with
+   * the domain). Omit for an action whose decide fn never returns hold
+   * (e.g. workers.create) — runGuarded logs and denies if a hold somehow
+   * reaches it anyway, rather than silently dropping the request.
+   */
+  requestHold?: (content: Record<string, unknown>, session: Session) => Promise<void>;
   /** Tell the requester about a deny. */
   onDeny?: (content: Record<string, unknown>, session: Session, reason: string) => void | Promise<void>;
 }
@@ -56,6 +61,14 @@ export async function runGuarded(
     return;
   }
   if (decision.effect === 'hold') {
+    if (!spec.requestHold) {
+      log.error('Guard held an action with no requestHold configured — denying rather than dropping it', {
+        action,
+        reason: decision.reason,
+      });
+      await spec.onDeny?.(content, session, 'no admin-approval path is configured for this action');
+      return;
+    }
     await spec.requestHold(content, session);
     return;
   }

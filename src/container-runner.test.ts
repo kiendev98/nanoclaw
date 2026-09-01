@@ -119,6 +119,24 @@ function compose(
   });
 }
 
+/**
+ * A repo-scoped worker: the only difference from an ordinary group is where the
+ * process stands, and cwd is what decides whose CLAUDE.md, `.claude/skills/` and
+ * `.claude/settings.json` load.
+ */
+function composeWithWorkspace(workspacePath: string | null) {
+  return composeSessionSpec({
+    agentGroup: { ...agentGroup, workspace_path: workspacePath },
+    session,
+    containerName: 'nanoclaw-v2-agent-one-1700000000000',
+    mounts,
+    containerConfig,
+    mailboxEnvironment: { NANOCLAW_MAILBOX_BACKEND: 'sqlite' },
+    contribution: {} as never,
+    gateway: {} as never,
+  });
+}
+
 function composeWithFolder(folder: string) {
   return composeSessionSpec({
     agentGroup: { ...agentGroup, folder },
@@ -154,6 +172,39 @@ describe('composeSessionSpec', () => {
 
   it('passes non-secret mailbox environment on the composed lane', () => {
     expect(compose().containers[0].env.NANOCLAW_MAILBOX_BACKEND).toBe('sqlite');
+  });
+
+  /**
+   * `workspace_path` is the whole of "this agent works in that repo". Claude
+   * Code resolves project memory and project skills by walking UP from cwd and
+   * does not stop at a git repository root, so cwd — and nothing else — decides
+   * which repository's `CLAUDE.md`, `.claude/skills/` and
+   * `.claude/settings.json` a session loads.
+   *
+   * It rides the composed env lane as `NANOCLAW_PROJECT_DIR`, which is what
+   * `roots.ts` and the local driver's `resolveSpawnCwd` already read (a5622111).
+   */
+  it('publishes a repo-scoped group workspace as NANOCLAW_PROJECT_DIR', () => {
+    const spec = composeWithWorkspace('/Users/kien/.config/nanoclaw/worktrees/saber-nanoclaw-scout');
+    expect(spec.containers[0].env.NANOCLAW_PROJECT_DIR).toBe(
+      '/Users/kien/.config/nanoclaw/worktrees/saber-nanoclaw-scout',
+    );
+  });
+
+  it('sets no NANOCLAW_PROJECT_DIR for a group without one', () => {
+    // Absence is the contract, not an empty string: the driver falls back to
+    // NANOCLAW_AGENT_DIR, and an empty value reaching `spawn` would resolve cwd
+    // to the host's own checkout — the 11,618-token CLAUDE.md leak of 5a592b62.
+    expect(composeWithWorkspace(null).containers[0].env).not.toHaveProperty('NANOCLAW_PROJECT_DIR');
+    expect(compose().containers[0].env).not.toHaveProperty('NANOCLAW_PROJECT_DIR');
+  });
+
+  it('does not move the agent STATE directory — only cwd', () => {
+    // Memory and footer telemetry live in the group folder and must not follow
+    // cwd into a repository. The group-folder mount is what carries them, and
+    // it is unchanged by a workspace_path.
+    const withRepo = composeWithWorkspace('/Users/kien/.config/nanoclaw/worktrees/saber-nanoclaw-scout');
+    expect(withRepo.containers[0].mounts).toEqual(compose().containers[0].mounts);
   });
 
   it('the gateway contribution fills the contributed lane last and wins a collision', () => {

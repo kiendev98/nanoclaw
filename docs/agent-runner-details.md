@@ -443,7 +443,7 @@ themselves are never shown.
 
 - **`system`** — host action result, rendered as `<system_response>`:
   ```xml
-  <system_response from="host" action="create_agent" status="success">{"agent_group_id": "ag-456"}</system_response>
+  <system_response from="host" action="create_worker" status="success">{"agent_group_id": "ag-456"}</system_response>
   ```
 
 **Batch formatting:** All pending messages are combined into one prompt. The prompt opens
@@ -650,27 +650,44 @@ ncl tasks cancel <series_id>
 
 Implementation: the host writes `messages_in` task rows into the agent group's system session (`thread_id = system:tasks`). The host sweep wakes that system-session container when a task is due. The task agent chooses its destination at fire time by emitting `<message to="name">...</message>` or using `send_message`.
 
-#### create_agent
+#### create_worker
 
-Create a long-lived companion sub-agent. The `name` becomes a destination the creating
-agent can address. (There is no `register_agent_group` tool — this replaced it.)
+Delegate work into ANOTHER repository. Creates (or reuses) a worker — a separate agent
+with its own process standing in a git worktree of that repository, so it loads that
+repository's `CLAUDE.md`, skills and settings — and delivers `task` to it as its brief,
+in the same call.
 
 ```typescript
 {
-  name: 'create_agent',
+  name: 'create_worker',
   params: {
-    name: string,           // human-readable name; also the destination name (required)
-    instructions?: string,  // CLAUDE.md content for the new agent (role, personality)
+    repo: string,   // repository NAME, resolved host-side against NANOCLAW_PROJECT_ROOTS (required)
+    task: string,   // the brief, delivered as the worker's first message (required)
+    name?: string,  // destination name for the worker; defaults to <repo>-worker
   }
 }
 ```
 
-Implementation: fire-and-forget. Writes a `messages_out` row with `kind: 'system'`,
-`action: 'create_agent'`, `requestId`, `name`, and `instructions`. The container is
-untrusted and does not gate itself; the host authorizes by CLI scope — trusted owner groups
-(scope `global`) create directly, confined groups require admin approval
-(`src/modules/agent-to-agent/create-agent.ts`) — then creates the entity rows and notifies
-the agent via a chat message when the agent is ready.
+Implementation: BLOCKING but bounded. Writes a `messages_out` row with `kind: 'system'`,
+`action: 'create_worker'`, `requestId`, `waitUntil`, `repo`, `task` and `name`, then polls
+`findCliResponse(requestId)` for up to 60 seconds (the canvas_read / ask_user_question
+pattern). It never blocks on a human: creating a worker needs no admin approval (the guard's
+`workers.create` decision ALLOWs unconditionally; containment is the operator's
+`NANOCLAW_PROJECT_ROOTS` repo allowlist, not a hold), so the only thing that can still
+outrun the bound is the worktree checkout itself. On timeout the tool reports that
+creation is still running, and the host — which knows from `waitUntil` that nobody is
+polling any more — wakes the caller with the outcome instead. Host side:
+`src/modules/agent-to-agent/create-worker.ts`.
+
+A worker's replies reach its orchestrator by code, not by the worker addressing them:
+`writeSessionRouting` gives a worker session `channelType: 'agent'` and its orchestrator's
+group id, derived from `agent_groups.origin_session_id`, and `delivery.ts` routes that
+through `routeAgentMessage`. The `a2a.send` guard still applies, and a worker holds exactly
+one destination row — for its own orchestrator.
+
+There is no `create_agent` MCP tool. Companion agents are provisioned by the operator; the
+host-side `create_agent` delivery action still exists for those paths
+(`src/modules/agent-to-agent/create-agent.ts`, and `slack-agent-flow` registers over it).
 
 #### Self-modification: install_packages, add_mcp_server
 

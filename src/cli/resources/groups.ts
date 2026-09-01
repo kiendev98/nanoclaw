@@ -10,8 +10,8 @@ import {
 import { buildAgentGroupImage, killContainer } from '../../container-runner.js';
 import { requestWake } from '../../request-wake.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
-import { createAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
-import { getDb, hasTable } from '../../db/connection.js';
+import { createAgentGroup, deleteAgentGroupCascade, getAgentGroupByFolder } from '../../db/agent-groups.js';
+import { getDb } from '../../db/connection.js';
 import { getSession } from '../../db/sessions.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import {
@@ -213,82 +213,15 @@ registerResource({
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
-        const db = getDb();
 
         // Verify the group exists before doing anything — preserves the
         // genericDelete behaviour of throwing "not found" for unknown IDs.
-        const exists = await db.get('SELECT 1 FROM agent_groups WHERE id = ? LIMIT 1', id);
+        const exists = await getDb().get('SELECT 1 FROM agent_groups WHERE id = ? LIMIT 1', id);
         if (!exists) throw new Error(`group not found: ${id}`);
 
-        const hasAgentDestinations = await hasTable(db, 'agent_destinations');
-        const hasPendingApprovals = await hasTable(db, 'pending_approvals');
-
-        // FK-ordered cascade. The async driver transaction rolls
-        // back the whole thing if any statement throws (e.g. an FK constraint
-        // we missed), so the central DB stays consistent. The `removed` counts
-        // are sourced from each DELETE's `changes` so they describe exactly
-        // what the transaction did, not a separate pre-flight snapshot.
-        const removed = await db.transaction(async () => {
-          const counts = {
-            sessions: 0,
-            pending_questions: 0,
-            pending_approvals: 0,
-            agent_destinations_owned: 0,
-            agent_destinations_pointing: 0,
-            pending_sender_approvals: 0,
-            pending_channel_approvals: 0,
-            messaging_group_agents: 0,
-            agent_group_members: 0,
-            user_roles: 0,
-            container_configs: 0,
-          };
-
-          if (hasAgentDestinations) {
-            counts.agent_destinations_owned = (
-              await db.run('DELETE FROM agent_destinations WHERE agent_group_id = ?', id)
-            ).changes;
-            counts.agent_destinations_pointing = (
-              await db.run('DELETE FROM agent_destinations WHERE target_type = ? AND target_id = ?', 'agent', id)
-            ).changes;
-          }
-          counts.pending_questions = (
-            await db.run(
-              'DELETE FROM pending_questions WHERE session_id IN (SELECT id FROM sessions WHERE agent_group_id = ?)',
-              id,
-            )
-          ).changes;
-          if (hasPendingApprovals) {
-            counts.pending_approvals = (
-              await db.run(
-                'DELETE FROM pending_approvals WHERE agent_group_id = ? OR session_id IN (SELECT id FROM sessions WHERE agent_group_id = ?)',
-                id,
-                id,
-              )
-            ).changes;
-          }
-          counts.sessions = (await db.run('DELETE FROM sessions WHERE agent_group_id = ?', id)).changes;
-          counts.pending_sender_approvals = (
-            await db.run('DELETE FROM pending_sender_approvals WHERE agent_group_id = ?', id)
-          ).changes;
-          counts.pending_channel_approvals = (
-            await db.run('DELETE FROM pending_channel_approvals WHERE agent_group_id = ?', id)
-          ).changes;
-          counts.messaging_group_agents = (
-            await db.run('DELETE FROM messaging_group_agents WHERE agent_group_id = ?', id)
-          ).changes;
-          counts.agent_group_members = (
-            await db.run('DELETE FROM agent_group_members WHERE agent_group_id = ?', id)
-          ).changes;
-          counts.user_roles = (await db.run('DELETE FROM user_roles WHERE agent_group_id = ?', id)).changes;
-          // migration-014 has ON DELETE CASCADE on container_configs.agent_group_id;
-          // the explicit delete here mirrors the other tables and surfaces the count.
-          counts.container_configs = (
-            await db.run('DELETE FROM container_configs WHERE agent_group_id = ?', id)
-          ).changes;
-          await db.run('DELETE FROM agent_groups WHERE id = ?', id);
-          return counts;
-        });
-
+        // The cascade itself lives in db/agent-groups.ts: FK order is easy to
+        // get wrong, and a table missed here is left dangling in silence.
+        const removed = await deleteAgentGroupCascade(id);
         return { deleted: id, removed };
       },
     },

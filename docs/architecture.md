@@ -913,7 +913,7 @@ sweep.
 
 | Tool | What it does |
 |------|-------------|
-| `create_agent` | `action: 'create_agent'` (name + instructions); host creates the agent group (replaces the old `register_agent_group`) |
+| `create_worker` | `action: 'create_worker'` (repo + task); host resolves the repo, creates or reuses the worktree and agent group, and delivers the brief. Blocking, bounded at 60s. No admin approval — contained by the operator's `NANOCLAW_PROJECT_ROOTS` repo allowlist, not by a hold. There is no `create_agent` MCP tool — the host-side action of that name is driven by the operator and by `slack-agent-flow` |
 | `install_packages` | `action: 'install_packages'`; on approval host rebuilds the per-agent image and restarts |
 | `add_mcp_server` | `action: 'add_mcp_server'`; on approval host updates `container.json` and restarts |
 

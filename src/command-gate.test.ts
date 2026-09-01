@@ -87,3 +87,51 @@ describe('normal messages pass through', () => {
     expect(await gateCommand('/whatever', 'telegram:1', 'ag-1')).toEqual({ action: 'pass' });
   });
 });
+
+/**
+ * Slack swallows a bare leading '/', so tagging the bot is the ONLY way a user
+ * can send one — and that made every gated command arrive as
+ * `<@U123> /compact`, which failed `text.startsWith('/')`. The gate saw prose,
+ * passed it through, and `/compact` reached the agent as a sentence instead of
+ * acting on the session. See src/mention-strip.ts.
+ */
+describe('a leading channel mention does not hide the command', () => {
+  it('gates an admin command sent with a mention', async () => {
+    expect(await gateCommand('<@U123> /clear', 'telegram:nobody', 'ag-1')).toEqual({
+      action: 'deny',
+      command: '/clear',
+    });
+  });
+
+  it('gates an admin command sent with a labelled mention', async () => {
+    expect(await gateCommand('<@U123|nanobot> /compact', 'telegram:nobody', 'ag-1')).toEqual({
+      action: 'deny',
+      command: '/compact',
+    });
+  });
+
+  it('filters a filtered command sent with a mention', async () => {
+    expect(await gateCommand('<@U123> /start', 'telegram:1', 'ag-1')).toEqual({ action: 'filter' });
+  });
+
+  it('handles a colon after the mention, which is how Slack renders a reply', async () => {
+    expect(await gateCommand('<@U123>: /start', 'telegram:1', 'ag-1')).toEqual({ action: 'filter' });
+  });
+
+  it('handles several mentions', async () => {
+    expect(await gateCommand('<@U123> <@U456> /start', 'telegram:1', 'ag-1')).toEqual({ action: 'filter' });
+  });
+
+  it('reads the command out of the JSON content shape too', async () => {
+    const content = JSON.stringify({ text: '<@U123> /clear', senderId: 'telegram:nobody' });
+    expect(await gateCommand(content, 'telegram:nobody', 'ag-1')).toEqual({ action: 'deny', command: '/clear' });
+  });
+
+  it('leaves a mid-sentence mention alone — that is prose, not an address', async () => {
+    expect(await gateCommand('tell <@U123> /clear is broken', 'telegram:1', 'ag-1')).toEqual({ action: 'pass' });
+  });
+
+  it('passes a mention with no command at all', async () => {
+    expect(await gateCommand('<@U123> what is up', 'telegram:1', 'ag-1')).toEqual({ action: 'pass' });
+  });
+});

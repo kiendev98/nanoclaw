@@ -7,6 +7,7 @@
  *   "Permission denied" response written directly to messages_out
  * - Normal messages: pass through unchanged
  */
+import { stripLeadingMentions } from './mention-strip.js';
 import { hasAdminPrivilege } from './modules/permissions/db/user-roles.js';
 
 export type GateResult = { action: 'pass' } | { action: 'filter' } | { action: 'deny'; command: string };
@@ -28,6 +29,13 @@ export async function gateCommand(content: string, userId: string | null, agentG
   } catch {
     text = content.trim();
   }
+
+  // Slack swallows a bare leading '/', so the only way a user can send one is
+  // to tag the bot first — which makes the text `<@U123> /compact` and fails
+  // the test below. Without this strip every admin command silently degraded to
+  // prose: `/compact` and `/context` stopped acting on the session, and the
+  // gate never saw a command to authorize. See src/mention-strip.ts.
+  text = stripLeadingMentions(text);
 
   if (!text.startsWith('/')) return { action: 'pass' };
 
