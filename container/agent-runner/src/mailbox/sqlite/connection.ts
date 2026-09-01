@@ -19,8 +19,10 @@
  */
 import { Database } from 'bun:sqlite';
 
-const DEFAULT_INBOUND_PATH = '/workspace/inbound.db';
-const DEFAULT_OUTBOUND_PATH = '/workspace/outbound.db';
+import { rooted } from '../../roots.js';
+
+const DEFAULT_INBOUND_PATH = rooted('/workspace/inbound.db');
+const DEFAULT_OUTBOUND_PATH = rooted('/workspace/outbound.db');
 
 let _inbound: Database | null = null;
 let _outbound: Database | null = null;

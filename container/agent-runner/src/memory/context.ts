@@ -1,6 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 
+import { AGENT_DIR } from '../roots.js';
+
 export const MEMORY_FILE_BUDGET_CHARS = 16_000;
 export const MEMORY_TRUNCATION_NOTICE = '[truncated: slim this file and move detail into linked memory files]';
 
@@ -8,7 +10,7 @@ export const MEMORY_TRUNCATION_NOTICE = '[truncated: slim this file and move det
  * Render the two always-loaded memory files inside the container. Host-side
  * composers never read agent-controlled memory.
  */
-export function renderMemorySection(baseDir = '/workspace/agent'): string {
+export function renderMemorySection(baseDir = AGENT_DIR): string {
   const memoryDir = path.join(baseDir, 'memory');
   const index = readMemoryFile(path.join(memoryDir, 'index.md'));
   const definition = readMemoryFile(path.join(memoryDir, 'system', 'definition.md'));

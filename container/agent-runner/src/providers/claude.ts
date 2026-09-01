@@ -6,6 +6,7 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
+import { AGENT_DIR } from '../roots.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
 import { shimCwd } from './cwd-shim.js';
 import { registerProvider } from './provider-registry.js';
@@ -307,7 +308,7 @@ function archiveTranscriptFile(
           .slice(0, 50)
       : `conversation-${new Date().getHours().toString().padStart(2, '0')}${new Date().getMinutes().toString().padStart(2, '0')}`;
 
-    const conversationsDir = process.env.NANOCLAW_CONVERSATIONS_DIR || '/workspace/agent/conversations';
+    const conversationsDir = process.env.NANOCLAW_CONVERSATIONS_DIR || path.join(AGENT_DIR, 'conversations');
     fs.mkdirSync(conversationsDir, { recursive: true });
     // Local calendar date — the fallback `name` above already uses local
     // hours, and the agent navigates conversations/ by these date prefixes.

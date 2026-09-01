@@ -7,9 +7,11 @@
  */
 import fs from 'fs';
 
+import { rooted } from './roots.js';
+
 import type { McpServerConfig } from './providers/types.js';
 
-const CONFIG_PATH = '/workspace/agent/container.json';
+const CONFIG_PATH = rooted('/workspace/agent/container.json');
 
 export interface RunnerConfig {
   provider: string;
