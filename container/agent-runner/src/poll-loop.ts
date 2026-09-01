@@ -7,6 +7,7 @@ import {
   type MessageInRow,
 } from './db/messages-in.js';
 import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
+import { getSessionRouting } from './db/session-routing.js';
 import { clearStaleProcessingAcks } from './db/container-state.js';
 import { touchHeartbeat } from './heartbeat.js';
 import { getAgentMailbox } from './mailbox/index.js';
@@ -556,7 +557,7 @@ export async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          const { sent, hasUnwrapped, taskBlocks, resultBlocks } = await dispatchResultText(event.text, routing, {
+          const { sent, hasUnwrapped, taskBlocks, resultBlocks, scratchpad } = await dispatchResultText(event.text, routing, {
             midTurnSent,
             // For emitsMidTurnText providers the result door NEVER delivers
             // content (error results excepted, below): mid-turn streaming is
@@ -592,18 +593,22 @@ export async function processQuery(
             });
             archivePrompts.shift();
           } else {
-            // An unwrapped final text only warrants the wrap-nudge when NOTHING
-            // was delivered this turn — hasUnwrapped already folds in the
-            // turn's mid-turn sent count. If a reply already went out as a
-            // mid-turn block, the unwrapped tail is a self-summary; nudging
-            // coaxes a redundant second message (live-observed). It stays in
-            // the scratchpad log.
-            const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
+            // A session on the agent lane — a repo worker, which has no
+            // channel of its own — has exactly ONE place its output can go,
+            // and the host fixed that lane at creation. So unwrapped text is
+            // delivered there rather than nudged: a worker that simply writes
+            // its answer is answered by code, and never has to remember to
+            // address a destination. Everything else keeps the nudge, where
+            // "which destination?" is a real question the model must answer.
+            const lane = hasUnwrapped ? agentLaneRouting() : null;
+            if (lane && scratchpad) await deliverOnAgentLane(scratchpad, lane, routing.inReplyTo);
+            const autoDelivered = lane !== null && scratchpad !== '';
+            const willRetryWrapping = hasUnwrapped && !unwrappedNudged && !autoDelivered;
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
               result: event.text,
               continuation: queryContinuation ?? initialContinuation,
-              status: hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
+              status: (hasUnwrapped && !autoDelivered) || willRetryTaskBlocks ? 'undelivered' : 'completed',
             });
             if (willRetryWrapping) {
               unwrappedNudged = true;
@@ -698,6 +703,56 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  * This is the same user-facing write the outer catch block does, minus the
  * `Error:` prefix — the provider's text is already a user-facing message.
  */
+/**
+ * The agent-to-agent lane this session answers on, or null when it has a
+ * channel of its own (or no routing at all).
+ *
+ * Read from the SESSION routing, which the host writes on every wake from
+ * `agent_groups.origin_session_id` — not from the inbound batch, whose
+ * routing follows whoever last wrote to this session. A worker's replies must
+ * reach its own orchestrator and nothing else, and only the session routing
+ * carries that guarantee.
+ */
+function agentLaneRouting(): { channelType: string; platformId: string } | null {
+  let routing;
+  try {
+    routing = getSessionRouting();
+  } catch (err) {
+    // No routing written yet (a mailbox that has never been woken by the
+    // host). Absence is not an agent lane.
+    log(`Session routing unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+  if (routing.channel_type !== 'agent' || !routing.platform_id) return null;
+  return { channelType: routing.channel_type, platformId: routing.platform_id };
+}
+
+/**
+ * Deliver a turn's unwrapped text down this session's agent lane.
+ *
+ * `in_reply_to` rides along because the host stamps the a2a return path from
+ * it — without it the reply lands on whichever of the orchestrator's sessions
+ * the newest-active fallback picks.
+ */
+async function deliverOnAgentLane(
+  text: string,
+  lane: { channelType: string; platformId: string },
+  inReplyTo: string | null,
+): Promise<void> {
+  const body = text.trim();
+  if (!body) return;
+  await writeMessageOut({
+    id: generateId(),
+    in_reply_to: inReplyTo,
+    kind: 'chat',
+    platform_id: lane.platformId,
+    channel_type: lane.channelType,
+    thread_id: null,
+    content: JSON.stringify({ text: body }),
+  });
+  log(`Agent-lane delivery: ${body.length} chars to ${lane.platformId}`);
+}
+
 async function deliverErrorResult(text: string, routing: RoutingContext): Promise<void> {
   log('Error result with no <message> envelope — delivering to channel');
   await writeMessageOut({
@@ -970,7 +1025,14 @@ export async function dispatchResultText(
   text: string,
   routing: RoutingContext,
   options?: ResultDispatchOptions,
-): Promise<{ sent: number; hasUnwrapped: boolean; taskBlocks: TaskMessageBlock[]; resultBlocks: number }> {
+): Promise<{
+  sent: number;
+  hasUnwrapped: boolean;
+  taskBlocks: TaskMessageBlock[];
+  resultBlocks: number;
+  /** Everything outside <message> blocks, internal spans already stripped. */
+  scratchpad: string;
+}> {
   // <internal> spans are not-for-delivery scratchpad. Remove them BEFORE block
   // extraction so a <message> drafted inside one is never delivered from the
   // final text either — the mid-turn seam already guarantees this; without the
@@ -1071,7 +1133,7 @@ export async function dispatchResultText(
   if (hasUnwrapped) {
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
   }
-  return { sent, hasUnwrapped, taskBlocks, resultBlocks };
+  return { sent, hasUnwrapped, taskBlocks, resultBlocks, scratchpad };
 }
 
 /**
