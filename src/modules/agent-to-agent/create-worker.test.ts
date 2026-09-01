@@ -7,10 +7,12 @@
  * - **One call does everything.** Creation and the brief happen in the same
  *   request. The old shape woke the caller merely to say the worker existed,
  *   and the brief went out a turn later.
- * - **It never blocks on a human.** The container tool waits one minute; an
- *   approval can sit for hours. A held request is answered IMMEDIATELY with
- *   `pending`, and every late answer also WAKES the caller, because a response
- *   row nobody is polling any more is silence.
+ * - **Creating a worker never requires admin approval, for any cli_scope.**
+ *   The containment is the operator's repo allowlist (below), not a hold —
+ *   see `describe('create_worker — no approval gate, for any cli_scope')`.
+ *   The container tool's own wait is still bounded at one minute, because a
+ *   worktree checkout can outrun it; every late answer WAKES the caller,
+ *   because a response row nobody is polling any more is silence.
  * - **`repo` is a name, never a path.** cwd is the only thing that decides
  *   which repository's CLAUDE.md, skills and settings a worker loads, and it
  *   arrives from the untrusted container. An unresolvable name aborts; there
@@ -23,7 +25,7 @@ import path from 'path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { PendingApproval, Session } from '../../types.js';
+import type { Session } from '../../types.js';
 
 const WORKER_TEST_ROOT = '/tmp/nanoclaw-test-a2a-create-worker';
 const WORKER_REPOS_ROOT = '/tmp/nanoclaw-test-a2a-create-worker/repos';
@@ -190,28 +192,6 @@ function wakes(): string[] {
     .map(([, , message]) => (JSON.parse(message.content as string) as { text: string }).text);
 }
 
-function liveGrant(approvalId: string, payload: Record<string, unknown>): PendingApproval {
-  const row = {
-    approval_id: approvalId,
-    session_id: SESSION.id,
-    request_id: approvalId,
-    action: 'create_worker',
-    payload: JSON.stringify(payload),
-    created_at: new Date().toISOString(),
-    agent_group_id: 'ag-1',
-    channel_type: null,
-    platform_id: null,
-    platform_message_id: null,
-    expires_at: null,
-    status: 'pending',
-    title: '',
-    options_json: '[]',
-    approver_user_id: null,
-  } as PendingApproval;
-  liveApprovals.set(approvalId, row);
-  return row;
-}
-
 function makeRepo(): void {
   fs.mkdirSync(WORKER_REPOS_ROOT, { recursive: true });
   const repoDir = path.join(WORKER_REPOS_ROOT, REPO);
@@ -354,9 +334,11 @@ describe('create_worker — reuse for one (repo, thread) pair', () => {
     expect(answer?.result.message).toContain('"scout"');
   });
 
-  it('never cards an admin for a reuse — the privilege was already granted', async () => {
-    // `group` is the confined default, which normally holds. There is nothing
-    // to approve: the worker, its worktree and the destination row all exist.
+  it('never cards an admin for a reuse — creating a worker never holds, at any cli_scope', async () => {
+    // `group` is the confined default for create_agent, but create_worker's
+    // decision never holds regardless of scope — there is nothing to approve
+    // here either way: the worker, its worktree and the destination row all
+    // exist already.
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
     mockFindWorkerForOrigin.mockResolvedValue(EXISTING);
     mockGetDestinationByTarget.mockResolvedValue({ local_name: 'scout' });
@@ -377,23 +359,6 @@ describe('create_worker — reuse for one (repo, thread) pair', () => {
     await runCreateWorker(request());
 
     expect(mockCreateAgentGroup).toHaveBeenCalledTimes(1);
-  });
-
-  it('reuses on an approved replay, so a card approved twice yields one worker', async () => {
-    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
-    mockFindWorkerForOrigin.mockResolvedValue(EXISTING);
-    mockGetDestinationByTarget.mockResolvedValue({ local_name: 'scout' });
-    const payload = { name: 'Scout', repo: REPO, task: 'go', requestId: 'req-w1', waitUntil: Date.now() + 60_000 };
-
-    await approvalHandlers.get('create_worker')!({
-      session: SESSION,
-      payload,
-      approval: liveGrant('appr-w-reuse', payload),
-      userId: 'telegram:admin',
-      notify: vi.fn(),
-    });
-
-    expect(mockCreateAgentGroup).not.toHaveBeenCalled();
   });
 });
 
@@ -427,7 +392,9 @@ describe('create_worker — an unresolvable repo never falls back', () => {
   });
 
   it('refuses an unknown repo without ever carding an admin', async () => {
-    // A hold spends the one human in the loop on a request that cannot succeed.
+    // create_worker never holds regardless of cli_scope, but this failure is
+    // resolved in the precheck, before the guard is even consulted — an
+    // unresolvable repo is a request that cannot succeed either way.
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
 
     await runCreateWorker(request({ repo: 'no-such-repo' }));
@@ -446,83 +413,39 @@ describe('create_worker — an unresolvable repo never falls back', () => {
   });
 });
 
-describe('create_worker — approval returns immediately, never blocks', () => {
-  it('answers `pending` in the same request that raises the card', async () => {
-    // An approval can sit for hours and the tool waits one minute. Blocking
-    // would guarantee a timeout and leave the caller unable to tell "waiting
-    // on a human" from "still checking out a large repository".
+describe('create_worker — no approval gate, for any cli_scope', () => {
+  it('creates and briefs a FRESH worker directly under `group` scope — no approval card, no pending response', async () => {
+    // The rule this whole change pins: create_worker never holds, so `group`
+    // — the confined default that still holds create_agent — must create
+    // directly here instead. Flipping this mock to `global` would hide the
+    // exact regression this test exists to catch.
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
 
     await runCreateWorker(request());
 
-    expect(mockRequestApproval).toHaveBeenCalledTimes(1);
-    expect(mockCreateAgentGroup).not.toHaveBeenCalled();
+    expect(mockRequestApproval).not.toHaveBeenCalled();
+    const group = mockCreateAgentGroup.mock.calls[0][0] as { id: string };
+    expect(briefsTo(group.id)).toEqual(['Audit the gates and report what fails.']);
     const answer = response();
-    expect(answer?.status).toBe('pending');
-    expect(answer?.result.message).toContain('admin approval');
-    expect(answer?.result.message).toContain('waiting');
-    // The tool is still polling, so the card must not also cost a wake.
-    expect(wakes()).toEqual([]);
-  });
-
-  it('carries repo, task, requestId and waitUntil into the payload, so approval drops none of them', async () => {
-    // The approved replay re-enters this action with the APPROVAL ROW as its
-    // content. Anything missing here is silently gone on approve.
-    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
-
-    await runCreateWorker(request());
-
-    const card = mockRequestApproval.mock.calls[0][0] as { payload: Record<string, unknown>; question: string };
-    expect(card.payload).toMatchObject({ name: 'Scout', repo: REPO, requestId: 'req-w1' });
-    expect(card.payload.task).toBe('Audit the gates and report what fails.');
-    expect(typeof card.payload.waitUntil).toBe('number');
-    expect(card.question).toContain(REPO);
-  });
-
-  it('creates and briefs on an approved replay, and wakes the caller because the tool is long gone', async () => {
-    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
-    const payload = {
-      name: 'Scout',
-      repo: REPO,
-      task: 'Audit the gates.',
-      requestId: 'req-w1',
-      waitUntil: Date.now() - 60_000,
-    };
-
-    await approvalHandlers.get('create_worker')!({
-      session: SESSION,
-      payload,
-      approval: liveGrant('appr-w-1', payload),
-      userId: 'telegram:admin',
-      notify: vi.fn(),
-    });
-
-    const group = mockCreateAgentGroup.mock.calls[0][0] as { id: string; workspace_path: string };
-    expect(fs.existsSync(group.workspace_path)).toBe(true);
-    expect(briefsTo(group.id)).toEqual(['Audit the gates.']);
-    expect(wakes()).toHaveLength(1);
-  });
-
-  it('refuses a replay whose grant was approved for a different request', async () => {
-    // The grant binds on requestId, not on the worker name: two requests can
-    // ask for the same name, and one approval must not satisfy the other.
-    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
-    const approval = liveGrant('appr-w-2', { name: 'Scout', repo: REPO, task: 'x', requestId: 'other-request' });
-
-    await approvalHandlers.get('create_worker')!({
-      session: SESSION,
-      payload: { ...request(), instructions: null },
-      approval,
-      userId: 'telegram:admin',
-      notify: vi.fn(),
-    });
-
-    expect(mockCreateAgentGroup).not.toHaveBeenCalled();
-    expect(mockRequestApproval).not.toHaveBeenCalled(); // refused, not re-held
+    expect(answer?.status).toBe('created');
+    expect(answer?.status).not.toBe('pending');
   });
 });
 
 describe('create_agent — no longer takes a repo', () => {
+  it('still holds for `group` scope — the guard rail against this change leaking into create_agent', async () => {
+    // create_worker's own guard rewrite must not have touched agents.create:
+    // a confined (default `group`) agent group still needs admin approval to
+    // create an ordinary companion agent.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+
+    await getDeliveryAction('create_agent')!({ name: 'Companion' }, SESSION);
+
+    expect(mockRequestApproval).toHaveBeenCalledTimes(1);
+    expect(mockRequestApproval.mock.calls[0][0]).toMatchObject({ action: 'create_agent' });
+    expect(mockCreateAgentGroup).not.toHaveBeenCalled();
+  });
+
   it('ignores a repo key and creates an ordinary companion with no worktree', async () => {
     // The MCP tool that could send one is gone, but the delivery action is
     // still reachable (slack-agent-flow registers over it). A stray `repo` on

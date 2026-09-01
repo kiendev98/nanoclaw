@@ -19,10 +19,9 @@
  * minute because `git worktree add` on a large checkout is not instant — one
  * of the repositories this runs against is 7.5 GB.
  *
- * IT NEVER BLOCKS ON A HUMAN. An admin approval can sit for hours, so the
- * host answers a held request IMMEDIATELY with `status: 'pending'` and the
- * caller is told to say it is waiting rather than going silent. Every other
- * late outcome degrades the same way: on timeout the tool reports that
+ * IT NEVER BLOCKS ON A HUMAN — creating a worker needs no admin approval, so
+ * there is no hold to answer inline. The only thing that can still outrun the
+ * bound is the worktree checkout itself: on timeout the tool reports that
  * creation is still running, and the host wakes the caller when it finishes.
  */
 import { findCliResponse, markCompleted } from '../db/messages-in.js';
@@ -88,7 +87,7 @@ export const createWorker: McpToolDefinition = {
   tool: {
     name: 'create_worker',
     description:
-      'Delegate a task into ANOTHER repository. Creates (or reuses) a worker: a separate agent with its OWN process and its OWN working directory, standing inside a git worktree of that repository and loading that repository\'s CLAUDE.md, skills and settings. ' +
+      "Delegate a task into ANOTHER repository. Creates (or reuses) a worker: a separate agent with its OWN process and its OWN working directory, standing inside a git worktree of that repository and loading that repository's CLAUDE.md, skills and settings. " +
       'CHOOSING BETWEEN THIS AND THE Task TOOL: compare the repository you need against the one you are standing in. ' +
       'Same repository — use Task. It shares your working directory and costs nothing. ' +
       'Different repository — use this. Task CANNOT change directory, so pointing it at another repository reads YOUR files while reporting on that one, and the answer looks correct. ' +

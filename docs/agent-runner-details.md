@@ -671,10 +671,12 @@ in the same call.
 Implementation: BLOCKING but bounded. Writes a `messages_out` row with `kind: 'system'`,
 `action: 'create_worker'`, `requestId`, `waitUntil`, `repo`, `task` and `name`, then polls
 `findCliResponse(requestId)` for up to 60 seconds (the canvas_read / ask_user_question
-pattern). It never blocks on a human: a request the guard holds for admin approval is
-answered immediately with `status: 'pending'`. On timeout the tool reports that creation
-is still running, and the host — which knows from `waitUntil` that nobody is polling any
-more — wakes the caller with the outcome instead. Host side:
+pattern). It never blocks on a human: creating a worker needs no admin approval (the guard's
+`workers.create` decision ALLOWs unconditionally; containment is the operator's
+`NANOCLAW_PROJECT_ROOTS` repo allowlist, not a hold), so the only thing that can still
+outrun the bound is the worktree checkout itself. On timeout the tool reports that
+creation is still running, and the host — which knows from `waitUntil` that nobody is
+polling any more — wakes the caller with the outcome instead. Host side:
 `src/modules/agent-to-agent/create-worker.ts`.
 
 A worker's replies reach its orchestrator by code, not by the worker addressing them:

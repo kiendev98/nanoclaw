@@ -8,11 +8,10 @@
  * answers is blocking, so the caller never has to be woken merely to learn
  * that its delegate exists and then send it a message in a second turn.
  *
- * SECURITY, and it is the same argument `create_agent` makes: this writes
- * central-DB state and scaffolds host filesystem state, so authorization is
- * enforced host-side by the guard's `workers.create` decision (./guard.ts) —
- * trusted global-scope groups create directly, everything else holds for
- * admin approval.
+ * SECURITY: creating a worker never requires admin approval (guard's
+ * `workers.create` decision, ./guard.ts, ALLOWs unconditionally for any agent
+ * actor). The containment is the operator allowlist below, not a decision —
+ * see `repo`.
  *
  * `repo` raises the stakes rather than adding a feature: it decides the
  * worker's WORKING directory, and cwd is the only thing that decides which
@@ -29,12 +28,13 @@
  * FIRST worker and delivers the new task to it; see `worker-identity.ts` for
  * why the branch derives from the origin session.
  *
- * NOTHING HERE EVER BLOCKS ON A HUMAN. An approval can sit for hours, so the
- * hold answers the tool IMMEDIATELY with `status: 'pending'`. Every late
- * outcome — an approved replay, a worktree checkout that outran the tool's
- * bound — is written to the response row AND wakes the requester, because a
- * row nobody is polling any more is silence. `waitUntil`, which the tool
- * stamps from its own deadline, is what separates the two cases.
+ * NOTHING HERE EVER BLOCKS ON A HUMAN. There is no approval step left to
+ * block on, but the tool's own wait is still bounded: a worktree checkout on a
+ * large repository can outrun the tool's 60s poll. Every late outcome — the
+ * checkout finishing after the caller gave up — is written to the response
+ * row AND wakes the requester, because a row nobody is polling any more is
+ * silence. `waitUntil`, which the tool stamps from its own deadline, is what
+ * separates "still polling" from "already gave up".
  */
 import { PROJECT_ROOTS } from '../../config.js';
 import { findWorkerForOrigin, getAgentGroup } from '../../db/agent-groups.js';
@@ -44,7 +44,6 @@ import { GuardDenyError } from '../../guard/index.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { AgentGroup, Session } from '../../types.js';
-import { requestApproval } from '../approvals/index.js';
 import { createWorktree, resolveRepo } from '../../worktree.js';
 import { routeAgentMessage } from './agent-route.js';
 import { getDestinationByTarget } from './db/agent-destinations.js';
@@ -52,7 +51,7 @@ import { provisionAgentGroup } from './provision-agent.js';
 import { workerBranch, workerWorkspace } from './worker-identity.js';
 
 /** How the request ended, as the container tool reads it. */
-type WorkerStatus = 'created' | 'reused' | 'pending' | 'error';
+type WorkerStatus = 'created' | 'reused' | 'error';
 
 /**
  * Grace on `waitUntil`. Inside the window the tool is still polling and the
@@ -70,7 +69,7 @@ interface WorkerRequest {
   waitUntil: number | null;
 }
 
-/** The container's payload, re-read on every entry (an approved replay carries the approval row). */
+/** The container's payload, re-read on every entry. */
 function parseRequest(content: Record<string, unknown>): WorkerRequest {
   const str = (key: string): string => (typeof content[key] === 'string' ? (content[key] as string).trim() : '');
   return {
@@ -223,14 +222,14 @@ function briefedText(
 }
 
 /**
- * Guard precheck: malformed requests are answered without ever creating a
- * hold, and a reuse is served here in full.
+ * Guard precheck: malformed requests are answered directly, and a reuse is
+ * served here in full, before the guard is even consulted.
  *
- * Both resolution and reuse run BEFORE any hold, and for the same reason: an
+ * Both resolution and reuse run BEFORE the guard for the same reason: an
  * unresolvable repo is a request that cannot succeed, and a reuse needs no new
  * privilege — the worker, its worktree and its destination row all exist
- * already. Carding an admin for either spends the one human in the loop on
- * nothing.
+ * already. Running the (always-allow) guard for either would be wasted work,
+ * not a safety gap.
  */
 export async function validateCreateWorker(content: Record<string, unknown>, session: Session): Promise<boolean> {
   const req = parseRequest(content);
@@ -288,50 +287,6 @@ export async function validateCreateWorker(content: Record<string, unknown>, ses
   return true;
 }
 
-/**
- * Guard hold: card the requesting group's admin chain, then answer the tool
- * IMMEDIATELY.
- *
- * The answer is the point. An approval can sit for hours and the tool waits
- * for one minute, so blocking on it would guarantee a timeout and leave the
- * caller unable to tell "waiting on a human" from "still checking out a large
- * repository".
- */
-export async function requestCreateWorkerHold(content: Record<string, unknown>, session: Session): Promise<void> {
-  const req = parseRequest(content);
-  const sourceGroup = await getAgentGroup(session.agent_group_id);
-  if (!sourceGroup) return;
-
-  await requestApproval({
-    session,
-    agentName: sourceGroup.name,
-    action: 'create_worker',
-    // The approved replay re-enters this action with the APPROVAL ROW as its
-    // content, so everything the create body needs — including requestId and
-    // waitUntil, which decide how the outcome is reported — has to ride here.
-    payload: { name: req.name, repo: req.repo, task: req.task, requestId: req.requestId, waitUntil: req.waitUntil },
-    title: `Create worker: ${req.name}`,
-    question:
-      `Agent "${sourceGroup.name}" wants to create a worker "${req.name}" with its own git worktree of the ` +
-      `repository "${req.repo}", and to send it this task:\n\n${briefExcerpt(req.task)}\n\nApprove?`,
-  });
-
-  await respond(
-    session,
-    req,
-    'pending',
-    `Creating worker "${req.name}" for "${req.repo}" needs admin approval, and the card is now waiting. ` +
-      `The worker does NOT exist yet and approval can take hours, so tell the human you are waiting rather than ` +
-      `going silent. You will be woken once it exists and has your task.`,
-  );
-}
-
-const BRIEF_CARD_MAX = 1500;
-
-function briefExcerpt(task: string): string {
-  return task.length > BRIEF_CARD_MAX ? `${task.slice(0, BRIEF_CARD_MAX)}… (truncated)` : task;
-}
-
 /** Guard deny body: tell the requester, through the same channel it is waiting on. */
 export async function denyCreateWorker(
   content: Record<string, unknown>,
@@ -341,18 +296,17 @@ export async function denyCreateWorker(
   await respond(session, parseRequest(content), 'error', `create_worker denied: ${reason}`);
 }
 
-/** Guard allow body: creates the worker and briefs it (fresh call or approved replay). */
+/** Guard allow body: creates the worker and briefs it. */
 export async function createWorker(content: Record<string, unknown>, session: Session): Promise<void> {
   const req = parseRequest(content);
   const sourceGroup = await getAgentGroup(session.agent_group_id);
   if (!req.repo || !req.task || !sourceGroup) return; // precheck already answered the requester
 
-  // Resolved AGAIN here, and reuse re-checked, because an approval can sit for
-  // hours: the allowlist or the repository may have moved, and the same thread
-  // may have gained a worker for this repo in the meantime — by another request
-  // approved first, or by this same card being approved twice. Creating anyway
-  // would put two agents on two branches of one repository in one conversation,
-  // which is the exact failure the (repo, thread) key exists to prevent.
+  // Resolved AGAIN here, and reuse re-checked, in case a concurrent
+  // create_worker call for the same (repo, thread) already created a worker
+  // between the precheck's lookup and this one. Creating anyway would put two
+  // agents on two branches of one repository in one conversation, which is
+  // the exact failure the (repo, thread) key exists to prevent.
   let repoPath: string;
   try {
     repoPath = resolveRepo(req.repo, PROJECT_ROOTS);

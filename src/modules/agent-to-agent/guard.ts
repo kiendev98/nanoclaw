@@ -8,12 +8,18 @@
  * default `group` scope, and unknown/missing config, fail-closed — holds for
  * the requesting group's admin chain.
  *
- * workers.create — the same trust split as agents.create, defined
- * separately because a grant is bound to the pending_approvals row's action
- * name and the two hold through different approval handlers. It binds on the
- * REQUEST ID rather than the name: `create_worker` answers a blocking tool by
- * requestId, and a grant bound to a name would let one approval satisfy a
- * different request that happened to ask for the same worker name.
+ * workers.create — creating a worker never requires admin approval, for any
+ * cli_scope. The containment that replaces the hold is the operator
+ * allowlist: `resolveRepo` (../../worktree.js) resolves `repo` only against
+ * `NANOCLAW_PROJECT_ROOTS` (default empty, src/config.ts), and an
+ * unresolvable name throws rather than falling back to the group folder. A
+ * worker can therefore only ever stand in a repository the operator named, no
+ * matter which agent group asked. The entry stays in the catalog purely so the
+ * decision stays auditable; it carries no `grantActionName` because it never
+ * holds, and `src/guard/conformance.test.ts` requires a registered approval
+ * handler for every action that has one. Restoring a hold later means putting
+ * `grantActionName` back AND registering a handler for it (./index.js) — not a
+ * one-line change, but still a small, localized one.
  *
  * a2a.send — the decision moved verbatim out of routeAgentMessage, in its
  * original check order: a missing destination row denies; a missing target
@@ -65,24 +71,15 @@ export const agentsCreate = defineGuardedAction({
 
 export const workersCreate = defineGuardedAction({
   action: 'workers.create',
-  grantActionName: 'create_worker',
-  grantCoversRequest: (grant, input) => {
-    try {
-      return (JSON.parse(grant.payload) as { requestId?: string }).requestId === input.payload.requestId;
-    } catch {
-      return false;
-    }
-  },
+  // No grantActionName: this decision never holds, so there is no grant to
+  // bind and no approval handler to pair it with — see the file header, and
+  // src/guard/conformance.test.ts, which enforces exactly that pairing.
   decide: async (input) => {
     if (input.actor.kind !== 'agent') return DENY('create_worker is a container-originated action.');
-    const cliScope = (await getContainerConfig(input.actor.agentGroupId))?.cli_scope ?? 'group';
-    // A worker is a privileged central-DB write plus a git worktree of a real
-    // repository on the host, so it holds wherever create_agent holds: a
-    // trusted owner group acts directly, and the realistic prompt-injection
-    // victim (the default `group` scope, and any unknown value, fail-closed)
-    // needs an admin first.
-    if (cliScope === 'global') return ALLOW('trusted global-scope agent group');
-    return HOLD('agent-initiated create_worker requires admin approval');
+    // Creating a worker never requires admin approval, for any cli_scope: the
+    // operator allowlist (NANOCLAW_PROJECT_ROOTS, resolved by resolveRepo) is
+    // the containment, not this decision.
+    return ALLOW('create_worker requires no approval — repo is bounded by the operator allowlist');
   },
 });
 

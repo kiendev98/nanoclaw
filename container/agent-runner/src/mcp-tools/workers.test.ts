@@ -4,10 +4,11 @@
  * (the canvas_read / ask_user_question pattern).
  *
  * The bound is the point of most of these. The tool waits, but never on a
- * human: an approval comes back as `pending` in milliseconds, and a wait that
- * runs out degrades to "you will be woken" rather than to an error — the work
- * really is still running, and calling that a failure would make the caller
- * report a failure that did not happen.
+ * human — creating a worker needs no admin approval, so any non-error status
+ * the host writes (`created`, `reused`) is read back the same way, and a wait
+ * that runs out degrades to "you will be woken" rather than to an error — the
+ * work really is still running, and calling that a failure would make the
+ * caller report a failure that did not happen.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
@@ -161,33 +162,14 @@ describe('create_worker — the blocking round trip', () => {
     expect(text(await pending)).toContain('Reused rather than duplicated');
   });
 
-  it('returns IMMEDIATELY when an approval is pending, instead of waiting hours for a human', async () => {
-    // The whole reason the host answers a hold inline. With a minute-long
-    // bound and an approval that can sit for hours, blocking would guarantee a
-    // timeout and lose the distinction between "waiting on a human" and
-    // "still checking out a large repository".
-    const pending = createWorker.handler({ repo: 'saber', task: 'audit the gates' });
-
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    const requestId = outboundActions()[0].content.requestId as string;
-    seedWorkerResponse(requestId, 'pending', {
-      name: 'saber-worker',
-      repo: 'saber',
-      message: 'Creating worker "saber-worker" for "saber" needs admin approval, and the card is now waiting.',
-    });
-
-    const r = await pending;
-    expect(r.isError).toBeUndefined();
-    expect(text(r)).toContain('needs admin approval');
-  });
-
   it('surfaces a host refusal as a tool error, naming the allowlist', async () => {
     const pending = createWorker.handler({ repo: 'no-such-repo', task: 'audit the gates' });
 
     await new Promise((resolve) => setTimeout(resolve, 50));
     const requestId = outboundActions()[0].content.requestId as string;
     seedWorkerResponse(requestId, 'error', {
-      error: 'Cannot resolve repo "no-such-repo": no git repository by that name under any allowed root. Allowed roots: /srv/repos',
+      error:
+        'Cannot resolve repo "no-such-repo": no git repository by that name under any allowed root. Allowed roots: /srv/repos',
     });
 
     const r = await pending;
