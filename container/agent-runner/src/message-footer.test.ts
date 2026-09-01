@@ -15,6 +15,7 @@ import {
   recordContextPercent,
   recordContextUsage,
   recordContextWindow,
+  recordEffort,
   recordRateLimits,
   recordModel,
   recordUtilization,
@@ -371,5 +372,35 @@ describe('recordRateLimits', () => {
     recordRateLimits({ seven_day_opus: { utilization: 44 } });
 
     expect(renderFooter()).toBe('Wego #1 · 7d opus: 44%');
+  });
+});
+
+describe('reasoning effort', () => {
+  it('renders after the model', () => {
+    writeConfig('Wego #1');
+    recordModel('claude-opus-5');
+    recordEffort('high');
+    recordContextPercent(51);
+
+    expect(renderFooter()).toBe('Wego #1 · opus-5 · think: high · ctx: 51%');
+  });
+
+  it('is omitted when container.json pins none', () => {
+    // The SDK's `system:init` reports the model but not the effort, so an
+    // unset value has nothing to read back. Printing a guessed default would
+    // claim knowledge this code does not have.
+    writeConfig('Wego #1');
+    recordModel('claude-opus-5');
+    recordEffort(undefined);
+
+    expect(renderFooter()).toBe('Wego #1 · opus-5');
+  });
+
+  it('normalises case so the line reads consistently', () => {
+    writeConfig('Wego #1');
+    recordModel('claude-opus-5');
+    recordEffort('  HIGH  ');
+
+    expect(renderFooter()).toBe('Wego #1 · opus-5 · think: high');
   });
 });

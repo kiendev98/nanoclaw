@@ -11,6 +11,7 @@ import {
   recordContextPercent,
   recordContextUsage,
   recordContextWindow,
+  recordEffort,
   recordModel,
   recordRateLimits,
   recordUtilization,
@@ -687,6 +688,8 @@ export class ClaudeProvider implements AgentProvider {
     });
 
     let aborted = false;
+    // Captured for the generator below, which cannot see `this`.
+    const configuredEffort = this.effort;
 
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
@@ -702,6 +705,11 @@ export class ClaudeProvider implements AgentProvider {
           // `model` is optional, so an install that pins nothing would
           // otherwise have no model to show.
           recordModel((message as { model?: string }).model);
+          // What nanoclaw asked for. init reports the model but not the
+          // effort, so this is the request, not a confirmation. Read from a
+          // captured const, never `this`: `translateEvents` is a plain
+          // generator declaration, so `this` is undefined inside it.
+          recordEffort(configuredEffort);
           // The SDK's own answers for the other two footer fields, asked once
           // per turn. `getContextUsage` is what `/context` prints — it divides
           // by the USABLE window, not the raw one, so computing the ratio here

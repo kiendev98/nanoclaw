@@ -79,6 +79,16 @@ let contextPercent: number | null = null;
 let accountFromSdk: string | null = null;
 
 /**
+ * Reasoning effort, from `container.json`.
+ *
+ * This is what nanoclaw REQUESTED, not what the SDK confirmed — `system:init`
+ * reports the model but says nothing about effort, so there is nothing to
+ * read back. An unset value therefore renders nothing rather than guessing
+ * the SDK's default, which is a number this code does not know.
+ */
+let effortLabel: string | null = null;
+
+/**
  * Shorten an SDK model id for display: `claude-opus-4-5-20251101` → `opus-4-5`.
  *
  * Taken from `system:init` rather than from `container.json`, because the
@@ -90,6 +100,12 @@ export function shortenModel(model: string): string {
     .replace(/^claude-/, '')
     .replace(/-\d{8}$/, '')
     .replace(/-latest$/, '');
+}
+
+/** Record the configured reasoning effort. Omitted entirely when unset. */
+export function recordEffort(effort: string | undefined): void {
+  if (typeof effort !== 'string' || !effort.trim()) return;
+  effortLabel = effort.trim().toLowerCase();
 }
 
 /** Record the model the current turn runs on, from `system:init`. */
@@ -364,6 +380,7 @@ export function renderFooter(model: string | null = modelLabel): string | null {
   const account = accountName();
   if (account) parts.push(account);
   if (model) parts.push(model);
+  if (effortLabel) parts.push(`think: ${effortLabel}`);
 
   if (contextPercent !== null) {
     parts.push(`ctx: ${Math.round(contextPercent)}%`);
@@ -403,6 +420,7 @@ export function resetFooterTelemetry(): void {
   accountLabel = undefined;
   accountFromSdk = null;
   modelLabel = null;
+  effortLabel = null;
   contextPercent = null;
   loaded = false;
 }
