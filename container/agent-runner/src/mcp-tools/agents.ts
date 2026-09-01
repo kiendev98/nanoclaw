@@ -35,7 +35,12 @@ export const createAgent: McpToolDefinition = {
   tool: {
     name: 'create_agent',
     description:
-      'Create a long-lived companion sub-agent (research assistant, task manager, specialist) — the name becomes your destination for it. May require admin approval before the agent is created. Fire-and-forget.',
+      'Create a separate long-lived agent with its OWN process and its OWN working directory — the name becomes your destination for it. ' +
+      'CHOOSING BETWEEN THIS AND THE Task TOOL: compare the repository you need against the one you are standing in. ' +
+      'Same repository — use Task. It shares your working directory, costs nothing, and leaves nothing behind. ' +
+      'Different repository — use this tool with `repo`. Task CANNOT change directory, so using it for another repository reads YOUR files while reporting on that one, and the answer looks correct. ' +
+      'Without `repo` this creates an ordinary companion agent (research assistant, task manager, specialist). ' +
+      'May require admin approval before the agent is created. Fire-and-forget.',
     inputSchema: {
       type: 'object' as const,
       properties: {
