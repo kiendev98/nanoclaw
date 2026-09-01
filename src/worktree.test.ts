@@ -197,8 +197,39 @@ describe('worktreePath', () => {
     expect(result.startsWith(repo)).toBe(false);
   });
 
-  it('names the directory from the repo and branch', () => {
-    expect(worktreePath('/a/b/saber', 'feat/x')).toBe(path.join(WORKTREES_DIR, 'saber-feat-x'));
+  it('names the directory from the repo, a fingerprint of its path, and the branch', () => {
+    const derived = worktreePath('/a/b/saber', 'feat/x');
+    expect(path.dirname(derived)).toBe(WORKTREES_DIR);
+    expect(path.basename(derived)).toMatch(/^saber-[0-9a-f]{8}-feat-x$/);
+  });
+
+  it('gives two repositories with the SAME basename different worktrees', () => {
+    // The bug the fingerprint exists to close. `resolveRepo` accepts a name
+    // with separators and searches EVERY allowed root, so `wego/saber` and
+    // `kien/saber` are two repositories a basename key collapses into one
+    // directory — after which `createWorktree` adopts the first one's worktree
+    // and `findWorkerForOrigin` answers with the first one's worker, reported
+    // to the agent as a reuse. Same branch on purpose: one thread, two repos.
+    expect(worktreePath('/roots/wego/saber', 'nanoclaw/sess-1')).not.toBe(
+      worktreePath('/roots/kien/saber', 'nanoclaw/sess-1'),
+    );
+  });
+
+  it('gives one repository ONE worktree however its path is spelled', () => {
+    // The mirror of the test above, and why the fingerprint canonicalizes
+    // instead of hashing the string it was handed. Splitting one repository
+    // across two worktrees is the same failure seen from the other side: two
+    // branches, and a second worker that cannot see the first one's work.
+    const real = fs.realpathSync(initRepo(path.join(tmp, 'canon')));
+    const linkDir = path.join(tmp, 'via-link');
+    fs.mkdirSync(linkDir, { recursive: true });
+    // Same BASENAME, different path — so only the fingerprint can tell the
+    // readable segment's job from the identity's.
+    const link = path.join(linkDir, 'canon');
+    fs.symlinkSync(real, link);
+
+    expect(worktreePath(link, 'main')).toBe(worktreePath(real, 'main'));
+    expect(worktreePath(`${real}/`, 'main')).toBe(worktreePath(real, 'main'));
   });
 
   it('refuses a repo or branch that sanitizes to nothing', () => {

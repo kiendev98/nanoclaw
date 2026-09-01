@@ -32,6 +32,7 @@
  * executable.
  */
 import { execFileSync } from 'child_process';
+import { createHash } from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -192,11 +193,48 @@ export function sanitizeSegment(value: string): string {
 }
 
 /**
+ * Eight hex characters of sha256 over the resolved repository path.
+ *
+ * The basename alone cannot key a worktree. `resolveRepo` accepts a name with
+ * separators and searches EVERY allowed root, so `wego/saber` and `kien/saber`
+ * — or one `saber` under each of two roots — are different repositories with
+ * the same basename. Keyed on basename they collide into one directory, and
+ * because `createWorktree` adopts an existing directory and
+ * `findWorkerForOrigin` looks up by `workspace_path`, the second request is
+ * answered with the FIRST repository's worker, reported as a reuse. A worker
+ * standing in the wrong repository is indistinguishable from a working one.
+ *
+ * CANONICALIZED first, so one physical repository has exactly one fingerprint
+ * however it was named. `path.resolve` alone is not enough: it collapses `..`
+ * and a trailing slash but leaves symlinks intact, and on macOS `/tmp` is a
+ * symlink to `/private/tmp` — so the same checkout reached by two names would
+ * hash differently and get two worktrees. `realpathSync` throws for a path
+ * that is not there, which is not this function's business to report, so that
+ * case falls back to `path.resolve` and lets `createWorktree` fail with git's
+ * own message.
+ */
+function repoFingerprint(repo: string): string {
+  let canonical: string;
+  try {
+    canonical = fs.realpathSync(repo);
+  } catch {
+    canonical = path.resolve(repo);
+  }
+  return createHash('sha256').update(canonical).digest('hex').slice(0, 8);
+}
+
+/**
  * Where the worktree for `(repo, branch)` goes.
  *
  * OUTSIDE the repository, always. See the module comment: a worktree nested in
  * its own checkout inherits the outer checkout's `CLAUDE.md` through the same
  * upward walk that gives it its own.
+ *
+ * The basename stays in the name for a human reading `ls`, but the FINGERPRINT
+ * is what makes the path unique — see `repoFingerprint`. Nothing parses this
+ * name back into a repo or a branch: `worktreeRepoName` asks git through
+ * `--git-common-dir` and `worktreeBranch` asks `rev-parse`, so the format is
+ * free to change.
  *
  * @throws When repo or branch sanitize to nothing (a name of pure punctuation).
  */
@@ -206,7 +244,7 @@ export function worktreePath(repo: string, branch: string): string {
   if (!repoSegment || !branchSegment) {
     throw new Error(`Cannot derive a worktree path from repo "${repo}" and branch "${branch}"`);
   }
-  return path.join(WORKTREES_DIR, `${repoSegment}-${branchSegment}`);
+  return path.join(WORKTREES_DIR, `${repoSegment}-${repoFingerprint(repo)}-${branchSegment}`);
 }
 
 /**

@@ -37,7 +37,7 @@
  * separates "still polling" from "already gave up".
  */
 import { PROJECT_ROOTS } from '../../config.js';
-import { findWorkerForOrigin, getAgentGroup } from '../../db/agent-groups.js';
+import { findWorkerForOrigin, getAgentGroup, updateAgentGroup } from '../../db/agent-groups.js';
 import { getSession } from '../../db/sessions.js';
 import { requestWake } from '../../request-wake.js';
 import { GuardDenyError } from '../../guard/index.js';
@@ -145,6 +145,41 @@ async function notifyAgent(session: Session, text: string): Promise<void> {
  */
 async function existingWorkerFor(repoPath: string, originSessionId: string): Promise<AgentGroup | undefined> {
   return findWorkerForOrigin(originSessionId, workerWorkspace(repoPath, originSessionId));
+}
+
+/**
+ * Put a reused worker's worktree back if it is gone, and keep the row honest.
+ *
+ * `createWorktree` is idempotent on its path, so the healthy case costs one
+ * `existsSync`. The row is re-stamped when the derived path has moved, because
+ * `workspace_path` — not the derivation — is what
+ * `composeSessionSpec` turns into the worker's cwd. Re-deriving without
+ * re-stamping would create the right directory and still spawn into the old
+ * one.
+ *
+ * @returns ok, or the agent-facing reason the workspace could not be restored.
+ *   Never throws: the caller answers a blocking tool, and an unhandled throw
+ *   there is a delegation that dies silently.
+ */
+async function ensureWorktree(
+  worker: AgentGroup,
+  repoPath: string,
+  originSessionId: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const target = createWorktree(repoPath, workerBranch(originSessionId));
+    if (target !== worker.workspace_path) {
+      await updateAgentGroup(worker.id, { workspace_path: target });
+    }
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        `Worker "${worker.name}" exists but its worktree could not be restored: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 }
 
 /**
@@ -265,6 +300,24 @@ export async function validateCreateWorker(content: Record<string, unknown>, ses
   if (existing) {
     const localName = await reusableWorkerName(session.agent_group_id, existing);
     if (localName) {
+      // The agent group outlives its directory. `ncl worktrees prune` removes a
+      // clean worktree without touching `agent_groups`, and a human can `rm -rf`
+      // one just as easily — so reuse must re-create it, or the brief is
+      // delivered and the spawn then chdirs into a path that is not there.
+      // Deliberately NOT fixed by clearing `workspace_path` on prune: the reuse
+      // lookup keys on that column, so clearing it mints a SECOND worker on a
+      // second branch for one thread, which is the duplicate this whole
+      // (repo, thread) identity exists to prevent.
+      const restored = await ensureWorktree(existing, repoPath, session.id);
+      if (!restored.ok) {
+        await respond(session, req, 'error', restored.error);
+        log.warn('create_worker could not restore a reused worker workspace', {
+          repo: req.repo,
+          worker: existing.id,
+          err: restored.error,
+        });
+        return false;
+      }
       const delivery = await deliverBrief(session, existing.id, req.task);
       await respond(session, req, 'reused', briefedText(localName, req.repo, true, delivery));
       log.info('create_worker reused an existing worker', {

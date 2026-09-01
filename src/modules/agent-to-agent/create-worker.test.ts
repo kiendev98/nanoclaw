@@ -42,6 +42,7 @@ const {
   mockRequestApproval,
   mockGetContainerConfig,
   mockCreateAgentGroup,
+  mockUpdateAgentGroup,
   mockInitGroupFilesystem,
   mockWriteDestinations,
   mockSessionWrite,
@@ -55,6 +56,7 @@ const {
   mockRequestApproval: vi.fn().mockResolvedValue(undefined),
   mockGetContainerConfig: vi.fn(),
   mockCreateAgentGroup: vi.fn(),
+  mockUpdateAgentGroup: vi.fn(),
   mockInitGroupFilesystem: vi.fn(),
   mockWriteDestinations: vi.fn(),
   mockSessionWrite: vi.fn(),
@@ -81,6 +83,7 @@ vi.mock('../../db/agent-groups.js', () => ({
   getAgentGroup: (id: string) => ({ id, name: id.toUpperCase(), folder: id, agent_provider: null, created_at: '' }),
   getAgentGroupByFolder: () => undefined,
   createAgentGroup: (...a: unknown[]) => mockCreateAgentGroup(...a),
+  updateAgentGroup: (...a: unknown[]) => mockUpdateAgentGroup(...a),
   findWorkerForOrigin: (...a: unknown[]) => mockFindWorkerForOrigin(...a),
 }));
 vi.mock('../../group-init.js', () => ({
@@ -129,16 +132,20 @@ vi.mock('../../db/sessions.js', () => ({
 // delivery actions — the only reachable path to the body under test.
 import './index.js';
 import { getDeliveryAction } from '../../delivery.js';
+import { workerWorkspace } from './worker-identity.js';
 
 const SESSION = { id: 'sess-1', agent_group_id: 'ag-1' } as Session;
 const REPO = 'demo-repo';
-const WORKTREE = path.join(
-  process.env.HOME || '',
-  '.config',
-  'nanoclaw',
-  'worktrees',
-  `${REPO}-nanoclaw-${SESSION.id}`,
-);
+// The repository has to exist BEFORE the worktree path is derived: the
+// fingerprint canonicalizes through `realpathSync`, and on macOS the answer for
+// `/tmp/...` is `/private/tmp/...`. Derived from a path that is not there yet,
+// it would silently fall back to the uncanonicalized form and disagree with
+// every path the code under test computes. `makeRepo` is idempotent and
+// hoisted, so calling it here costs nothing and `beforeEach` still re-makes it.
+makeRepo();
+// Derived, never hand-spelled: a literal would duplicate `repoFingerprint` and
+// re-freeze the very format these tests are meant to outlive.
+const WORKTREE = workerWorkspace(path.join(WORKER_REPOS_ROOT, REPO), SESSION.id);
 
 /** A request as the container tool writes it — still inside its wait window. */
 function request(over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -332,6 +339,30 @@ describe('create_worker — reuse for one (repo, thread) pair', () => {
     const answer = response();
     expect(answer?.status).toBe('reused');
     expect(answer?.result.message).toContain('"scout"');
+  });
+
+  it('re-creates the worktree when it was pruned out from under the worker', async () => {
+    // `ncl worktrees prune` removes a CLEAN worktree and deliberately leaves
+    // `agent_groups` alone, and a human can `rm -rf` one just as easily. The
+    // group row therefore outlives its directory, and reuse must put it back:
+    // otherwise the brief is delivered and the spawn then chdirs into a path
+    // that is not there. Clearing `workspace_path` on prune is the WRONG fix —
+    // the reuse lookup keys on that column, so clearing it mints a second
+    // worker on a second branch for one thread.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    mockFindWorkerForOrigin.mockResolvedValue(EXISTING);
+    mockGetDestinationByTarget.mockResolvedValue({ local_name: 'scout' });
+    fs.rmSync(WORKTREE, { recursive: true, force: true });
+    expect(fs.existsSync(WORKTREE)).toBe(false);
+
+    await runCreateWorker(request({ task: 'Carry on.' }));
+
+    expect(fs.existsSync(WORKTREE)).toBe(true);
+    expect(briefsTo(EXISTING.id)).toEqual(['Carry on.']);
+    expect(response()?.status).toBe('reused');
+    // The derivation still agrees with the stored column, so nothing is
+    // re-stamped. The update exists for the case where it stops agreeing.
+    expect(mockUpdateAgentGroup).not.toHaveBeenCalled();
   });
 
   it('never cards an admin for a reuse — creating a worker never holds, at any cli_scope', async () => {
