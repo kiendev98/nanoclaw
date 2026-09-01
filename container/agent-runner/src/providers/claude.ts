@@ -6,7 +6,15 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
-import { recordContextUsage, recordContextWindow, recordModel, recordUtilization } from '../message-footer.js';
+import {
+  recordAccountName,
+  recordContextPercent,
+  recordContextUsage,
+  recordContextWindow,
+  recordModel,
+  recordRateLimits,
+  recordUtilization,
+} from '../message-footer.js';
 import { AGENT_DIR } from '../roots.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
 import { shimCwd } from './cwd-shim.js';
@@ -50,6 +58,30 @@ export interface SdkRateLimitInfo {
  *
  * Returns null when the event is informational (do not disturb the turn).
  */
+/**
+ * Invoke an optional zero-argument control method and hand its result to
+ * `onValue`, or do nothing at all.
+ *
+ * Every failure is swallowed deliberately: a missing method (older SDK, or a
+ * test double), a rejected control request, and a throwing handler. The only
+ * caller is footer telemetry, which must never delay a turn or fail one.
+ */
+function callIfAvailable<T>(
+  target: unknown,
+  method: string,
+  onValue: (value: T | undefined) => void,
+): void {
+  const fn = (target as Record<string, unknown> | null)?.[method];
+  if (typeof fn !== 'function') return;
+  try {
+    void Promise.resolve((fn as () => Promise<T>).call(target))
+      .then((value) => onValue(value))
+      .catch(() => {});
+  } catch {
+    // A synchronous throw from the control call itself.
+  }
+}
+
 export function classifyRateLimitEvent(
   info: SdkRateLimitInfo | undefined,
 ): { message: string; classification: 'rate_limit' | 'quota' } | null {
@@ -613,6 +645,28 @@ export class ClaudeProvider implements AgentProvider {
           // `model` is optional, so an install that pins nothing would
           // otherwise have no model to show.
           recordModel((message as { model?: string }).model);
+          // The SDK's own answers for the other two footer fields, asked once
+          // per turn. `getContextUsage` is what `/context` prints — it divides
+          // by the USABLE window, not the raw one, so computing the ratio here
+          // would read low against the number the user sees in a terminal.
+          //
+          // Both are optional and fire-and-forget. They are control-protocol
+          // methods that arrived in a later SDK than the one this provider was
+          // written against, and the object is only a Query by contract — the
+          // recorded-turn tests drive this generator with a bare async
+          // iterable. Calling an absent method here throws INSIDE the event
+          // loop and kills the turn, so a cosmetic footer would take down
+          // every delivery on an older SDK.
+          callIfAvailable(sdkResult, 'getContextUsage', (usage) => recordContextPercent(usage?.percentage));
+          callIfAvailable(sdkResult, 'accountInfo', (info) => recordAccountName(info?.organization));
+          // The structured `/usage` payload, which carries the plan's
+          // rate-limit windows outright. The control request for it exists in
+          // the protocol but is not on the Query interface this SDK version
+          // types, so it is probed rather than called — `callIfAvailable`
+          // makes an absent method a no-op. This is the only source that can
+          // populate 5h/7d: `rate_limit_event` fires solely on CHANGE, and it
+          // has never fired on this account.
+          callIfAvailable(sdkResult, 'getUsage', (usage) => recordRateLimits(usage?.rate_limits));
           yield { type: 'init', continuation: message.session_id };
         } else if (message.type === 'assistant') {
           // Surface each assistant message's text as it streams in. The final

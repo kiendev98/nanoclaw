@@ -11,8 +11,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { closeSessionDb, initTestSessionDb } from './mailbox/sqlite/connection.js';
 import {
   accountName,
+  recordAccountName,
+  recordContextPercent,
   recordContextUsage,
   recordContextWindow,
+  recordRateLimits,
   recordModel,
   recordUtilization,
   renderFooter,
@@ -23,6 +26,8 @@ import {
 
 let configDir: string;
 let previousConfigDir: string | undefined;
+let groupDir: string;
+let previousGroupDir: string | undefined;
 
 /** Write a config file shaped like the real one, in the layout CLAUDE_CONFIG_DIR implies. */
 function writeConfig(organizationName: unknown): void {
@@ -34,14 +39,22 @@ function writeConfig(organizationName: unknown): void {
 
 beforeEach(() => {
   previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  previousGroupDir = process.env.NANOCLAW_AGENT_DIR;
   configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-footer-'));
+  // The group store is a file in the agent group folder. Without a writable
+  // root here it silently no-ops, and every group-scope case would pass for
+  // the wrong reason.
+  groupDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-footer-group-'));
   process.env.CLAUDE_CONFIG_DIR = configDir;
+  process.env.NANOCLAW_AGENT_DIR = groupDir;
   resetFooterTelemetry();
 });
 
 afterEach(() => {
   if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
   else process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+  if (previousGroupDir === undefined) delete process.env.NANOCLAW_AGENT_DIR;
+  else process.env.NANOCLAW_AGENT_DIR = previousGroupDir;
   resetFooterTelemetry();
 });
 
@@ -200,7 +213,7 @@ describe('surviving a session sweep', () => {
     recordUtilization('seven_day', 0.12);
     expect(renderFooter()).toBe('Wego #1 · ctx: 54% · 5h: 31% · 7d: 12%');
 
-    // The process restarts: in-memory state is gone, the database is not.
+    // The process restarts: in-memory state is gone, the stores are not.
     resetFooterTelemetry();
     writeConfig('Wego #1');
 
@@ -219,5 +232,144 @@ describe('surviving a session sweep', () => {
     recordUtilization('five_hour', 0.44);
 
     expect(renderFooter()).toBe('Wego #1 · 5h: 44% · 7d: 12%');
+  });
+
+  // The bug this scoping fixes. A new thread is a NEW session with an empty
+  // session store, and the window size only arrives on that turn's result —
+  // after the first message is already sent. Held per session, every new
+  // thread rendered its first message with no ctx at all.
+  it('gives a brand-new session the model and account facts from the group', () => {
+    writeConfig('Wego #1');
+    recordContextWindow(200_000);
+    recordUtilization('five_hour', 0.31);
+
+    // A new thread: fresh session database, same agent group.
+    closeSessionDb();
+    resetFooterTelemetry();
+    initTestSessionDb();
+    writeConfig('Wego #1');
+
+    // Its own occupancy is correctly absent — that IS session state — but the
+    // window size and the account's utilization carry over, so the very first
+    // message can render them.
+    recordContextUsage({ input_tokens: 20_000 });
+    expect(renderFooter()).toBe('Wego #1 · ctx: 10% · 5h: 31%');
+  });
+
+  it('does not leak one session\'s occupancy into another', () => {
+    writeConfig('Wego #1');
+    recordContextUsage({ input_tokens: 180_000 });
+    recordContextWindow(200_000);
+    expect(renderFooter()).toBe('Wego #1 · ctx: 90%');
+
+    closeSessionDb();
+    resetFooterTelemetry();
+    initTestSessionDb();
+    writeConfig('Wego #1');
+
+    // 90% belonged to the other thread. Showing it here would be a lie the
+    // reader would act on. The window size still carries over from the group
+    // store, but with no occupancy to divide there is no ctx to render — and
+    // the account alone is one field, which renders nothing.
+    expect(renderFooter()).toBeNull();
+  });
+});
+
+/**
+ * The SDK's own answers, preferred over anything derived here.
+ *
+ * `getContextUsage()` is what `/context` prints, and it divides by the USABLE
+ * window — Claude Code reserves part of the window for output. Computing the
+ * ratio from the raw window reads LOWER than the number the user sees in a
+ * terminal, which is the kind of near-miss that makes a reader distrust every
+ * other field in the line.
+ */
+describe('authoritative SDK sources', () => {
+  it('prefers the reported percentage over the computed ratio', () => {
+    writeConfig('Wego #1');
+    // The raw window says 10%. The SDK, dividing by the usable window, says 14.
+    recordContextUsage({ input_tokens: 20_000 });
+    recordContextWindow(200_000);
+    expect(renderFooter()).toBe('Wego #1 · ctx: 10%');
+
+    recordContextPercent(14);
+    expect(renderFooter()).toBe('Wego #1 · ctx: 14%');
+  });
+
+  it('falls back to the computed ratio when the SDK never answered', () => {
+    // getContextUsage is fire-and-forget, so a failed or slow control request
+    // must still leave a ctx figure rather than a gap.
+    writeConfig('Wego #1');
+    recordContextUsage({ input_tokens: 20_000 });
+    recordContextWindow(200_000);
+    expect(renderFooter()).toBe('Wego #1 · ctx: 10%');
+  });
+
+  it('clamps a percentage outside 0–100', () => {
+    writeConfig('Wego #1');
+    recordContextPercent(140);
+    expect(renderFooter()).toBe('Wego #1 · ctx: 100%');
+  });
+
+  it('ignores a non-finite percentage', () => {
+    writeConfig('Wego #1');
+    recordModel('claude-opus-5');
+    recordContextPercent(Number.NaN);
+    expect(renderFooter()).toBe('Wego #1 · opus-5');
+  });
+
+  it('prefers the organisation the SDK reports over the config file', () => {
+    // claude-swap changes CLAUDE_CONFIG_DIR, but the SDK reports the account
+    // the turn actually authenticated as — which is the question being asked.
+    writeConfig('Wego #1');
+    recordAccountName('Wego #2');
+    recordModel('claude-opus-5');
+    expect(renderFooter()).toBe('Wego #2 · opus-5');
+  });
+
+  it('keeps the config-file organisation when the SDK reports none', () => {
+    writeConfig('Wego #1');
+    recordAccountName(undefined);
+    recordModel('claude-opus-5');
+    expect(renderFooter()).toBe('Wego #1 · opus-5');
+  });
+});
+
+/**
+ * The structured `/usage` payload. In practice the only source that has ever
+ * produced a 5h/7d value here — `rate_limit_event` fires solely on CHANGE and
+ * never fired at all across four sessions on this account.
+ */
+describe('recordRateLimits', () => {
+  it('converts percentages to the fraction the store keeps', () => {
+    // This payload is 0-100 while rate_limit_event is 0-1. Skipping the
+    // division renders `5h: 3100%`.
+    writeConfig('Wego #1');
+    recordRateLimits({ five_hour: { utilization: 31 }, seven_day: { utilization: 12 } });
+
+    expect(renderFooter()).toBe('Wego #1 · 5h: 31% · 7d: 12%');
+  });
+
+  it('skips a window whose utilization is null', () => {
+    writeConfig('Wego #1');
+    recordModel('claude-opus-5');
+    recordRateLimits({ five_hour: { utilization: null }, seven_day: null });
+
+    expect(renderFooter()).toBe('Wego #1 · opus-5');
+  });
+
+  it('ignores a payload that is absent or not an object', () => {
+    writeConfig('Wego #1');
+    recordModel('claude-opus-5');
+    recordRateLimits(undefined);
+
+    expect(renderFooter()).toBe('Wego #1 · opus-5');
+  });
+
+  it('renders the per-model weekly windows it also carries', () => {
+    writeConfig('Wego #1');
+    recordRateLimits({ seven_day_opus: { utilization: 44 } });
+
+    expect(renderFooter()).toBe('Wego #1 · 7d opus: 44%');
   });
 });
