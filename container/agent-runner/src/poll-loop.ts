@@ -10,7 +10,7 @@ import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { clearStaleProcessingAcks } from './db/container-state.js';
 import { touchHeartbeat } from './heartbeat.js';
 import { getAgentMailbox } from './mailbox/index.js';
-import { withFooter } from './message-footer.js';
+import { renderFooter } from './message-footer.js';
 import {
   clearContinuation,
   clearCurrentInReplyTo,
@@ -1143,7 +1143,11 @@ async function sendToDestination(dest: DestinationEntry, body: string, routing: 
   // Channel destinations only. An agent-to-agent message is machine input,
   // and a telemetry line appended to it is noise the receiving agent has to
   // reason about.
-  const text = dest.type === 'channel' ? withFooter(body) : body;
+  //
+  // Carried as its OWN field rather than appended to the text, so a channel
+  // that can style it does: the Slack bridge renders it as a muted context
+  // block (small, grey), and channels with no such affordance append it.
+  const footer = dest.type === 'channel' ? renderFooter() : null;
   await writeMessageOut({
     id: generateId(),
     in_reply_to: destRouting?.inReplyTo ?? routing.inReplyTo,
@@ -1151,7 +1155,7 @@ async function sendToDestination(dest: DestinationEntry, body: string, routing: 
     platform_id: platformId,
     channel_type: channelType,
     thread_id: destRouting?.threadId ?? null,
-    content: JSON.stringify({ text }),
+    content: JSON.stringify({ text: body, ...(footer ? { footer } : {}) }),
   });
 }
 

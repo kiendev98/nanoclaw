@@ -420,6 +420,14 @@ function terminalApprovalMessage(spec: TerminalApprovalCard) {
   };
 }
 
+/**
+ * Slack caps a section block at 3000 characters. A body longer than this
+ * cannot become one section, so it takes the markdown path and the footer is
+ * appended instead of styled. Held below the cap to leave room for the
+ * mrkdwn escaping the converter adds.
+ */
+const CARD_SECTION_LIMIT = 2800;
+
 export function splitForLimit(text: string, limit: number): string[] {
   if (text.length <= limit) return [text];
   const chunks: string[] = [];
@@ -917,7 +925,26 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // Normal message
       const rawText = (content.markdown as string) || (content.text as string);
       const text = rawText ? transformText(rawText) : rawText;
-      if (text) {
+
+      // Telemetry footer, carried as its own field so it can be STYLED rather
+      // than appended. A muted text element becomes a Slack `context` block —
+      // small and grey — which is what separates it from the reply visually.
+      //
+      // Only the simple case takes the card path. Files ride the markdown
+      // path, and a body long enough to need splitting cannot become one
+      // section block (Slack caps a section at 3000 characters). Both fall
+      // back to appending, so the footer is never silently dropped.
+      const footerText = typeof content.footer === 'string' ? content.footer.trim() : '';
+      const hasFiles = Boolean(message.files && message.files.length > 0);
+      if (text && footerText && !hasFiles && text.length <= CARD_SECTION_LIMIT) {
+        const result = await adapter.postMessage(tid, {
+          card: Card({ title: '', children: [CardText(text), CardText(footerText, { style: 'muted' })] }),
+          fallbackText: `${text}\n\n${footerText}`,
+        });
+        return result?.id;
+      }
+      const withFooterText = text && footerText ? `${text}\n\n${footerText}` : text;
+      if (withFooterText) {
         // Attach files if present (FileUpload format: { data, filename })
         const fileUploads = message.files?.map((f: { data: Buffer; filename: string }) => ({
           data: f.data,
@@ -926,9 +953,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         // Split if over the adapter's max length. Files ride on the first
         // chunk so the head of the reply still carries them.
         const chunks =
-          config.maxTextLength && text.length > config.maxTextLength
-            ? splitForLimit(text, config.maxTextLength)
-            : [text];
+          config.maxTextLength && withFooterText.length > config.maxTextLength
+            ? splitForLimit(withFooterText, config.maxTextLength)
+            : [withFooterText];
         let firstId: string | undefined;
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i];

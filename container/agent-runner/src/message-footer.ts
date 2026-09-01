@@ -26,6 +26,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+import { getFooterTelemetry, setFooterTelemetry } from './db/session-state.js';
+
 /** Rate-limit windows worth showing, in render order, with their labels. */
 const WINDOW_LABELS: ReadonlyArray<readonly [string, string]> = [
   ['five_hour', '5h'],
@@ -95,19 +97,27 @@ export function recordContextUsage(usage: FooterUsage | undefined): void {
   if (!usage) return;
   const total =
     (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
-  if (total > 0) contextTokens = total;
+  if (total === 0) return;
+  load();
+  contextTokens = total;
+  persist();
 }
 
 /** Record the model's context window, which only a `result` message carries. */
 export function recordContextWindow(size: number | undefined): void {
-  if (typeof size === 'number' && size > 0) contextWindow = size;
+  if (typeof size !== 'number' || size <= 0) return;
+  load();
+  contextWindow = size;
+  persist();
 }
 
 /** Record one window's utilization (0–1) from a `rate_limit_event`. */
 export function recordUtilization(rateLimitType: string | undefined, utilization: number | undefined): void {
   if (!rateLimitType) return;
   if (typeof utilization !== 'number' || !Number.isFinite(utilization)) return;
+  load();
   utilizationByWindow.set(rateLimitType, utilization);
+  persist();
 }
 
 /**
@@ -146,6 +156,61 @@ export function accountName(): string | null {
   return accountLabel;
 }
 
+/**
+ * Whether the persisted blob has been read into this process yet.
+ *
+ * Load is lazy rather than at import: this module is imported by the poll
+ * loop and by the provider, both of which can be evaluated before the
+ * mailbox is started, and reading state before then throws.
+ */
+let loaded = false;
+
+interface PersistedTelemetry {
+  contextTokens?: number;
+  contextWindow?: number;
+  windows?: Record<string, number>;
+}
+
+/**
+ * Read the persisted blob once per process.
+ *
+ * Every failure mode is swallowed to null-effect: no mailbox, no row, or a
+ * blob written by an older shape. The footer is cosmetic, and a delivery must
+ * never fail over it.
+ */
+function load(): void {
+  if (loaded) return;
+  loaded = true;
+  try {
+    const raw = getFooterTelemetry();
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as PersistedTelemetry;
+    if (typeof parsed.contextTokens === 'number') contextTokens = parsed.contextTokens;
+    if (typeof parsed.contextWindow === 'number') contextWindow = parsed.contextWindow;
+    for (const [key, value] of Object.entries(parsed.windows ?? {})) {
+      if (typeof value === 'number' && Number.isFinite(value)) utilizationByWindow.set(key, value);
+    }
+  } catch {
+    // Unreadable or unparseable — start blank rather than fail.
+  }
+}
+
+/** Write the blob back. Never throws: see `load`. */
+function persist(): void {
+  try {
+    setFooterTelemetry(
+      JSON.stringify({
+        ...(contextTokens !== null ? { contextTokens } : {}),
+        ...(contextWindow !== null ? { contextWindow } : {}),
+        windows: Object.fromEntries(utilizationByWindow),
+      } satisfies PersistedTelemetry),
+    );
+  } catch {
+    // Storage unavailable (no mailbox yet, read-only DB). The value still
+    // applies for the life of this process.
+  }
+}
+
 function percent(fraction: number): string {
   return `${Math.round(fraction * 100)}%`;
 }
@@ -157,6 +222,7 @@ function percent(fraction: number): string {
  * explicit: a message with no telemetry gets no trailing blank lines.
  */
 export function renderFooter(model: string | null = modelLabel): string | null {
+  load();
   const parts: string[] = [];
 
   const account = accountName();
@@ -177,7 +243,14 @@ export function renderFooter(model: string | null = modelLabel): string | null {
   return parts.join(' · ');
 }
 
-/** Append the footer to a message body. Returns the body unchanged when there is nothing to say. */
+/**
+ * Append the footer to a message body, for channels that carry only text.
+ *
+ * Prefer emitting the footer as its OWN field where the channel can style it
+ * (see `renderFooter`): Slack renders a muted text element as a context
+ * block — small and grey — which is the whole point of separating it from
+ * the body. This is the fallback for channels with no such affordance.
+ */
 export function withFooter(body: string): string {
   const footer = renderFooter();
   return footer ? `${body}\n\n${footer}` : body;
@@ -190,4 +263,5 @@ export function resetFooterTelemetry(): void {
   contextWindow = null;
   accountLabel = undefined;
   modelLabel = null;
+  loaded = false;
 }

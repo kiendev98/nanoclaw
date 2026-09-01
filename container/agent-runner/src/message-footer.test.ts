@@ -8,6 +8,7 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
+import { closeSessionDb, initTestSessionDb } from './mailbox/sqlite/connection.js';
 import {
   accountName,
   recordContextUsage,
@@ -169,5 +170,54 @@ describe('withFooter', () => {
 
   it('leaves the body untouched when there is no footer, adding no trailing blank lines', () => {
     expect(withFooter('done')).toBe('done');
+  });
+});
+
+/**
+ * The reason the blob is persisted at all.
+ *
+ * Sessions are swept whenever they go idle, and the numbers arrive far more
+ * rarely than they are read: `contextWindow` once per turn on the result, and
+ * a utilization only when it CHANGES, which can be many turns apart. Held in
+ * memory alone, every wake starts blank and the footer decays to a bare model
+ * name until the SDK happens to mention them again — which is exactly what a
+ * reader would report as "the data is wrong".
+ */
+describe('surviving a session sweep', () => {
+  beforeEach(() => {
+    initTestSessionDb();
+  });
+
+  afterEach(() => {
+    closeSessionDb();
+  });
+
+  it('reloads context and utilization recorded before the process exited', () => {
+    writeConfig('Wego #1');
+    recordContextUsage({ input_tokens: 108_000 });
+    recordContextWindow(200_000);
+    recordUtilization('five_hour', 0.31);
+    recordUtilization('seven_day', 0.12);
+    expect(renderFooter()).toBe('Wego #1 · ctx: 54% · 5h: 31% · 7d: 12%');
+
+    // The process restarts: in-memory state is gone, the database is not.
+    resetFooterTelemetry();
+    writeConfig('Wego #1');
+
+    expect(renderFooter()).toBe('Wego #1 · ctx: 54% · 5h: 31% · 7d: 12%');
+  });
+
+  it('keeps a reloaded window when a later event reports only the other one', () => {
+    writeConfig('Wego #1');
+    recordUtilization('five_hour', 0.31);
+    recordUtilization('seven_day', 0.12);
+
+    resetFooterTelemetry();
+    writeConfig('Wego #1');
+    // Only the 5h window changed after the wake. The 7d value must not vanish
+    // merely because this session never heard about it.
+    recordUtilization('five_hour', 0.44);
+
+    expect(renderFooter()).toBe('Wego #1 · 5h: 44% · 7d: 12%');
   });
 });
