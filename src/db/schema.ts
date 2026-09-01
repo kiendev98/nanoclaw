@@ -15,14 +15,28 @@ export const SCHEMA = `
 -- folder", which is what every group did before the column existed. The folder
 -- stays the agent's STATE directory either way: memory and telemetry never
 -- follow cwd into a repo.
+-- origin_session_id (migration 026) is the other half of a worker's identity:
+-- the session it was created for. Together with workspace_path -- which is
+-- itself derived from (repo, origin session) -- it is the (repo, thread) key
+-- that makes a second create_agent for the same repo in the same thread return
+-- the FIRST worker instead of minting a rival on a second branch. It also
+-- bounds the reply relay (a worker reaches exactly one conversation, read from
+-- this row, never one it names) and is what the reaper asks about. NULL means
+-- "not a worker". Not an FK: an ON DELETE CASCADE would delete the worker when
+-- its origin session row goes, orphaning a worktree that may hold uncommitted
+-- work.
 CREATE TABLE agent_groups (
-  id               TEXT PRIMARY KEY,
-  name             TEXT NOT NULL,
-  folder           TEXT NOT NULL UNIQUE,
-  agent_provider   TEXT,
-  created_at       TEXT NOT NULL,
-  workspace_path   TEXT
+  id                TEXT PRIMARY KEY,
+  name              TEXT NOT NULL,
+  folder            TEXT NOT NULL UNIQUE,
+  agent_provider    TEXT,
+  created_at        TEXT NOT NULL,
+  workspace_path    TEXT,
+  origin_session_id TEXT
 );
+
+CREATE INDEX idx_agent_groups_origin_session ON agent_groups(origin_session_id)
+  WHERE origin_session_id IS NOT NULL;
 
 -- Platform groups/channels. unknown_sender_policy governs what happens
 -- when a sender we've never seen before posts in this chat.

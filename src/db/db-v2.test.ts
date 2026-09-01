@@ -11,6 +11,8 @@ import {
   getAllAgentGroups,
   updateAgentGroup,
   deleteAgentGroup,
+  findWorkerForOrigin,
+  getWorkerAgentGroups,
   createMessagingGroup,
   getMessagingGroup,
   getMessagingGroupByPlatform,
@@ -160,6 +162,62 @@ describe('agent groups', () => {
 
     await updateAgentGroup('ag-1', { workspace_path: null });
     expect((await getAgentGroup('ag-1'))!.workspace_path).toBeNull();
+  });
+
+  // `origin_session_id` (migration 026) is the other half of a worker's
+  // identity: which conversation it belongs to. Paired with workspace_path —
+  // itself a pure function of (repo, origin session) — it is the (repo, thread)
+  // key that stops one thread from collecting rival workers on rival branches.
+  it('finds a worker by the (origin session, workspace) pair', async () => {
+    await createAgentGroup({
+      ...ag(),
+      workspace_path: '/worktrees/saber-nanoclaw-sess-7',
+      origin_session_id: 'sess-7',
+    });
+
+    expect((await findWorkerForOrigin('sess-7', '/worktrees/saber-nanoclaw-sess-7'))!.id).toBe('ag-1');
+  });
+
+  it('does not match the same thread against a different repository', async () => {
+    // One thread may hold one worker PER repo, so the pair must be a pair.
+    await createAgentGroup({
+      ...ag(),
+      workspace_path: '/worktrees/saber-nanoclaw-sess-7',
+      origin_session_id: 'sess-7',
+    });
+
+    expect(await findWorkerForOrigin('sess-7', '/worktrees/other-nanoclaw-sess-7')).toBeUndefined();
+  });
+
+  it('does not match the same repository against a different thread', async () => {
+    await createAgentGroup({
+      ...ag(),
+      workspace_path: '/worktrees/saber-nanoclaw-sess-7',
+      origin_session_id: 'sess-7',
+    });
+
+    expect(await findWorkerForOrigin('sess-8', '/worktrees/saber-nanoclaw-sess-7')).toBeUndefined();
+  });
+
+  it('defaults the origin session to NULL, which means "not a worker"', async () => {
+    // Every group that predates the column is in exactly this state: nothing
+    // relays for it and nothing reaps it.
+    await createAgentGroup(ag());
+    expect((await getAgentGroup('ag-1'))!.origin_session_id).toBeNull();
+  });
+
+  it('lists only workers — the reaper candidate set', async () => {
+    await createAgentGroup(ag());
+    await createAgentGroup({
+      ...ag(),
+      id: 'ag-2',
+      folder: 'worker',
+      workspace_path: '/worktrees/saber-nanoclaw-sess-7',
+      origin_session_id: 'sess-7',
+    });
+
+    const workers = await getWorkerAgentGroups();
+    expect(workers.map((w) => w.id)).toEqual(['ag-2']);
   });
 });
 

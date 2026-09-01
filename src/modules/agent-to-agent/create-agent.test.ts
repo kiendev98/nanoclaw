@@ -43,6 +43,8 @@ const {
   mockInitGroupFilesystem,
   mockWriteDestinations,
   mockNotifyWrite,
+  mockFindWorkerForOrigin,
+  mockGetDestinationByTarget,
   liveApprovals,
   approvalHandlers,
 } = vi.hoisted(() => ({
@@ -52,6 +54,8 @@ const {
   mockInitGroupFilesystem: vi.fn(),
   mockWriteDestinations: vi.fn(),
   mockNotifyWrite: vi.fn(),
+  mockFindWorkerForOrigin: vi.fn().mockResolvedValue(undefined),
+  mockGetDestinationByTarget: vi.fn().mockResolvedValue(undefined),
   liveApprovals: new Map<string, import('../../types.js').PendingApproval>(),
   approvalHandlers: new Map<string, (ctx: Record<string, unknown>) => Promise<void>>(),
 }));
@@ -71,6 +75,7 @@ vi.mock('../../db/agent-groups.js', () => ({
   getAgentGroup: (id: string) => ({ id, name: id.toUpperCase(), folder: id, agent_provider: null, created_at: '' }),
   getAgentGroupByFolder: () => undefined,
   createAgentGroup: (...a: unknown[]) => mockCreateAgentGroup(...a),
+  findWorkerForOrigin: (...a: unknown[]) => mockFindWorkerForOrigin(...a),
 }));
 vi.mock('../../group-init.js', () => ({
   initGroupFilesystem: (...a: unknown[]) => mockInitGroupFilesystem(...a),
@@ -80,6 +85,7 @@ vi.mock('./write-destinations.js', () => ({
 }));
 vi.mock('./db/agent-destinations.js', () => ({
   getDestinationByName: () => undefined,
+  getDestinationByTarget: (...a: unknown[]) => mockGetDestinationByTarget(...a),
   createDestination: vi.fn(),
   hasDestination: () => true,
   normalizeName: (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
@@ -413,5 +419,147 @@ describe('create_agent — repo-scoped workers', () => {
     const group = mockCreateAgentGroup.mock.calls[0][0] as { workspace_path: string };
     created = group.workspace_path;
     expect(fs.existsSync(created)).toBe(true);
+  });
+});
+
+/**
+ * One worker per (repository, thread), not one per command.
+ *
+ * A second `create_agent({ repo })` in the same thread used to mint a second
+ * agent on a second branch in a second worktree. That worker could not see a
+ * line of the first one's work, so one conversation held two agents answering
+ * about the same repository with nothing to say which was current — the main
+ * trap of the whole feature.
+ */
+describe('create_agent — worker reuse for one (repo, thread) pair', () => {
+  const REPO = 'demo-repo';
+  const WORKTREE = path.join(
+    process.env.HOME || '',
+    '.config',
+    'nanoclaw',
+    'worktrees',
+    `${REPO}-nanoclaw-${SESSION.id}`,
+  );
+  const EXISTING = {
+    id: 'ag-worker-1',
+    name: 'Scout',
+    folder: 'scout',
+    agent_provider: null,
+    created_at: '',
+    workspace_path: WORKTREE,
+    origin_session_id: SESSION.id,
+  };
+
+  beforeEach(() => {
+    fs.mkdirSync(A2A_REPOS_ROOT, { recursive: true });
+    const repoDir = path.join(A2A_REPOS_ROOT, REPO);
+    if (!fs.existsSync(repoDir)) {
+      fs.mkdirSync(repoDir, { recursive: true });
+      const run = (args: string[]): void => void execFileSync('git', ['-C', repoDir, ...args], { stdio: 'ignore' });
+      run(['init', '-b', 'main']);
+      run(['config', 'user.email', 'test@example.com']);
+      run(['config', 'user.name', 'Test']);
+      fs.writeFileSync(path.join(repoDir, 'README.md'), '# demo\n');
+      run(['add', '.']);
+      run(['commit', '-m', 'init']);
+    }
+    mockFindWorkerForOrigin.mockResolvedValue(undefined);
+    mockGetDestinationByTarget.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    // Some cases below deliberately DO create a worker, so the worktree has to
+    // go even though the reuse cases never make one.
+    removeWorktree(WORKTREE);
+    fs.rmSync(WORKTREE, { recursive: true, force: true });
+    fs.rmSync(A2A_TEST_ROOT, { recursive: true, force: true });
+  });
+
+  it('looks the worker up by the (repo, thread) pair, keyed on the derived worktree', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    mockFindWorkerForOrigin.mockResolvedValue(EXISTING);
+    mockGetDestinationByTarget.mockResolvedValue({ local_name: 'scout' });
+
+    await runCreateAgent({ name: 'Scout', repo: REPO });
+
+    // The key is (origin session, worktree path), and the worktree path is a
+    // pure function of (repo, origin session) — so one thread can hold one
+    // worker per repository, and the same repo in another thread is another
+    // worker.
+    expect(mockFindWorkerForOrigin).toHaveBeenCalledWith(SESSION.id, WORKTREE);
+  });
+
+  it('returns the SAME worker rather than creating a second one', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    mockFindWorkerForOrigin.mockResolvedValue(EXISTING);
+    mockGetDestinationByTarget.mockResolvedValue({ local_name: 'scout' });
+
+    await runCreateAgent({ name: 'Scout II', repo: REPO });
+
+    expect(mockCreateAgentGroup).not.toHaveBeenCalled();
+    expect(mockInitGroupFilesystem).not.toHaveBeenCalled();
+    // The requester is handed the handle send_message actually accepts.
+    const notified = JSON.parse(mockNotifyWrite.mock.calls.at(-1)![2].content) as { text: string };
+    expect(notified.text).toContain('"scout"');
+    expect(notified.text).toContain(REPO);
+  });
+
+  it('never cards an admin for a reuse — the privilege was already granted', async () => {
+    // `group` scope is the confined default, which normally holds. There is
+    // nothing to approve: the worker, its worktree and the destination row
+    // all exist.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    mockFindWorkerForOrigin.mockResolvedValue(EXISTING);
+    mockGetDestinationByTarget.mockResolvedValue({ local_name: 'scout' });
+
+    await runCreateAgent({ name: 'Scout', repo: REPO });
+
+    expect(mockRequestApproval).not.toHaveBeenCalled();
+    expect(mockCreateAgentGroup).not.toHaveBeenCalled();
+  });
+
+  it('creates a reachable worker when the existing one has no destination row', async () => {
+    // An unaddressable worker is not reuse: handing back a name send_message
+    // cannot resolve is worse than a second agent.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    mockFindWorkerForOrigin.mockResolvedValue(EXISTING);
+    mockGetDestinationByTarget.mockResolvedValue(undefined);
+
+    await runCreateAgent({ name: 'Scout', repo: REPO });
+
+    expect(mockCreateAgentGroup).toHaveBeenCalledTimes(1);
+  });
+
+  it('reuses on an approved replay, so a card approved twice yields one worker', async () => {
+    // An approval can sit for hours. Re-entering with the approval row as the
+    // content must not create a rival for a thread that gained a worker in the
+    // meantime.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    mockFindWorkerForOrigin.mockResolvedValue(EXISTING);
+    mockGetDestinationByTarget.mockResolvedValue({ local_name: 'scout' });
+    const payload = { name: 'Scout', instructions: null, repo: REPO };
+
+    await approvalHandlers.get('create_agent')!({
+      session: SESSION,
+      payload,
+      approval: liveGrant('appr-ca-reuse', payload),
+      userId: 'telegram:admin',
+      notify: vi.fn(),
+    });
+
+    expect(mockCreateAgentGroup).not.toHaveBeenCalled();
+  });
+
+  it('stamps the originating session on a fresh worker, and leaves it NULL otherwise', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+
+    await runCreateAgent({ name: 'Scout', repo: REPO });
+    expect(mockCreateAgentGroup.mock.calls[0][0]).toMatchObject({ origin_session_id: SESSION.id });
+
+    mockCreateAgentGroup.mockClear();
+    await runCreateAgent({ name: 'Plain' });
+    // An ordinary sub-agent belongs to its creator, not to a conversation:
+    // nothing relays for it and nothing reaps it.
+    expect(mockCreateAgentGroup.mock.calls[0][0]).toMatchObject({ origin_session_id: null });
   });
 });

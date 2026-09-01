@@ -23,11 +23,16 @@
  * (empty by default), and an unresolvable name aborts the creation loudly. It
  * must never fall back to the group folder: a worker in the wrong repository is
  * indistinguishable from a working one until it edits the wrong tree.
+ *
+ * A worker is the pair (repository, originating thread), NOT one agent per
+ * command. A second `create_agent({ repo })` in the same thread returns the
+ * first worker; see `worker-identity.ts` for why the branch is derived from the
+ * origin session, and `existingWorkerFor` for the lookup.
  */
 import path from 'path';
 
 import { GROUPS_DIR, PROJECT_ROOTS } from '../../config.js';
-import { createAgentGroup, getAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
+import { createAgentGroup, findWorkerForOrigin, getAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { getContainerConfig } from '../../db/container-configs.js';
 import { getSession } from '../../db/sessions.js';
 import { requestWake } from '../../request-wake.js';
@@ -38,7 +43,13 @@ import { writeSessionMessage } from '../../session-manager.js';
 import type { AgentGroup, Session } from '../../types.js';
 import { requestApproval } from '../approvals/index.js';
 import { createWorktree, resolveRepo } from '../../worktree.js';
-import { createDestination, getDestinationByName, normalizeName } from './db/agent-destinations.js';
+import {
+  createDestination,
+  getDestinationByName,
+  getDestinationByTarget,
+  normalizeName,
+} from './db/agent-destinations.js';
+import { workerBranch, workerWorkspace } from './worker-identity.js';
 import { writeDestinations } from './write-destinations.js';
 
 /** The optional `repo` argument, as the container sent it. */
@@ -47,15 +58,36 @@ function requestedRepo(content: Record<string, unknown>): string {
 }
 
 /**
- * The branch a repo-scoped worker gets.
+ * The worker this (repo, thread) pair already has, or undefined.
  *
- * Derived rather than requested: the worker exists to hold one repository for
- * one destination, so its branch is its identity. Namespaced under `nanoclaw/`
- * so a human reading `git branch` in their own checkout can tell at a glance
- * which branches an agent made.
+ * ONE worker per (repository, originating thread), not one per command. A
+ * second `create_agent({ repo })` in the same thread must come back with the
+ * FIRST worker: a fresh one would stand on a fresh branch in a fresh worktree
+ * and could not see a line of the work already done there, so the thread would
+ * hold two agents giving divergent answers about the same repository with
+ * nothing to say which was current.
+ *
+ * The key is `(origin_session_id, workspace_path)`, and it is a genuine pair
+ * rather than a redundant one: `workspace_path` is a pure function of (repo,
+ * origin session), so one thread can hold one worker per repository, while the
+ * same repository in another thread is a different worker.
+ *
+ * @throws Never — an unresolvable repo is the caller's error to report.
  */
-function workerBranch(folder: string): string {
-  return `nanoclaw/${folder}`;
+async function existingWorkerFor(repoPath: string, originSessionId: string): Promise<AgentGroup | undefined> {
+  return findWorkerForOrigin(originSessionId, workerWorkspace(repoPath, originSessionId));
+}
+
+/**
+ * What the requester should be told to do with a worker that already exists.
+ *
+ * The local name matters more than the group id: it is the only handle
+ * `send_message` accepts. A worker with no destination row in the requester's
+ * namespace is unreachable, so that case falls through to a fresh creation
+ * rather than handing back a name that does not resolve.
+ */
+async function reusableWorkerName(sourceGroupId: string, worker: AgentGroup): Promise<string | undefined> {
+  return (await getDestinationByTarget(sourceGroupId, 'agent', worker.id))?.local_name;
 }
 
 async function notifyAgent(session: Session, text: string): Promise<void> {
@@ -92,12 +124,46 @@ export async function validateCreateAgent(content: Record<string, unknown>, sess
   // wrong directory looks exactly like one created in the right one.
   const repo = requestedRepo(content);
   if (repo) {
+    let repoPath: string;
     try {
-      resolveRepo(repo, PROJECT_ROOTS);
+      repoPath = resolveRepo(repo, PROJECT_ROOTS);
     } catch (err) {
       await notifyAgent(session, `create_agent failed: ${err instanceof Error ? err.message : String(err)}`);
       log.warn('create_agent failed: repo not resolvable', { name, repo, err });
       return false;
+    }
+
+    // Reuse is decided BEFORE the hold, for the same reason resolution is:
+    // this request needs no new privilege — the worker, its worktree and the
+    // destination row all exist already — so carding an admin spends the one
+    // human in the loop on a question with no consequences either way.
+    const existing = await existingWorkerFor(repoPath, session.id);
+    if (existing) {
+      const localName = await reusableWorkerName(session.agent_group_id, existing);
+      if (localName) {
+        await notifyAgent(
+          session,
+          `Agent "${localName}" is already working in "${repo}" for this conversation — reuse it with ` +
+            `send_message({ to: "${localName}", ... }). A second agent would stand on a second branch and ` +
+            `could not see the work "${localName}" has already done.`,
+        );
+        log.info('create_agent reused an existing worker', {
+          name,
+          repo,
+          localName,
+          worker: existing.id,
+          originSession: session.id,
+        });
+        return false;
+      }
+      // The worker exists but this requester cannot address it. Falling
+      // through creates a reachable one rather than naming a handle that does
+      // not resolve.
+      log.warn('create_agent: worker exists for this thread but the requester has no destination for it', {
+        repo,
+        worker: existing.id,
+        originSession: session.id,
+      });
     }
   }
   return true;
@@ -180,6 +246,44 @@ async function performCreateAgent(
   notify: (text: string) => Promise<void>,
   options?: CreateAgentOptions,
 ): Promise<void> {
+  // Reuse, re-checked here and not merely in the precheck. An approval can sit
+  // for hours, and the same thread may have been given a worker for this repo
+  // in the meantime — by another `create_agent` that was approved first, or by
+  // this same card being approved twice. Creating anyway would put a second
+  // agent on a second branch of the same repository in one conversation, which
+  // is the exact failure this whole key exists to prevent.
+  //
+  // Ordered ahead of the name-collision check on purpose: a repeat request
+  // usually carries the same name, and "you already have a destination named
+  // X" describes the symptom while hiding the cause.
+  if (repo) {
+    let existing: AgentGroup | undefined;
+    try {
+      existing = await existingWorkerFor(resolveRepo(repo, PROJECT_ROOTS), session.id);
+    } catch (err) {
+      await notify(
+        `Cannot create agent "${name}" for repo "${repo}": ${err instanceof Error ? err.message : String(err)}`,
+      );
+      log.error('create_agent failed: repo no longer resolvable', { name, repo, err });
+      return;
+    }
+    const reuseName = existing && (await reusableWorkerName(sourceGroup.id, existing));
+    if (existing && reuseName) {
+      await notify(
+        `Agent "${reuseName}" is already working in "${repo}" for this conversation — reuse it with ` +
+          `send_message({ to: "${reuseName}", ... }).`,
+      );
+      log.info('create_agent reused an existing worker', {
+        name,
+        repo,
+        localName: reuseName,
+        worker: existing.id,
+        originSession: session.id,
+      });
+      return;
+    }
+  }
+
   const localName = normalizeName(name);
 
   // Collision in the creator's destination namespace
@@ -221,7 +325,12 @@ async function performCreateAgent(
   let workspacePath: string | null = null;
   if (repo) {
     try {
-      workspacePath = createWorktree(resolveRepo(repo, PROJECT_ROOTS), workerBranch(folder));
+      // The branch is derived from the ORIGIN SESSION, not from this agent's
+      // folder: it is the (repo, thread) pair that owns a branch, and a
+      // folder-derived branch is what let a second worker exist beside the
+      // first. `createWorktree` is idempotent on the resulting path, so a
+      // retry adopts the worktree rather than duplicating it.
+      workspacePath = createWorktree(resolveRepo(repo, PROJECT_ROOTS), workerBranch(session.id));
     } catch (err) {
       await notify(
         `Cannot create agent "${name}" for repo "${repo}": ${err instanceof Error ? err.message : String(err)}`,
@@ -241,6 +350,10 @@ async function performCreateAgent(
     agent_provider: null,
     created_at: now,
     workspace_path: workspacePath,
+    // Only a repo-scoped worker belongs to a conversation. An ordinary
+    // sub-agent is the creator's, not the thread's, and NULL here keeps it
+    // exactly as unreaped and unrelayed as it was before this column existed.
+    origin_session_id: workspacePath ? session.id : null,
   };
   await createAgentGroup(newGroup);
   // Subagent path: a child inherits its creator's EFFECTIVE provider, NOT the
