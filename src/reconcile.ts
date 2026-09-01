@@ -27,11 +27,7 @@ export type ReconcileFn = (sessionId: string) => Promise<void>;
  * Singleton work that today rides the global sweep tick rather than any one
  * session. Each becomes its own coalesced queue key.
  */
-export const SINGLETON_KEYS = [
-  'singleton:egress-reheal',
-  'singleton:approvals-scan',
-  'singleton:worker-reap',
-] as const;
+export const SINGLETON_KEYS = ['singleton:egress-reheal', 'singleton:approvals-scan', 'singleton:worker-reap'] as const;
 export type SingletonKey = (typeof SINGLETON_KEYS)[number];
 
 export type ReconcileKey = `session:${string}` | SingletonKey;
