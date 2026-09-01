@@ -13,10 +13,20 @@
  * holds for admin approval. On approve the continuation re-enters the
  * wrapped action with the approval row as its grant and `createAgent` runs.
  * `performCreateAgent` is the module-private body.
+ *
+ * The optional `repo` argument raises the stakes rather than adding a feature:
+ * it decides the new agent's WORKING directory, and cwd is the only thing that
+ * decides which repository's `CLAUDE.md`, `.claude/skills/` and
+ * `.claude/settings.json` that agent loads. It arrives from the same untrusted
+ * container as everything else here, so it is never treated as a path — it is a
+ * NAME resolved against the operator's `NANOCLAW_PROJECT_ROOTS` allowlist
+ * (empty by default), and an unresolvable name aborts the creation loudly. It
+ * must never fall back to the group folder: a worker in the wrong repository is
+ * indistinguishable from a working one until it edits the wrong tree.
  */
 import path from 'path';
 
-import { GROUPS_DIR } from '../../config.js';
+import { GROUPS_DIR, PROJECT_ROOTS } from '../../config.js';
 import { createAgentGroup, getAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { getContainerConfig } from '../../db/container-configs.js';
 import { getSession } from '../../db/sessions.js';
@@ -27,8 +37,26 @@ import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { AgentGroup, Session } from '../../types.js';
 import { requestApproval } from '../approvals/index.js';
+import { createWorktree, resolveRepo } from '../../worktree.js';
 import { createDestination, getDestinationByName, normalizeName } from './db/agent-destinations.js';
 import { writeDestinations } from './write-destinations.js';
+
+/** The optional `repo` argument, as the container sent it. */
+function requestedRepo(content: Record<string, unknown>): string {
+  return typeof content.repo === 'string' ? content.repo.trim() : '';
+}
+
+/**
+ * The branch a repo-scoped worker gets.
+ *
+ * Derived rather than requested: the worker exists to hold one repository for
+ * one destination, so its branch is its identity. Namespaced under `nanoclaw/`
+ * so a human reading `git branch` in their own checkout can tell at a glance
+ * which branches an agent made.
+ */
+function workerBranch(folder: string): string {
+  return `nanoclaw/${folder}`;
+}
 
 async function notifyAgent(session: Session, text: string): Promise<void> {
   await writeSessionMessage(session.agent_group_id, session.id, {
@@ -56,6 +84,22 @@ export async function validateCreateAgent(content: Record<string, unknown>, sess
     log.warn('create_agent failed: missing source group', { sessionAgentGroup: session.agent_group_id, name });
     return false;
   }
+
+  // Resolve the repo BEFORE any hold is created. An unresolvable repo is a
+  // malformed request, and carding an admin for a request that cannot succeed
+  // wastes the one human in the loop. Failure is loud and terminal: there is no
+  // fallback to the group folder, because a worker silently created in the
+  // wrong directory looks exactly like one created in the right one.
+  const repo = requestedRepo(content);
+  if (repo) {
+    try {
+      resolveRepo(repo, PROJECT_ROOTS);
+    } catch (err) {
+      await notifyAgent(session, `create_agent failed: ${err instanceof Error ? err.message : String(err)}`);
+      log.warn('create_agent failed: repo not resolvable', { name, repo, err });
+      return false;
+    }
+  }
   return true;
 }
 
@@ -63,6 +107,7 @@ export async function validateCreateAgent(content: Record<string, unknown>, sess
 export async function requestCreateAgentHold(content: Record<string, unknown>, session: Session): Promise<void> {
   const name = typeof content.name === 'string' ? content.name : '';
   const instructions = typeof content.instructions === 'string' ? content.instructions : null;
+  const repo = requestedRepo(content);
   const sourceGroup = await getAgentGroup(session.agent_group_id);
   if (!sourceGroup) return;
 
@@ -70,9 +115,17 @@ export async function requestCreateAgentHold(content: Record<string, unknown>, s
     session,
     agentName: sourceGroup.name,
     action: 'create_agent',
-    payload: { name, instructions },
+    payload: { name, instructions, repo: repo || null },
     title: `Create agent: ${name}`,
-    question: `Agent "${sourceGroup.name}" wants to create a new sub-agent "${name}" (a new agent group with its own workspace and container). Approve?`,
+    // The repo is named in the question, not just carried in the payload: it is
+    // the part of this request an admin most needs to see. The payload carries
+    // it because an approved replay re-enters the action with the APPROVAL ROW
+    // as its content — a repo left out here would be dropped on approval, and
+    // the worker would come back scoped to nothing.
+    question:
+      `Agent "${sourceGroup.name}" wants to create a new sub-agent "${name}" ` +
+      `(a new agent group with its own workspace and container)` +
+      `${repo ? `, working in the repository "${repo}"` : ''}. Approve?`,
   });
 }
 
@@ -98,7 +151,15 @@ export async function createAgent(
   const sourceGroup = await getAgentGroup(session.agent_group_id);
   if (!name || !sourceGroup) return; // precheck already answered the requester
 
-  await performCreateAgent(name, instructions, session, sourceGroup, (text) => notifyAgent(session, text), options);
+  await performCreateAgent(
+    name,
+    instructions,
+    requestedRepo(content),
+    session,
+    sourceGroup,
+    (text) => notifyAgent(session, text),
+    options,
+  );
 }
 
 /**
@@ -112,6 +173,8 @@ export async function createAgent(
 async function performCreateAgent(
   name: string,
   instructions: string | null,
+  /** Repo NAME as requested, relative to a PROJECT_ROOTS entry. '' = no repo. */
+  repo: string,
   session: Session,
   sourceGroup: AgentGroup,
   notify: (text: string) => Promise<void>,
@@ -146,6 +209,28 @@ async function performCreateAgent(
     return;
   }
 
+  // A repo-scoped worker gets a git worktree, and that worktree becomes its
+  // cwd — which is the ONLY thing that makes it load that repository's
+  // CLAUDE.md, `.claude/skills/` and `.claude/settings.json`. Resolved again
+  // here rather than carried from the precheck: an approval can sit for hours,
+  // and the allowlist or the repository may have moved in between.
+  //
+  // Any failure aborts the creation. Falling back to the group folder would
+  // produce a worker that answers confidently from the wrong directory, which
+  // is indistinguishable from a working one until it edits the wrong tree.
+  let workspacePath: string | null = null;
+  if (repo) {
+    try {
+      workspacePath = createWorktree(resolveRepo(repo, PROJECT_ROOTS), workerBranch(folder));
+    } catch (err) {
+      await notify(
+        `Cannot create agent "${name}" for repo "${repo}": ${err instanceof Error ? err.message : String(err)}`,
+      );
+      log.error('create_agent failed: could not prepare the repo worktree', { name, repo, folder, err });
+      return;
+    }
+  }
+
   const agentGroupId = `ag-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const now = new Date().toISOString();
 
@@ -155,6 +240,7 @@ async function performCreateAgent(
     folder,
     agent_provider: null,
     created_at: now,
+    workspace_path: workspacePath,
   };
   await createAgentGroup(newGroup);
   // Subagent path: a child inherits its creator's EFFECTIVE provider, NOT the
@@ -200,8 +286,17 @@ async function performCreateAgent(
 
   if (!options?.suppressCreatedNotify) {
     await notify(
-      `Agent "${localName}" created. You can now message it with send_message({ to: "${localName}", ... }).`,
+      `Agent "${localName}" created${workspacePath ? ` in a worktree of "${repo}"` : ''}. ` +
+        `You can now message it with send_message({ to: "${localName}", ... }).`,
     );
   }
-  log.info('Agent group created', { agentGroupId, name, localName, folder, parent: sourceGroup.id });
+  log.info('Agent group created', {
+    agentGroupId,
+    name,
+    localName,
+    folder,
+    parent: sourceGroup.id,
+    repo: repo || undefined,
+    workspacePath: workspacePath ?? undefined,
+  });
 }

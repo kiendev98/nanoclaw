@@ -39,8 +39,22 @@ export const createAgent: McpToolDefinition = {
     inputSchema: {
       type: 'object' as const,
       properties: {
-        name: { type: 'string', description: 'Human-readable name (also becomes your destination name for this agent)' },
-        instructions: { type: 'string', description: 'CLAUDE.md content for the new agent (personality, role, instructions)' },
+        name: {
+          type: 'string',
+          description: 'Human-readable name (also becomes your destination name for this agent)',
+        },
+        instructions: {
+          type: 'string',
+          description: 'CLAUDE.md content for the new agent (personality, role, instructions)',
+        },
+        repo: {
+          type: 'string',
+          description:
+            'Optional repository NAME (e.g. "saber", or "wego/saber") to give this agent its own git worktree of. ' +
+            'The agent then works inside that repository and loads its CLAUDE.md, skills and settings. ' +
+            'A name relative to an operator-configured root — never a path, never absolute. ' +
+            'Only name a repo the user named; an unknown repo fails the creation rather than guessing.',
+        },
       },
       required: ['name'],
     },
@@ -58,6 +72,11 @@ export const createAgent: McpToolDefinition = {
         requestId,
         name,
         instructions: (args.instructions as string) || null,
+        // Passed through unvalidated ON PURPOSE. This container cannot be
+        // relied on to gate itself, so the host resolves the name against its
+        // own allowlist and refuses everything else — see
+        // src/modules/agent-to-agent/create-agent.ts.
+        repo: (args.repo as string) || null,
       }),
     });
 

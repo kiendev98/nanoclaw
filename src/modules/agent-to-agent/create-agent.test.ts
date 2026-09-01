@@ -9,19 +9,28 @@
  * delivery action (the only reachable path) and the approve continuation's
  * grant-carrying re-entry.
  */
+import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { PendingApproval, Session } from '../../types.js';
+import { removeWorktree } from '../../worktree.js';
 
 // The folder-dedupe loop is disk-aware (A4): point GROUPS_DIR at a temp root
 // so the residue-skip test controls what is on disk. Absent for every other
 // test, so their behavior is unchanged.
 const A2A_TEST_ROOT = '/tmp/nanoclaw-test-a2a-create-agent';
+const A2A_REPOS_ROOT = '/tmp/nanoclaw-test-a2a-create-agent/repos';
+// PROJECT_ROOTS is the allowlist a `repo` argument is resolved against. Empty
+// in a real install unless the operator sets NANOCLAW_PROJECT_ROOTS, so the
+// repo tests below need one; every other test in this file passes no `repo`
+// and never consults it. Literals, not the consts above: vi.mock is hoisted
+// over them.
 vi.mock('../../config.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../config.js')>()),
   GROUPS_DIR: '/tmp/nanoclaw-test-a2a-create-agent/groups',
+  PROJECT_ROOTS: ['/tmp/nanoclaw-test-a2a-create-agent/repos'],
 }));
 
 // Mocks for the collaborators the branch decides between / depends on.
@@ -283,5 +292,126 @@ describe('create_agent — approved replay (grant-carrying re-entry)', () => {
 
     expect(mockCreateAgentGroup).not.toHaveBeenCalled();
     expect(mockRequestApproval).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * `repo` decides the new agent's WORKING directory, and cwd is the only thing
+ * that decides which repository's CLAUDE.md, `.claude/skills/` and
+ * `.claude/settings.json` that agent loads. It arrives from the untrusted
+ * container, so it is a NAME resolved against the operator's allowlist — never
+ * a path — and a name that does not resolve must abort the creation. A fallback
+ * to the group folder would produce a worker that looks healthy while standing
+ * in the wrong directory.
+ */
+describe('create_agent — repo-scoped workers', () => {
+  const REPO = 'demo-repo';
+  let created: string | null = null;
+
+  beforeEach(() => {
+    fs.mkdirSync(A2A_REPOS_ROOT, { recursive: true });
+    const repoDir = path.join(A2A_REPOS_ROOT, REPO);
+    if (!fs.existsSync(repoDir)) {
+      fs.mkdirSync(repoDir, { recursive: true });
+      const run = (args: string[]): void => void execFileSync('git', ['-C', repoDir, ...args], { stdio: 'ignore' });
+      run(['init', '-b', 'main']);
+      run(['config', 'user.email', 'test@example.com']);
+      run(['config', 'user.name', 'Test']);
+      fs.writeFileSync(path.join(repoDir, 'README.md'), '# demo\n');
+      run(['add', '.']);
+      run(['commit', '-m', 'init']);
+    }
+    created = null;
+  });
+
+  afterEach(() => {
+    if (created) {
+      removeWorktree(created);
+      fs.rmSync(created, { recursive: true, force: true });
+    }
+    fs.rmSync(A2A_TEST_ROOT, { recursive: true, force: true });
+  });
+
+  it('stores the worktree path on the new group, so the spawn can use it as cwd', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+
+    await runCreateAgent({ name: 'Scout', repo: REPO });
+
+    expect(mockCreateAgentGroup).toHaveBeenCalledTimes(1);
+    const group = mockCreateAgentGroup.mock.calls[0][0] as { workspace_path: string; folder: string };
+    created = group.workspace_path;
+
+    expect(fs.existsSync(path.join(group.workspace_path, 'README.md'))).toBe(true);
+    // OUTSIDE the repository: the memory walk climbs past a worktree into its
+    // parent checkout, so a worktree inside the repo would load the outer
+    // checkout's CLAUDE.md on top of its own.
+    expect(group.workspace_path.startsWith(path.join(A2A_REPOS_ROOT, REPO))).toBe(false);
+  });
+
+  it('leaves workspace_path null when no repo is named — an ordinary agent is unchanged', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+
+    await runCreateAgent({ name: 'Scout' });
+
+    expect(mockCreateAgentGroup.mock.calls[0][0]).toMatchObject({ workspace_path: null });
+  });
+
+  it('refuses a repo outside the allowlist and creates nothing', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+
+    await runCreateAgent({ name: 'Scout', repo: '../../etc' });
+
+    expect(mockCreateAgentGroup).not.toHaveBeenCalled();
+    expect(mockInitGroupFilesystem).not.toHaveBeenCalled();
+  });
+
+  it('refuses an absolute path, and never falls back to the group folder', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+
+    await runCreateAgent({ name: 'Scout', repo: path.join(A2A_REPOS_ROOT, REPO) });
+
+    expect(mockCreateAgentGroup).not.toHaveBeenCalled();
+  });
+
+  it('refuses an unknown repo without ever carding an admin', async () => {
+    // A hold spends the one human in the loop on a request that cannot succeed.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+
+    await runCreateAgent({ name: 'Scout', repo: 'no-such-repo' });
+
+    expect(mockRequestApproval).not.toHaveBeenCalled();
+    expect(mockCreateAgentGroup).not.toHaveBeenCalled();
+  });
+
+  it('carries the repo into the approval payload, so approval does not drop it', async () => {
+    // The approved replay re-enters the action with the APPROVAL ROW as its
+    // content. A repo missing from the payload comes back as an unscoped agent.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+
+    await runCreateAgent({ name: 'Scout', repo: REPO });
+
+    expect(mockRequestApproval).toHaveBeenCalledTimes(1);
+    const card = mockRequestApproval.mock.calls[0][0] as { payload: Record<string, unknown>; question: string };
+    expect(card.payload).toMatchObject({ name: 'Scout', repo: REPO });
+    expect(card.question).toContain(REPO);
+  });
+
+  it('creates the worktree on an approved replay', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    const payload = { name: 'Scout', instructions: null, repo: REPO };
+    const approval = liveGrant('appr-ca-repo', payload);
+
+    await approvalHandlers.get('create_agent')!({
+      session: SESSION,
+      payload,
+      approval,
+      userId: 'telegram:admin',
+      notify: vi.fn(),
+    });
+
+    expect(mockCreateAgentGroup).toHaveBeenCalledTimes(1);
+    const group = mockCreateAgentGroup.mock.calls[0][0] as { workspace_path: string };
+    created = group.workspace_path;
+    expect(fs.existsSync(created)).toBe(true);
   });
 });

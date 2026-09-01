@@ -233,7 +233,9 @@ describe('extendTool — fixture extension of create_agent (end to end)', () => 
     });
 
     const props = schemaProps(createAgent);
-    expect(Object.keys(props).sort()).toEqual(['instructions', 'name', 'purpose']);
+    // The base properties plus the fixture's. `repo` is base: it scopes a new
+    // agent to a git worktree of a named repository.
+    expect(Object.keys(props).sort()).toEqual(['instructions', 'name', 'purpose', 'repo']);
     expect(createAgent.tool.description?.endsWith('The purpose line is shown publicly.')).toBe(true);
 
     await createAgent.handler({ name: 'Scout', purpose: 'Deep research' });
