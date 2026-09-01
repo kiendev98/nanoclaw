@@ -4,6 +4,7 @@ import path from 'path';
 import { readEnvFile } from './env.js';
 import { getContainerImageBase, getDefaultContainerImage, getInstallSlug } from './install-slug.js';
 import { isValidTimezone } from './timezone.js';
+import { parseProjectRoots } from './worktree.js';
 
 // Read config values from .env (falls back to process.env).
 const envConfig = readEnvFile([
@@ -22,6 +23,7 @@ const envConfig = readEnvFile([
   'NANOCLAW_EGRESS_NETWORK',
   'ONECLI_GATEWAY_CONTAINER',
   'NANOCLAW_GROUPS_DIR',
+  'NANOCLAW_PROJECT_ROOTS',
 ]);
 
 /**
@@ -89,6 +91,24 @@ export const GROUPS_DIR = process.env.NANOCLAW_GROUPS_DIR
     : path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 export const CENTRAL_DB_PATH = path.join(DATA_DIR, 'v2.db');
+// Directories under which a repo may be resolved by NAME for a repo-scoped
+// agent. An agent's cwd decides which repository's CLAUDE.md, skills and
+// settings it loads (see src/worktree.ts), and a chat message can ask for a
+// repo by name — so this allowlist is the only thing between "which repo?" and
+// "which path?". DEFAULT EMPTY, which turns the feature off entirely: with no
+// roots, no message can move an agent's cwd anywhere.
+//
+// Separated by the platform path delimiter, like PATH:
+//   NANOCLAW_PROJECT_ROOTS=/Users/me/IdeaProjects:/Users/me/work
+//
+// Read from process.env first because launchd (this host's service manager)
+// does not export `.env`; config.ts parses `.env` itself regardless of the
+// launcher, so envConfig still picks it up under launchd — the same reasoning
+// as NANOCLAW_GROUPS_DIR above.
+export const PROJECT_ROOTS: readonly string[] = parseProjectRoots(
+  process.env.NANOCLAW_PROJECT_ROOTS || envConfig.NANOCLAW_PROJECT_ROOTS || '',
+);
+
 // Local agent-template library. Committed but ships empty (+ README). Resolved
 // once at load. Override to another LOCAL path via NANOCLAW_TEMPLATES_DIR; never
 // a remote URL, never an ncl flag, never runtime-mutable.
