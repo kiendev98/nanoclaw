@@ -32,7 +32,6 @@ import { resolveSession, sessionDir, withExistingMailboxSession, writeSessionMes
 import type { PendingApproval, Session } from '../../types.js';
 import { requestApproval } from '../approvals/index.js';
 import { A2A_MESSAGE_GATE_ACTION, a2aSend } from './guard.js';
-import { relayWorkerReply } from './worker-relay.js';
 
 export { isSafeAttachmentName };
 export { A2A_MESSAGE_GATE_ACTION } from './guard.js';
@@ -355,14 +354,6 @@ async function performAgentRoute(
     a2aMsgId,
     forwardedFileCount: countForwardedFiles(forwardedContent),
   });
-
-  // A repo-scoped worker has no channel of its own, so its reply would reach
-  // the human only as an orchestrator paraphrase — one extra model turn, in the
-  // wrong voice, with no way to tell which repository answered. Echo it into
-  // the originating thread instead, attributed. Bounded by the guard decision
-  // above and by the worker's own `origin_session_id`; see worker-relay.ts.
-  const sourceGroup = await getAgentGroup(session.agent_group_id);
-  if (sourceGroup) await relayWorkerReply(sourceGroup, targetSession, msg.content);
 
   const fresh = await getSession(targetSession.id);
   if (fresh) await requestWake(fresh, 'inbound-message');
