@@ -234,6 +234,32 @@ export function createWorktree(repo: string, branch: string): string {
 }
 
 /**
+ * The repository a worktree belongs to, by name.
+ *
+ * Asked at relay time so a human reading a worker's message can see WHICH
+ * repository answered. Derived from git rather than parsed back out of the
+ * worktree's directory name: that name is `<repo>-<branch>` after
+ * `sanitizeSegment` has flattened both halves, so a repo or branch containing a
+ * dash makes the split ambiguous and the reader is told the wrong repository.
+ *
+ * `--git-common-dir` is the shared `.git` of the OWNING checkout, which is the
+ * one thing a worktree always knows about its origin.
+ *
+ * @returns The repository directory's name, or the worktree's own basename when
+ *   git cannot answer — a label is decoration, and losing it must never cost the
+ *   message it labels.
+ */
+export function worktreeRepoName(worktree: string): string {
+  try {
+    const commonDir = git(worktree, ['rev-parse', '--path-format=absolute', '--git-common-dir']).trim();
+    if (commonDir) return path.basename(path.dirname(commonDir));
+  } catch (err) {
+    log.debug('Could not name the repository behind a worktree', { worktree, err });
+  }
+  return path.basename(worktree);
+}
+
+/**
  * Remove a worktree, tolerating one that is already gone.
  *
  * Never forced. A worktree holding uncommitted agent work must fail to remove

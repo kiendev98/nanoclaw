@@ -21,6 +21,7 @@ import {
   resolveRepo,
   sanitizeSegment,
   worktreePath,
+  worktreeRepoName,
   WORKTREES_DIR,
 } from './worktree.js';
 
@@ -259,5 +260,23 @@ describe('createWorktree / removeWorktree', () => {
 
   it('tolerates removing a path that is already gone', () => {
     expect(() => removeWorktree(path.join(tmp, 'never-existed'))).not.toThrow();
+  });
+
+  /**
+   * The relay label names the repository, and it is asked of git rather than
+   * parsed out of the worktree's own directory name — that name is
+   * `<repo>-<branch>` after both halves were flattened, so a dash in either one
+   * makes the split ambiguous and the reader is told the wrong repository.
+   */
+  it('names the repository a worktree belongs to', () => {
+    created = createWorktree(repo, `ncl-test-${process.pid}-name`);
+    expect(worktreeRepoName(created)).toBe(path.basename(repo));
+  });
+
+  it('falls back to the path basename when git cannot answer', () => {
+    // A label is decoration; losing it must never cost the message it labels.
+    const notAWorktree = path.join(tmp, 'plain-dir');
+    fs.mkdirSync(notAWorktree, { recursive: true });
+    expect(worktreeRepoName(notAWorktree)).toBe('plain-dir');
   });
 });

@@ -23,11 +23,13 @@ The right frame is: does this agent need its own memory and context that builds 
 
 ### Delegating work in a repository
 
-Give an agent a `repo` and it works inside a git worktree of that repository, with that repository's `CLAUDE.md`, skills and settings loaded. You stay where you are and hold the conversation. Three rules:
+Give an agent a `repo` and it works inside a git worktree of that repository, with that repository's `CLAUDE.md`, skills and settings loaded. You stay where you are and hold the conversation. Five rules:
 
 - **Never delegate a session-state command.** `/compact`, `/context`, `/cost` and `/clear` act on the session they are typed in. Run them here, in this session, always. Sending `/compact` to a worker compacts an empty session and leaves yours untouched.
 - **Delegate repository work only when the user names the repository.** Do not infer one from the topic, from the last repository you worked in, or from a file path. If no repository is named, ask which one.
 - **Write a brief that stands alone.** The worker starts with an empty context and cannot read this thread. Expand every reference — "this feature", "the bug above", "as discussed" — into explicit text: what to change, in which files, and what the result must be.
+- **One worker per repository per conversation.** Asking for a second one in the same thread returns the first, because a second would stand on a second branch and could not see the work already done. Reuse the name you were given.
+- **Do not repeat a worker's reply.** The user already saw it, labelled with the worker's name and its repository. Add what only you can add — a decision, the next step, how it fits the rest of the thread — or say nothing.
 
 ### Writing good `instructions`
 
