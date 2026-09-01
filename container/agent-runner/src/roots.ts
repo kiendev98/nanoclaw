@@ -60,6 +60,20 @@ export const WORKSPACE_DIR = root('NANOCLAW_WORKSPACE_DIR', '/workspace');
  */
 export const AGENT_DIR = root('NANOCLAW_AGENT_DIR', '/workspace/agent');
 
+/**
+ * The process working directory: the repository or worktree the agent stands in.
+ *
+ * Split from AGENT_DIR because the two answer different questions. cwd decides
+ * which project's CLAUDE.md, `.claude/skills` and `.claude/settings.json`
+ * Claude Code loads — resolved by walking UP from cwd, verified empirically.
+ * AGENT_DIR decides where this agent's own state (memory, footer telemetry) is
+ * written. Holding both in one variable is what bound an agent to exactly one
+ * repository.
+ *
+ * Defaults to AGENT_DIR, so an install that sets nothing behaves as before.
+ */
+export const PROJECT_DIR = root('NANOCLAW_PROJECT_DIR', AGENT_DIR);
+
 /** Parent of the allowlisted extra mounts. Its entries are leaves. */
 export const EXTRA_DIR = root('NANOCLAW_EXTRA_DIR', '/workspace/extra');
 
