@@ -59,6 +59,63 @@ export interface SdkRateLimitInfo {
  * Returns null when the event is informational (do not disturb the turn).
  */
 /**
+ * Log what actually occupies the context window, once per turn.
+ *
+ * Diagnostic, and it exists because the percentage alone is unfalsifiable. A
+ * greeting reported 51% on a model whose id says 1M, which is either ~510k
+ * tokens of standing context or a `maxTokens` far below the raw window — and
+ * the two call for opposite responses. `percentage` cannot distinguish them;
+ * these fields can.
+ *
+ * `rawMaxTokens` is the model's full window and `maxTokens` is what Claude
+ * Code lets a conversation occupy after reserving room for output, so a large
+ * gap between them IS the answer.
+ */
+function logContextBreakdown(usage: unknown): void {
+  const u = usage as
+    | {
+        totalTokens?: number;
+        maxTokens?: number;
+        rawMaxTokens?: number;
+        percentage?: number;
+        model?: string;
+        categories?: Array<{ name?: string; tokens?: number }>;
+        memoryFiles?: Array<{ path?: string; tokens?: number }>;
+        mcpTools?: Array<{ serverName?: string; tokens?: number }>;
+      }
+    | null;
+  if (!u) return;
+
+  const top = (rows: Array<{ tokens?: number }> | undefined, label: (row: never) => string): string =>
+    (rows ?? [])
+      .filter((row) => (row.tokens ?? 0) > 0)
+      .sort((a, b) => (b.tokens ?? 0) - (a.tokens ?? 0))
+      .slice(0, 8)
+      .map((row) => `${label(row as never)}=${row.tokens}`)
+      .join(' ');
+
+  // Server-grouped rather than per-tool: a dozen MCP servers produce hundreds
+  // of tool rows, and the question is which SERVER is expensive.
+  const perServer = new Map<string, number>();
+  for (const tool of u.mcpTools ?? []) {
+    const name = tool.serverName ?? 'unknown';
+    perServer.set(name, (perServer.get(name) ?? 0) + (tool.tokens ?? 0));
+  }
+
+  log(
+    `context: total=${u.totalTokens} max=${u.maxTokens} rawMax=${u.rawMaxTokens} pct=${u.percentage} model=${u.model}`,
+  );
+  log(`context categories: ${top(u.categories, (row: { name?: string }) => row.name ?? '?')}`);
+  log(`context memory files: ${top(u.memoryFiles, (row: { path?: string }) => row.path ?? '?')}`);
+  log(
+    `context mcp servers: ${[...perServer.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([name, tokens]) => `${name}=${tokens}`)
+      .join(' ')}`,
+  );
+}
+
+/**
  * Invoke an optional zero-argument control method and hand its result to
  * `onValue`, or do nothing at all.
  *
@@ -657,7 +714,10 @@ export class ClaudeProvider implements AgentProvider {
           // iterable. Calling an absent method here throws INSIDE the event
           // loop and kills the turn, so a cosmetic footer would take down
           // every delivery on an older SDK.
-          callIfAvailable(sdkResult, 'getContextUsage', (usage) => recordContextPercent(usage?.percentage));
+          callIfAvailable(sdkResult, 'getContextUsage', (usage) => {
+            recordContextPercent(usage?.percentage);
+            logContextBreakdown(usage);
+          });
           callIfAvailable(sdkResult, 'accountInfo', (info) => recordAccountName(info?.organization));
           // The structured `/usage` payload, which carries the plan's
           // rate-limit windows outright. The control request for it exists in
