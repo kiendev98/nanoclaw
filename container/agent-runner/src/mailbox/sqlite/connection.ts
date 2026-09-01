@@ -17,12 +17,14 @@
  * src/session-manager.ts for the full set of cross-mount invariants and
  * scripts/sanity-live-poll.ts for the empirical validation.
  */
+import path from 'path';
+
 import { Database } from 'bun:sqlite';
 
-import { rooted } from '../../roots.js';
+import { WORKSPACE_DIR } from '../../roots.js';
 
-const DEFAULT_INBOUND_PATH = rooted('/workspace/inbound.db');
-const DEFAULT_OUTBOUND_PATH = rooted('/workspace/outbound.db');
+const DEFAULT_INBOUND_PATH = path.join(WORKSPACE_DIR, 'inbound.db');
+const DEFAULT_OUTBOUND_PATH = path.join(WORKSPACE_DIR, 'outbound.db');
 
 let _inbound: Database | null = null;
 let _outbound: Database | null = null;

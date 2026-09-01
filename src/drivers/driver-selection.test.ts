@@ -79,8 +79,17 @@ afterEach(() => {
 });
 
 describe('configuredDriverKind', () => {
-  it('defaults to docker when nothing is set anywhere', () => {
-    expect(configuredDriverKind({})).toBe('docker');
+  // This fork runs the agent on the host, so the default is 'local' where
+  // upstream's is 'docker'. Flipping this expectation back means agents start
+  // landing in containers again — it pins the fork's whole reason for
+  // existing, not a detail.
+  it('defaults to local when nothing is set anywhere', () => {
+    expect(configuredDriverKind({})).toBe('local');
+  });
+
+  it('still selects docker when it is asked for explicitly', () => {
+    expect(configuredDriverKind({ NANOCLAW_RUNTIME_DRIVER: 'docker' })).toBe('docker');
+    expect(createSessionDriver('docker').kind).toBe('docker');
   });
 
   it('reads the selection from .env, not only from the process environment', () => {
@@ -185,7 +194,7 @@ describe('getSessionDriver', () => {
     resetSessionDriver(standIn);
     expect(getSessionDriver()).toBe(standIn);
     resetSessionDriver(null);
-    expect(getSessionDriver().kind).toBe('docker');
+    expect(getSessionDriver().kind).toBe('local');
   });
 });
 

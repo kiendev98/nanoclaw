@@ -6,12 +6,13 @@
  * instead of environment variables.
  */
 import fs from 'fs';
+import path from 'path';
 
-import { rooted } from './roots.js';
+import { AGENT_DIR } from './roots.js';
 
 import type { McpServerConfig } from './providers/types.js';
 
-const CONFIG_PATH = rooted('/workspace/agent/container.json');
+const CONFIG_PATH = path.join(AGENT_DIR, 'container.json');
 
 export interface RunnerConfig {
   provider: string;
