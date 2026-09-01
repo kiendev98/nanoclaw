@@ -21,6 +21,7 @@ const envConfig = readEnvFile([
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
   'ONECLI_GATEWAY_CONTAINER',
+  'NANOCLAW_GROUPS_DIR',
 ]);
 
 /**
@@ -71,7 +72,21 @@ const HOME_DIR = process.env.HOME || os.homedir();
 export const MOUNT_ALLOWLIST_PATH = path.join(HOME_DIR, '.config', 'nanoclaw', 'mount-allowlist.json');
 export const SENDER_ALLOWLIST_PATH = path.join(HOME_DIR, '.config', 'nanoclaw', 'sender-allowlist.json');
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
-export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
+// Claude Code builds "project memory" by walking UP from a group's cwd
+// collecting every CLAUDE.md it passes. With groups/ nested inside this
+// checkout, that walk picked up this repo's own CLAUDE.md (11,618 tokens of
+// nanoclaw maintainer guidance meant for US, not the agent) into every single
+// chat session. Default stays under the project root for existing installs;
+// override to a path with no CLAUDE.md above it in its parent chain — e.g.
+// ~/.config/nanoclaw/groups — to stop the leak. Read from process.env first
+// because launchd (this host's service manager) does not export `.env`, but
+// config.ts parses `.env` itself regardless of the launcher, so envConfig
+// still picks it up under launchd.
+export const GROUPS_DIR = process.env.NANOCLAW_GROUPS_DIR
+  ? path.resolve(process.env.NANOCLAW_GROUPS_DIR)
+  : envConfig.NANOCLAW_GROUPS_DIR
+    ? path.resolve(envConfig.NANOCLAW_GROUPS_DIR)
+    : path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 export const CENTRAL_DB_PATH = path.join(DATA_DIR, 'v2.db');
 // Local agent-template library. Committed but ships empty (+ README). Resolved
