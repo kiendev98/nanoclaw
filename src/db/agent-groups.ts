@@ -3,9 +3,12 @@ import { getDb } from './connection.js';
 
 export async function createAgentGroup(group: AgentGroup): Promise<void> {
   await getDb().run(
-    `INSERT INTO agent_groups (id, name, folder, agent_provider, created_at)
-     VALUES (@id, @name, @folder, @agent_provider, @created_at)`,
-    group,
+    `INSERT INTO agent_groups (id, name, folder, agent_provider, created_at, workspace_path)
+     VALUES (@id, @name, @folder, @agent_provider, @created_at, @workspace_path)`,
+    // Spread-then-default rather than passing `group` straight through: named
+    // binding throws on a missing key, and `workspace_path` is optional on the
+    // type precisely because absence is the normal case.
+    { ...group, workspace_path: group.workspace_path ?? null },
   );
 }
 
@@ -23,7 +26,7 @@ export async function getAllAgentGroups(): Promise<AgentGroup[]> {
 
 export async function updateAgentGroup(
   id: string,
-  updates: Partial<Pick<AgentGroup, 'name' | 'agent_provider'>>,
+  updates: Partial<Pick<AgentGroup, 'name' | 'agent_provider' | 'workspace_path'>>,
 ): Promise<void> {
   const fields: string[] = [];
   const values: Record<string, unknown> = { id };

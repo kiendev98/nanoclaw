@@ -969,6 +969,21 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     TZ: containerConfig.timezone ?? TIMEZONE,
     ...mailboxEnvironment,
   };
+  // The repository this agent stands in, when it stands in one. cwd is the only
+  // thing that decides which project's CLAUDE.md, `.claude/skills/` and
+  // `.claude/settings.json` a session loads — Claude Code walks UP from cwd for
+  // all three — so this is what makes a worker a worker.
+  //
+  // It rides the typed `env` lane rather than a new SessionSpec field because
+  // the runner already reads it: `roots.ts` exports
+  // `PROJECT_DIR = root('NANOCLAW_PROJECT_DIR', AGENT_DIR)` and the local
+  // driver's `resolveSpawnCwd` uses it for the spawn's cwd (a5622111).
+  // Omitted when the group has none, so an ordinary group's spawn is byte-for-
+  // byte what it was: the driver falls back to NANOCLAW_AGENT_DIR.
+  //
+  // NOT a substitute for NANOCLAW_AGENT_DIR, which stays the group folder in
+  // every case — memory and footer telemetry must not follow cwd into a repo.
+  if (agentGroup.workspace_path) env.NANOCLAW_PROJECT_DIR = agentGroup.workspace_path;
   // The contributed lane (ContainerSpec.contributedEnv): registry-sourced env,
   // exempt from the credential-NAME check and still refused credential VALUES.
   // The model provider's contribution fills first, the gateway's second — a

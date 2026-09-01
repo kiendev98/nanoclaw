@@ -7,6 +7,23 @@ export interface AgentGroup {
   /** @deprecated Use container_configs.provider instead. */
   agent_provider: string | null;
   created_at: string;
+  /**
+   * The agent's WORKING directory, when it is not the group folder — a git
+   * worktree of some repository (see src/worktree.ts).
+   *
+   * cwd is the only thing that decides which project's `CLAUDE.md`,
+   * `.claude/skills/` and `.claude/settings.json` a session loads: Claude Code
+   * walks UP from cwd for all three and does not stop at a git repository root.
+   * So this column, and nothing else, is what puts an agent inside a repo.
+   *
+   * The group folder remains the agent's STATE directory in every case —
+   * memory and footer telemetry never follow cwd into a repository.
+   *
+   * Optional rather than `string | null` because absence and NULL mean the same
+   * thing (cwd is the group folder), and that is the behaviour every group had
+   * before the column existed. `createAgentGroup` normalizes it to NULL.
+   */
+  workspace_path?: string | null;
 }
 
 /** Per-agent-group container runtime config. Source of truth in the DB;

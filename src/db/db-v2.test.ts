@@ -135,6 +135,32 @@ describe('agent groups', () => {
     await createAgentGroup(ag());
     await expect(createAgentGroup({ ...ag(), id: 'ag-dup' })).rejects.toThrow();
   });
+
+  // `workspace_path` is the agent's WORKING directory when it is not the group
+  // folder — a git worktree of a repository. cwd is the only thing that decides
+  // which repository's CLAUDE.md, `.claude/skills/` and `.claude/settings.json`
+  // a session loads, so this column round-tripping is what makes a worker a
+  // worker across a host restart.
+  it('stores a workspace path and reads it back', async () => {
+    await createAgentGroup({ ...ag(), workspace_path: '/worktrees/saber-nanoclaw-scout' });
+    expect((await getAgentGroup('ag-1'))!.workspace_path).toBe('/worktrees/saber-nanoclaw-scout');
+  });
+
+  it('defaults the workspace path to NULL, which means "cwd is the group folder"', async () => {
+    // Every group that predates the column is in exactly this state, and must
+    // keep behaving exactly as it did.
+    await createAgentGroup(ag());
+    expect((await getAgentGroup('ag-1'))!.workspace_path).toBeNull();
+  });
+
+  it('can set and clear the workspace path', async () => {
+    await createAgentGroup(ag());
+    await updateAgentGroup('ag-1', { workspace_path: '/worktrees/saber-nanoclaw-scout' });
+    expect((await getAgentGroup('ag-1'))!.workspace_path).toBe('/worktrees/saber-nanoclaw-scout');
+
+    await updateAgentGroup('ag-1', { workspace_path: null });
+    expect((await getAgentGroup('ag-1'))!.workspace_path).toBeNull();
+  });
 });
 
 // ── Messaging Groups ──

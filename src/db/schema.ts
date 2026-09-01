@@ -8,12 +8,20 @@ export const SCHEMA = `
 -- Agent workspaces: folder, skills, CLAUDE.md.
 -- All workspaces are equal; privilege lives on users, not groups.
 -- Container config lives in the container_configs table (see migration 014).
+-- workspace_path (migration 025) is the agent's WORKING directory when it is
+-- not the group folder — a git worktree of some repository, so the session
+-- loads that repository's CLAUDE.md, .claude/skills/ and .claude/settings.json
+-- (Claude Code walks UP from cwd for all three). NULL means "cwd is the group
+-- folder", which is what every group did before the column existed. The folder
+-- stays the agent's STATE directory either way: memory and telemetry never
+-- follow cwd into a repo.
 CREATE TABLE agent_groups (
   id               TEXT PRIMARY KEY,
   name             TEXT NOT NULL,
   folder           TEXT NOT NULL UNIQUE,
   agent_provider   TEXT,
-  created_at       TEXT NOT NULL
+  created_at       TEXT NOT NULL,
+  workspace_path   TEXT
 );
 
 -- Platform groups/channels. unknown_sender_policy governs what happens
