@@ -20,6 +20,13 @@
  * fixed for group folders, 11,618 tokens of maintainer guidance meant for a
  * human. So worktrees go under `WORKTREES_DIR`, which is a sibling of nothing.
  *
+ * NOTHING HERE RUNS ON A TIMER. A worktree is created by a chat request and
+ * removed only by `ncl worktrees prune`, which a human types. There is no
+ * sweep, no singleton and no reaper — an earlier one was deleted on purpose
+ * (282b8f6d), because a background job that deletes a directory is a background
+ * job that can delete a day of work. `inspectWorktree` is the proof that a
+ * removal destroys nothing, and `removeWorktree` is never forced.
+ *
  * Every git call passes an argv array. A repo or branch name reaches this
  * module from a chat message, and a shell string would make that name
  * executable.
@@ -231,6 +238,212 @@ export function createWorktree(repo: string, branch: string): string {
   }
   log.info('Worktree created', { repo, branch, target });
   return target;
+}
+
+/**
+ * The repository a worktree belongs to, by name.
+ *
+ * Asked of git rather than parsed back out of the worktree's directory name:
+ * that name is `<repo>-<branch>` after `sanitizeSegment` has flattened both
+ * halves, so a repo or branch containing a dash makes the split ambiguous and
+ * the reader is told the wrong repository.
+ *
+ * `--git-common-dir` is the shared `.git` of the OWNING checkout, which is the
+ * one thing a worktree always knows about its origin.
+ *
+ * @returns The repository directory's name, or the worktree's own basename when
+ *   git cannot answer — a label is decoration, and losing it must never cost the
+ *   listing it labels.
+ */
+export function worktreeRepoName(worktree: string): string {
+  try {
+    const commonDir = git(worktree, ['rev-parse', '--path-format=absolute', '--git-common-dir']).trim();
+    if (commonDir) return path.basename(path.dirname(commonDir));
+  } catch (err) {
+    log.debug('Could not name the repository behind a worktree', { worktree, err });
+  }
+  return path.basename(worktree);
+}
+
+/**
+ * The branch a worktree has checked out.
+ *
+ * @returns The branch name, or `'(detached)'` when git reports no branch and
+ *   `'(unknown)'` when it will not answer at all. Both are labels — see
+ *   `worktreeRepoName` on why a missing label never fails the listing.
+ */
+export function worktreeBranch(worktree: string): string {
+  try {
+    const branch = git(worktree, ['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+    if (!branch) return '(unknown)';
+    return branch === 'HEAD' ? '(detached)' : branch;
+  } catch (err) {
+    log.debug('Could not name the branch a worktree has checked out', { worktree, err });
+    return '(unknown)';
+  }
+}
+
+/** Whether a worktree can be deleted without destroying anything. */
+export interface WorktreeState {
+  /** True only when deleting the directory would lose nothing at all. */
+  clean: boolean;
+  /** Why, in words a human reading the CLI output can act on. */
+  reason: string;
+}
+
+/**
+ * Can this worktree be deleted without destroying work?
+ *
+ * The default answer is NO, and every path that cannot prove otherwise returns
+ * NO. Deleting an agent's uncommitted work is unrecoverable, while keeping a
+ * directory that could have gone costs a few megabytes and one line of output,
+ * so the two errors are not remotely comparable.
+ *
+ * Three things count as work:
+ *
+ * - **Uncommitted changes and untracked files.** `status --porcelain` reports
+ *   both, which is why it is one call and not two. Ignored files (build output,
+ *   `node_modules`) deliberately do not count — they are not work, and treating
+ *   them as work would retain every worktree forever.
+ * - **Commits that exist nowhere else.** Not "unpushed": the branch a worker
+ *   gets has no upstream, so there is nothing to compare against. The real
+ *   question is whether any commit would VANISH, and that is answered by asking
+ *   git for the commits reachable from HEAD and from no other branch, remote or
+ *   tag. `nanoclaw/*` branches are excluded from that set, so another worker's
+ *   branch never counts as a safe home for these commits.
+ * - **Anything git refuses to talk about.** A failed inspection is dirty, not
+ *   clean.
+ *
+ * Note that `git worktree remove` does NOT delete the branch, so removing a
+ * CLEAN worktree loses nothing even in hindsight: every commit is contained
+ * elsewhere, and the ref survives for a later worktree to check out again.
+ *
+ * @param worktree The worktree path, as stored on `agent_groups.workspace_path`.
+ */
+export function inspectWorktree(worktree: string): WorktreeState {
+  if (!fs.existsSync(worktree)) return { clean: true, reason: 'the worktree is already gone' };
+
+  let status: string;
+  try {
+    status = git(worktree, ['status', '--porcelain']);
+  } catch (err) {
+    return { clean: false, reason: `git could not inspect it (${errText(err)})` };
+  }
+  const changed = status.split('\n').filter((line) => line.trim().length > 0);
+  if (changed.length > 0) {
+    // Split rather than totalled. "3 dirty files" tells a human nothing they
+    // can act on; "2 uncommitted change(s), 1 untracked file(s)" tells them
+    // whether to commit, to stash, or to delete a stray build artifact. The
+    // `??` prefix is porcelain v1's untracked marker.
+    const untracked = changed.filter((line) => line.startsWith('??')).length;
+    const uncommitted = changed.length - untracked;
+    const parts: string[] = [];
+    if (uncommitted > 0) parts.push(`${uncommitted} uncommitted change(s)`);
+    if (untracked > 0) parts.push(`${untracked} untracked file(s)`);
+    return { clean: false, reason: parts.join(', ') };
+  }
+
+  let unmerged: number;
+  try {
+    // `--exclude` applies to the NEXT ref selector only, so it narrows
+    // `--branches` and leaves `--remotes` and `--tags` whole. A worker branch
+    // that was pushed therefore counts as contained, which is correct: the
+    // commits survive the directory.
+    const counted = git(worktree, [
+      'rev-list',
+      '--count',
+      'HEAD',
+      '--not',
+      // `--exclude` strips the `refs/heads/` prefix before matching against
+      // `--branches`, so the pattern is bare. Written as `refs/heads/…` it
+      // matches nothing, the worker's OWN branch stays in the set, and every
+      // worktree reads as clean — verified against git.
+      '--exclude=nanoclaw/*',
+      '--branches',
+      '--remotes',
+      '--tags',
+    ]).trim();
+    unmerged = Number.parseInt(counted, 10);
+  } catch (err) {
+    return { clean: false, reason: `git could not count its commits (${errText(err)})` };
+  }
+  if (!Number.isFinite(unmerged)) return { clean: false, reason: 'git did not report a commit count' };
+  if (unmerged > 0) return { clean: false, reason: `${unmerged} commit(s) that exist nowhere else` };
+
+  return { clean: true, reason: 'no uncommitted changes and no commits that exist nowhere else' };
+}
+
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message.split('\n')[0] : String(err);
+}
+
+/**
+ * Remove a worktree, tolerating one that is already gone.
+ *
+ * NEVER forced, and there is no parameter that could force it. A worktree
+ * holding uncommitted agent work must fail to remove and say so, rather than
+ * have the work deleted on its behalf — git's own refusal is the second line of
+ * defence behind `inspectWorktree`.
+ *
+ * @throws When git refuses. The caller is a human-run command, so a failure it
+ *   could not see would be a lie about what was cleaned up.
+ */
+export function removeWorktree(worktree: string): void {
+  if (!fs.existsSync(worktree)) return;
+  try {
+    // Run from inside the worktree: git finds the owning repository itself, so
+    // the caller does not have to remember which repo this path belongs to.
+    git(worktree, ['worktree', 'remove', worktree]);
+    log.info('Worktree removed', { worktree });
+  } catch (err) {
+    log.warn('Failed to remove worktree — leaving it in place', { worktree, err });
+    throw new Error(`git refused to remove ${worktree}: ${errText(err)}`, { cause: err });
+  }
+}
+
+/** One worktree under `WORKTREES_DIR`, as `ncl worktrees list` reports it. */
+export interface WorktreeEntry {
+  /** Absolute path — the same string `agent_groups.workspace_path` carries. */
+  path: string;
+  /** Repository this worktree checks out, by directory name. */
+  repo: string;
+  /** Branch it has checked out. */
+  branch: string;
+  /** Whether removing it would destroy anything, and why. */
+  state: WorktreeState;
+}
+
+/**
+ * Every worktree under `WORKTREES_DIR`, inspected.
+ *
+ * Enumerated from the DIRECTORY rather than from `agent_groups`, because the
+ * two disagree exactly when it matters: a worker group deleted with
+ * `ncl groups delete` leaves its worktree behind, and a listing driven by the
+ * table would never mention it again. Orphaned is not disposable — every entry
+ * carries the same cleanliness proof.
+ *
+ * A missing `WORKTREES_DIR` is an empty list, not an error: no repo-scoped
+ * worker has ever been created on this install.
+ */
+export function listWorktrees(): WorktreeEntry[] {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(WORKTREES_DIR, { withFileTypes: true });
+  } catch (err) {
+    log.debug('No worktrees directory to list', { dir: WORKTREES_DIR, err });
+    return [];
+  }
+
+  return entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(WORKTREES_DIR, entry.name))
+    .sort()
+    .map((worktree) => ({
+      path: worktree,
+      repo: worktreeRepoName(worktree),
+      branch: worktreeBranch(worktree),
+      state: inspectWorktree(worktree),
+    }));
 }
 
 /** Every git invocation, as argv. Never a shell string — see the module comment. */

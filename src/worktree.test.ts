@@ -16,10 +16,15 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   createWorktree,
+  inspectWorktree,
+  listWorktrees,
   parseProjectRoots,
+  removeWorktree,
   resolveRepo,
   sanitizeSegment,
+  worktreeBranch,
   worktreePath,
+  worktreeRepoName,
   WORKTREES_DIR,
 } from './worktree.js';
 
@@ -203,13 +208,14 @@ describe('worktreePath', () => {
 });
 
 /**
- * These three touch the REAL `WORKTREES_DIR`, because `git worktree add` cannot
- * be faked and the constant is resolved from HOME at module load — the same
- * shape as `GROUPS_DIR` in config.ts. Kept safe by pid-namespaced branch names
- * and an afterEach that removes what it made, so a parallel run cannot collide
- * and a failed run leaves nothing behind.
+ * These touch the REAL `WORKTREES_DIR`, because `git worktree add` cannot be
+ * faked and the constant is resolved from HOME at module load — the same shape
+ * as `GROUPS_DIR` in config.ts. Kept safe by pid-namespaced branch names and an
+ * afterEach that removes what it made, so a parallel run cannot collide and a
+ * failed run leaves nothing behind. Nothing here removes a worktree it did not
+ * create.
  */
-describe('createWorktree', () => {
+describe('createWorktree / removeWorktree', () => {
   let repo: string;
   let created: string | null;
 
@@ -221,6 +227,13 @@ describe('createWorktree', () => {
   afterEach(() => {
     if (created) fs.rmSync(created, { recursive: true, force: true });
   });
+
+  /** Commit everything in a worktree, with an identity the fixture supplies. */
+  function commitIn(worktree: string, message: string): void {
+    const run = (args: string[]): void => void execFileSync('git', ['-C', worktree, ...args], { stdio: 'ignore' });
+    run(['add', '.']);
+    run(['-c', 'user.email=t@e.com', '-c', 'user.name=T', 'commit', '-m', message]);
+  }
 
   it('creates a worktree on a new branch, outside the repository', () => {
     created = createWorktree(repo, `ncl-test-${process.pid}-a`);
@@ -245,5 +258,173 @@ describe('createWorktree', () => {
 
     created = createWorktree(repo, branch);
     expect(fs.existsSync(created)).toBe(true);
+  });
+
+  it('removes a worktree', () => {
+    const worktree = createWorktree(repo, `ncl-test-${process.pid}-d`);
+    removeWorktree(worktree);
+    expect(fs.existsSync(worktree)).toBe(false);
+  });
+
+  it('tolerates removing a path that is already gone', () => {
+    expect(() => removeWorktree(path.join(tmp, 'never-existed'))).not.toThrow();
+  });
+
+  it('throws rather than reporting a removal git refused', () => {
+    // `ncl worktrees prune` prints what it removed. A swallowed failure would
+    // make that report a lie, so the refusal has to reach the caller.
+    const notAWorktree = path.join(tmp, 'plain-dir');
+    fs.mkdirSync(notAWorktree, { recursive: true });
+    expect(() => removeWorktree(notAWorktree)).toThrow(/git refused to remove/);
+    expect(fs.existsSync(notAWorktree)).toBe(true);
+  });
+
+  /**
+   * The listing label names the repository, and it is asked of git rather than
+   * parsed out of the worktree's own directory name — that name is
+   * `<repo>-<branch>` after both halves were flattened, so a dash in either one
+   * makes the split ambiguous and the reader is told the wrong repository.
+   */
+  it('names the repository a worktree belongs to', () => {
+    created = createWorktree(repo, `ncl-test-${process.pid}-name`);
+    expect(worktreeRepoName(created)).toBe(path.basename(repo));
+  });
+
+  it('falls back to the path basename when git cannot answer', () => {
+    // A label is decoration; losing it must never cost the listing it labels.
+    const notAWorktree = path.join(tmp, 'plain-dir-2');
+    fs.mkdirSync(notAWorktree, { recursive: true });
+    expect(worktreeRepoName(notAWorktree)).toBe('plain-dir-2');
+  });
+
+  it('names the branch a worktree has checked out, and says so when it cannot', () => {
+    const branch = `nanoclaw/ncl-test-${process.pid}-branch`;
+    created = createWorktree(repo, branch);
+    expect(worktreeBranch(created)).toBe(branch);
+
+    const notAWorktree = path.join(tmp, 'plain-dir-3');
+    fs.mkdirSync(notAWorktree, { recursive: true });
+    expect(worktreeBranch(notAWorktree)).toBe('(unknown)');
+  });
+
+  /**
+   * `inspectWorktree` is the only thing standing between `ncl worktrees prune`
+   * and a deleted day of someone's work, so every answer it can give is
+   * asserted against real git rather than a mock.
+   */
+  describe('inspectWorktree', () => {
+    it('calls a fresh worktree clean', () => {
+      created = createWorktree(repo, `ncl-test-${process.pid}-clean`);
+      expect(inspectWorktree(created).clean).toBe(true);
+    });
+
+    it('calls an untracked file work, and says it is untracked', () => {
+      created = createWorktree(repo, `ncl-test-${process.pid}-untracked`);
+      fs.writeFileSync(path.join(created, 'notes.md'), 'half-finished\n');
+
+      const state = inspectWorktree(created);
+      expect(state.clean).toBe(false);
+      // "dirty" alone is not actionable: the operator has to know whether to
+      // commit it or delete a stray file.
+      expect(state.reason).toContain('1 untracked file(s)');
+      expect(state.reason).not.toContain('uncommitted change');
+    });
+
+    it('calls a modified tracked file work, and says it is uncommitted', () => {
+      created = createWorktree(repo, `ncl-test-${process.pid}-modified`);
+      fs.writeFileSync(path.join(created, 'README.md'), '# edited\n');
+
+      const state = inspectWorktree(created);
+      expect(state.clean).toBe(false);
+      expect(state.reason).toContain('1 uncommitted change(s)');
+      expect(state.reason).not.toContain('untracked');
+    });
+
+    it('names both when a worktree holds both', () => {
+      created = createWorktree(repo, `ncl-test-${process.pid}-both`);
+      fs.writeFileSync(path.join(created, 'README.md'), '# edited\n');
+      fs.writeFileSync(path.join(created, 'notes.md'), 'half-finished\n');
+
+      const state = inspectWorktree(created);
+      expect(state.reason).toContain('1 uncommitted change(s)');
+      expect(state.reason).toContain('1 untracked file(s)');
+    });
+
+    /**
+     * REGRESSION GUARD for the `--exclude` prefix.
+     *
+     * git strips `refs/heads/` before matching `--branches`, so the pattern
+     * must be bare `nanoclaw/*`. Written as `refs/heads/nanoclaw/*` it matches
+     * nothing, the worker's OWN branch stays in the comparison set, HEAD is
+     * reachable from it, and EVERY worktree reads as clean — including this
+     * one, which holds a commit that exists nowhere else. The branch here is
+     * deliberately under `nanoclaw/`: with any other name the exclude is not
+     * exercised and the bug hides.
+     */
+    it('calls a commit that exists nowhere else work', () => {
+      // `status --porcelain` is empty here. The danger is not dirt, it is a
+      // commit that would be stranded — the branch has no upstream to compare
+      // against, so the question is asked as "reachable from no other ref".
+      created = createWorktree(repo, `nanoclaw/ncl-test-${process.pid}-unmerged`);
+      fs.writeFileSync(path.join(created, 'feature.ts'), 'export const x = 1;\n');
+      commitIn(created, 'agent work');
+
+      const state = inspectWorktree(created);
+      expect(state.clean).toBe(false);
+      expect(state.reason).toContain('exist nowhere else');
+    });
+
+    it('calls a commit that another branch already holds safe', () => {
+      created = createWorktree(repo, `nanoclaw/ncl-test-${process.pid}-merged`);
+      fs.writeFileSync(path.join(created, 'feature.ts'), 'export const x = 1;\n');
+      commitIn(created, 'agent work');
+      // Someone merged it. Nothing would be lost by deleting the directory.
+      execFileSync('git', ['-C', repo, 'branch', `keeper-${process.pid}`, 'HEAD'], { stdio: 'ignore' });
+      execFileSync('git', ['-C', repo, 'fetch', created, `+HEAD:refs/heads/kept-${process.pid}`], { stdio: 'ignore' });
+
+      expect(inspectWorktree(created).clean).toBe(true);
+    });
+
+    it('calls a path git cannot inspect NOT clean', () => {
+      // A failed inspection is dirty. Proving safety is the only thing that
+      // authorizes a delete.
+      const plain = path.join(tmp, 'not-a-repo');
+      fs.mkdirSync(plain, { recursive: true });
+      expect(inspectWorktree(plain).clean).toBe(false);
+    });
+
+    it('calls an absent worktree clean, and says so exactly', () => {
+      // The one "clean" that means gone rather than empty — callers read this
+      // reason to tell removal from refusal.
+      const state = inspectWorktree(path.join(tmp, 'never-existed'));
+      expect(state).toEqual({ clean: true, reason: 'the worktree is already gone' });
+    });
+  });
+
+  /**
+   * `listWorktrees` reads the DIRECTORY, so these assertions look for the
+   * fixture's own entry among whatever else the machine holds. Nothing here
+   * mutates a worktree it did not create.
+   */
+  describe('listWorktrees', () => {
+    it('reports a worktree it finds on disk, with its repo, branch and state', () => {
+      const branch = `nanoclaw/ncl-test-${process.pid}-list`;
+      created = createWorktree(repo, branch);
+
+      const entry = listWorktrees().find((candidate) => candidate.path === created);
+      expect(entry).toBeDefined();
+      expect(entry?.repo).toBe(path.basename(repo));
+      expect(entry?.branch).toBe(branch);
+      expect(entry?.state.clean).toBe(true);
+    });
+
+    it('reports a dirty worktree as dirty', () => {
+      created = createWorktree(repo, `ncl-test-${process.pid}-list-dirty`);
+      fs.writeFileSync(path.join(created, 'notes.md'), 'half-finished\n');
+
+      const entry = listWorktrees().find((candidate) => candidate.path === created);
+      expect(entry?.state.clean).toBe(false);
+      expect(entry?.state.reason).toContain('untracked');
+    });
   });
 });
