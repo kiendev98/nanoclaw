@@ -10,7 +10,7 @@ import {
   recordAccountName,
   recordContextPercent,
   recordContextUsage,
-  recordContextWindow,
+  recordContextTokens,
   recordEffort,
   recordModel,
   recordRateLimits,
@@ -733,7 +733,7 @@ export class ClaudeProvider implements AgentProvider {
           // loop and kills the turn, so a cosmetic footer would take down
           // every delivery on an older SDK.
           callIfAvailable(sdkResult, 'getContextUsage', (usage) => {
-            recordContextPercent(usage?.percentage);
+            recordContextTokens(usage?.totalTokens);
             logContextBreakdown(usage);
           });
           callIfAvailable(sdkResult, 'accountInfo', (info) => recordAccountName(info?.organization));
@@ -745,6 +745,14 @@ export class ClaudeProvider implements AgentProvider {
           // populate 5h/7d: `rate_limit_event` fires solely on CHANGE, and it
           // has never fired on this account.
           callIfAvailable(sdkResult, 'getUsage', (usage) => recordRateLimits(usage?.rate_limits));
+          // The model catalogue this CLI offers. ModelInfo carries no context
+          // window, so this cannot say what 165k SHOULD be — but it does say
+          // whether a non-[1m] opus row exists, which separates "165k is this
+          // model's window" from "the [1m] variant is not being served".
+          callIfAvailable(sdkResult, 'supportedModels', (models) => {
+            const rows = (models as Array<{ value?: string; resolvedModel?: string }> | undefined) ?? [];
+            log(`models: ${rows.map((m) => m.value ?? '?').join(' ')}`);
+          });
           yield { type: 'init', continuation: message.session_id };
         } else if (message.type === 'assistant') {
           // Surface each assistant message's text as it streams in. The final
@@ -784,22 +792,7 @@ export class ClaudeProvider implements AgentProvider {
           // (e.g. a non-retryable 403 billing_error) carry their message in
           // `errors[]` instead. Surface either so the poll-loop can deliver a
           // billing/quota notice to the user rather than dropping the turn.
-          const m = message as {
-            result?: string;
-            is_error?: boolean;
-            errors?: string[];
-            modelUsage?: Record<string, { contextWindow?: number }>;
-          };
-          // Only the result carries the model's window size. Take the largest
-          // reported: `modelUsage` also holds subagent and compaction models,
-          // and dividing the main loop's tokens by a small auxiliary model's
-          // window would overstate the percentage.
-          recordContextWindow(
-            Object.values(m.modelUsage ?? {}).reduce<number | undefined>(
-              (max, entry) => (entry?.contextWindow && (!max || entry.contextWindow > max) ? entry.contextWindow : max),
-              undefined,
-            ),
-          );
+          const m = message as { result?: string; is_error?: boolean; errors?: string[] };
           const text = m.result ?? (m.errors && m.errors.length > 0 ? m.errors.join('\n') : null);
           yield { type: 'result', text, isError: m.is_error === true };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {

@@ -1,11 +1,19 @@
 /**
  * The one-line telemetry footer appended to delivered chat messages:
  *
- *   Wego #1 · opus-5 · ctx: 54% · 5h: 31% · 7d: 12%
+ *   Wego #1 · opus-5[1m] · think: high · ctx: 84k · 5h: 31% · 7d: 12%
  *
  * Every field is omitted when its source has not reported yet, so a fresh
- * session degrades to `opus-5` rather than printing zeros it cannot stand
- * behind. A footer that invents a number is worse than no footer.
+ * session degrades rather than printing zeros it cannot stand behind. A footer
+ * that invents a number is worse than no footer.
+ *
+ * WHY ctx IS A TOKEN COUNT AND NOT A PERCENTAGE. A percentage needs a
+ * denominator, and this one was not trustworthy: the CLI's own model table
+ * gives `claude-opus-5` a 1e6 window, while a live session reported
+ * `maxTokens` and `rawMaxTokens` both at 165,000 — the same variable, so the
+ * pair cannot even distinguish a cap from a raw limit. 84k rendered as "51%"
+ * invited a reasonable reader to conclude a greeting had consumed half a
+ * megatoken. The absolute count needs no such trust.
  *
  * WHY THE ACCOUNT IS THE ORGANISATION, not the email. The two subscriptions
  * this runs against are the same login (`kien@wego.com`, one accountUuid) in
@@ -51,29 +59,10 @@ const utilizationByWindow = new Map<string, number>();
 /** Tokens occupying the context window as of the last assistant message. */
 let contextTokens: number | null = null;
 
-/**
- * Context window for the model in use. Only the `result` message carries it
- * (`modelUsage[model].contextWindow`), so it lands one turn later than the
- * first token count — hence the two are stored separately and `ctx` renders
- * only once both exist.
- */
-let contextWindow: number | null = null;
-
 let accountLabel: string | null | undefined;
 
 /** Model id from the SDK's `system:init`, already shortened for display. */
 let modelLabel: string | null = null;
-
-/**
- * Context percentage straight from the SDK's `getContextUsage()`, 0–100.
- *
- * Preferred over dividing tokens by `contextWindow`, and not a refinement:
- * Claude Code reserves part of the window for output, so its own `/context`
- * divides by `maxTokens` rather than the raw window. The computed ratio
- * therefore reads LOWER than what the user sees in their terminal, which is
- * the kind of near-miss that makes a reader distrust every other field.
- */
-let contextPercent: number | null = null;
 
 /** Organisation from the SDK's `accountInfo()`, preferred over reading the config file. */
 let accountFromSdk: string | null = null;
@@ -136,26 +125,18 @@ export function recordContextUsage(usage: FooterUsage | undefined): void {
   persistSession();
 }
 
-/** Record the authoritative context percentage (0–100) from `getContextUsage()`. */
-export function recordContextPercent(percentage: number | undefined): void {
-  if (typeof percentage !== 'number' || !Number.isFinite(percentage)) return;
-  load();
-  contextPercent = Math.max(0, Math.min(percentage, 100));
-  persistSession();
-}
-
 /** Record the organisation from `accountInfo()`. Wins over the config file. */
 export function recordAccountName(organization: string | undefined): void {
   if (typeof organization !== 'string' || !organization.trim()) return;
   accountFromSdk = organization.trim();
 }
 
-/** Record the model's context window, which only a `result` message carries. */
-export function recordContextWindow(size: number | undefined): void {
-  if (typeof size !== 'number' || size <= 0) return;
+/** Record the authoritative occupancy from `getContextUsage().totalTokens`. */
+export function recordContextTokens(totalTokens: number | undefined): void {
+  if (typeof totalTokens !== 'number' || !Number.isFinite(totalTokens) || totalTokens <= 0) return;
   load();
-  contextWindow = size;
-  persistGroup();
+  contextTokens = Math.round(totalTokens);
+  persistSession();
 }
 
 /**
@@ -230,21 +211,18 @@ export function accountName(): string | null {
 }
 
 /**
- * Two stores, because the three facts have different lifetimes and only one
- * of them belongs to a session.
+ * Two stores, because the two facts have different lifetimes and only one of
+ * them belongs to a session.
  *
  *   contextTokens  — this conversation's occupancy. Session-scoped. Sharing it
  *                    would show one thread's context inside another.
- *   contextWindow  — a property of the MODEL.
  *   windows        — utilization of the ACCOUNT's rate-limit windows.
  *
- * The last two were session-scoped in the first cut, and that is why a new
- * thread's first message rendered no `ctx`: a fresh session starts with an
- * empty blob, and the window size only arrives on that turn's result — after
- * the message has already been sent. Every new thread started blind.
- *
- * They now live in one file in the group folder, shared by every session of
- * the agent group, so a new thread inherits them immediately.
+ * `windows` was session-scoped in the first cut, and that is why a new
+ * thread's first message rendered nothing for 5h/7d: a fresh session starts
+ * with an empty blob, and a `rate_limit_event` only fires when a value
+ * changes. It now lives in one file in the group folder, shared by every
+ * session of the agent group, so a new thread inherits it immediately.
  */
 const GROUP_FILE = '.footer-telemetry.json';
 
@@ -259,11 +237,9 @@ let loaded = false;
 
 interface SessionTelemetry {
   contextTokens?: number;
-  contextPercent?: number;
 }
 
 interface GroupTelemetry {
-  contextWindow?: number;
   windows?: Record<string, number>;
 }
 
@@ -298,7 +274,6 @@ function load(): void {
     if (raw) {
       const parsed = JSON.parse(raw) as SessionTelemetry;
       if (typeof parsed.contextTokens === 'number') contextTokens = parsed.contextTokens;
-      if (typeof parsed.contextPercent === 'number') contextPercent = parsed.contextPercent;
     }
   } catch {
     // Unreadable session state — start blank rather than fail.
@@ -306,7 +281,6 @@ function load(): void {
 
   try {
     const parsed = JSON.parse(fs.readFileSync(groupFilePath(), 'utf-8')) as GroupTelemetry;
-    if (typeof parsed.contextWindow === 'number') contextWindow = parsed.contextWindow;
     for (const [key, value] of Object.entries(parsed.windows ?? {})) {
       if (typeof value === 'number' && Number.isFinite(value)) utilizationByWindow.set(key, value);
     }
@@ -318,12 +292,7 @@ function load(): void {
 /** Write this session's own occupancy. Never throws: see `load`. */
 function persistSession(): void {
   try {
-    setFooterTelemetry(
-      JSON.stringify({
-        ...(contextTokens !== null ? { contextTokens } : {}),
-        ...(contextPercent !== null ? { contextPercent } : {}),
-      } satisfies SessionTelemetry),
-    );
+    setFooterTelemetry(JSON.stringify({ contextTokens } satisfies SessionTelemetry));
   } catch {
     // Storage unavailable. The value still applies for this process.
   }
@@ -345,10 +314,7 @@ function persistGroup(): void {
   try {
     fs.writeFileSync(
       tmp,
-      JSON.stringify({
-        ...(contextWindow !== null ? { contextWindow } : {}),
-        windows: Object.fromEntries(utilizationByWindow),
-      } satisfies GroupTelemetry),
+      JSON.stringify({ windows: Object.fromEntries(utilizationByWindow) } satisfies GroupTelemetry),
       { flag: 'wx' },
     );
     fs.renameSync(tmp, target);
@@ -361,6 +327,18 @@ function persistGroup(): void {
       // The rename consumed it, or it was never created.
     }
   }
+}
+
+/**
+ * Compact token count: `84313` → `84k`.
+ *
+ * Rounded to whole thousands because the figure moves by hundreds between
+ * turns and the extra digits carry no decision. Below 1000 it renders as-is
+ * rather than `0k`.
+ */
+export function formatTokens(tokens: number): string {
+  if (tokens < 1000) return String(Math.round(tokens));
+  return `${Math.round(tokens / 1000)}k`;
 }
 
 function percent(fraction: number): string {
@@ -382,12 +360,7 @@ export function renderFooter(model: string | null = modelLabel): string | null {
   if (model) parts.push(model);
   if (effortLabel) parts.push(`think: ${effortLabel}`);
 
-  if (contextPercent !== null) {
-    parts.push(`ctx: ${Math.round(contextPercent)}%`);
-  } else if (contextTokens !== null && contextWindow !== null) {
-    // Fallback only. Reads low against `/context` — see `contextPercent`.
-    parts.push(`ctx: ${percent(Math.min(contextTokens / contextWindow, 1))}`);
-  }
+  if (contextTokens !== null) parts.push(`ctx: ${formatTokens(contextTokens)}`);
 
   for (const [key, label] of WINDOW_LABELS) {
     const value = utilizationByWindow.get(key);
@@ -416,11 +389,9 @@ export function withFooter(body: string): string {
 export function resetFooterTelemetry(): void {
   utilizationByWindow.clear();
   contextTokens = null;
-  contextWindow = null;
   accountLabel = undefined;
   accountFromSdk = null;
   modelLabel = null;
   effortLabel = null;
-  contextPercent = null;
   loaded = false;
 }

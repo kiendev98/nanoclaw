@@ -12,15 +12,15 @@ import { closeSessionDb, initTestSessionDb } from './mailbox/sqlite/connection.j
 import {
   accountName,
   recordAccountName,
-  recordContextPercent,
+  recordContextTokens,
   recordContextUsage,
-  recordContextWindow,
   recordEffort,
   recordRateLimits,
   recordModel,
   recordUtilization,
   renderFooter,
   resetFooterTelemetry,
+  formatTokens,
   shortenModel,
   withFooter,
 } from './message-footer.js';
@@ -102,24 +102,22 @@ describe('renderFooter', () => {
   it('renders every field once each source has reported', () => {
     writeConfig('Wego #1');
     recordModel('claude-opus-5');
-    recordContextUsage({ input_tokens: 1_000, cache_read_input_tokens: 107_000 });
-    recordContextWindow(200_000);
+    recordEffort('high');
+    recordContextTokens(84_313);
     recordUtilization('five_hour', 0.31);
     recordUtilization('seven_day', 0.12);
 
-    expect(renderFooter()).toBe('Wego #1 · opus-5 · ctx: 54% · 5h: 31% · 7d: 12%');
+    expect(renderFooter()).toBe('Wego #1 · opus-5 · think: high · ctx: 84k · 5h: 31% · 7d: 12%');
   });
 
-  it('omits ctx until BOTH the token count and the window are known', () => {
+  it('renders ctx as soon as any occupancy is known, needing no denominator', () => {
+    // The whole reason this is a count and not a percentage: there is nothing
+    // to wait for and nothing to divide by.
     writeConfig('Wego #1');
     recordModel('claude-opus-5');
     recordContextUsage({ input_tokens: 108_000 });
 
-    // The window only arrives on a result, one message later than the first
-    // token count. Dividing by a guessed window is the failure this prevents.
-    expect(renderFooter()).toBe('Wego #1 · opus-5');
-    recordContextWindow(200_000);
-    expect(renderFooter()).toBe('Wego #1 · opus-5 · ctx: 54%');
+    expect(renderFooter()).toBe('Wego #1 · opus-5 · ctx: 108k');
   });
 
   it('omits a window that has never reported instead of printing 0%', () => {
@@ -149,17 +147,8 @@ describe('renderFooter', () => {
   it('counts input plus both cache counters as resident context', () => {
     writeConfig('Wego #1');
     recordContextUsage({ input_tokens: 10_000, cache_read_input_tokens: 5_000, cache_creation_input_tokens: 5_000 });
-    recordContextWindow(100_000);
 
-    expect(renderFooter()).toBe('Wego #1 · ctx: 20%');
-  });
-
-  it('clamps a context ratio above one rather than reporting 143%', () => {
-    writeConfig('Wego #1');
-    recordContextUsage({ input_tokens: 300_000 });
-    recordContextWindow(200_000);
-
-    expect(renderFooter()).toBe('Wego #1 · ctx: 100%');
+    expect(renderFooter()).toBe('Wego #1 · ctx: 20k');
   });
 
   it('returns null when only one field is known', () => {
@@ -208,17 +197,16 @@ describe('surviving a session sweep', () => {
 
   it('reloads context and utilization recorded before the process exited', () => {
     writeConfig('Wego #1');
-    recordContextUsage({ input_tokens: 108_000 });
-    recordContextWindow(200_000);
+    recordContextTokens(108_000);
     recordUtilization('five_hour', 0.31);
     recordUtilization('seven_day', 0.12);
-    expect(renderFooter()).toBe('Wego #1 · ctx: 54% · 5h: 31% · 7d: 12%');
+    expect(renderFooter()).toBe('Wego #1 · ctx: 108k · 5h: 31% · 7d: 12%');
 
     // The process restarts: in-memory state is gone, the stores are not.
     resetFooterTelemetry();
     writeConfig('Wego #1');
 
-    expect(renderFooter()).toBe('Wego #1 · ctx: 54% · 5h: 31% · 7d: 12%');
+    expect(renderFooter()).toBe('Wego #1 · ctx: 108k · 5h: 31% · 7d: 12%');
   });
 
   it('keeps a reloaded window when a later event reports only the other one', () => {
@@ -239,9 +227,8 @@ describe('surviving a session sweep', () => {
   // session store, and the window size only arrives on that turn's result —
   // after the first message is already sent. Held per session, every new
   // thread rendered its first message with no ctx at all.
-  it('gives a brand-new session the model and account facts from the group', () => {
+  it('gives a brand-new session the account facts from the group', () => {
     writeConfig('Wego #1');
-    recordContextWindow(200_000);
     recordUtilization('five_hour', 0.31);
 
     // A new thread: fresh session database, same agent group.
@@ -251,26 +238,23 @@ describe('surviving a session sweep', () => {
     writeConfig('Wego #1');
 
     // Its own occupancy is correctly absent — that IS session state — but the
-    // window size and the account's utilization carry over, so the very first
-    // message can render them.
+    // account's utilization carries over, so the very first message shows it.
     recordContextUsage({ input_tokens: 20_000 });
-    expect(renderFooter()).toBe('Wego #1 · ctx: 10% · 5h: 31%');
+    expect(renderFooter()).toBe('Wego #1 · ctx: 20k · 5h: 31%');
   });
 
   it('does not leak one session\'s occupancy into another', () => {
     writeConfig('Wego #1');
     recordContextUsage({ input_tokens: 180_000 });
-    recordContextWindow(200_000);
-    expect(renderFooter()).toBe('Wego #1 · ctx: 90%');
+    expect(renderFooter()).toBe('Wego #1 · ctx: 180k');
 
     closeSessionDb();
     resetFooterTelemetry();
     initTestSessionDb();
     writeConfig('Wego #1');
 
-    // 90% belonged to the other thread. Showing it here would be a lie the
-    // reader would act on. The window size still carries over from the group
-    // store, but with no occupancy to divide there is no ctx to render — and
+    // 180k belonged to the other thread. Showing it here would be a lie the
+    // reader would act on. With no occupancy of its own there is no ctx, and
     // the account alone is one field, which renders nothing.
     expect(renderFooter()).toBeNull();
   });
@@ -286,36 +270,33 @@ describe('surviving a session sweep', () => {
  * other field in the line.
  */
 describe('authoritative SDK sources', () => {
-  it('prefers the reported percentage over the computed ratio', () => {
+  it('prefers the reported total over the sum computed from an assistant message', () => {
+    // The assistant message counts input plus cache; the CLI's own figure also
+    // includes the reserved autocompact buffer, so the two differ by tens of
+    // thousands and only one matches what /context prints.
     writeConfig('Wego #1');
-    // The raw window says 10%. The SDK, dividing by the usable window, says 14.
     recordContextUsage({ input_tokens: 20_000 });
-    recordContextWindow(200_000);
-    expect(renderFooter()).toBe('Wego #1 · ctx: 10%');
+    expect(renderFooter()).toBe('Wego #1 · ctx: 20k');
 
-    recordContextPercent(14);
-    expect(renderFooter()).toBe('Wego #1 · ctx: 14%');
+    recordContextTokens(84_313);
+    expect(renderFooter()).toBe('Wego #1 · ctx: 84k');
   });
 
-  it('falls back to the computed ratio when the SDK never answered', () => {
+  it('falls back to the computed sum when the SDK never answered', () => {
     // getContextUsage is fire-and-forget, so a failed or slow control request
     // must still leave a ctx figure rather than a gap.
     writeConfig('Wego #1');
     recordContextUsage({ input_tokens: 20_000 });
-    recordContextWindow(200_000);
-    expect(renderFooter()).toBe('Wego #1 · ctx: 10%');
+
+    expect(renderFooter()).toBe('Wego #1 · ctx: 20k');
   });
 
-  it('clamps a percentage outside 0–100', () => {
-    writeConfig('Wego #1');
-    recordContextPercent(140);
-    expect(renderFooter()).toBe('Wego #1 · ctx: 100%');
-  });
-
-  it('ignores a non-finite percentage', () => {
+  it('ignores a non-finite or non-positive total', () => {
     writeConfig('Wego #1');
     recordModel('claude-opus-5');
-    recordContextPercent(Number.NaN);
+    recordContextTokens(Number.NaN);
+    recordContextTokens(0);
+
     expect(renderFooter()).toBe('Wego #1 · opus-5');
   });
 
@@ -380,9 +361,9 @@ describe('reasoning effort', () => {
     writeConfig('Wego #1');
     recordModel('claude-opus-5');
     recordEffort('high');
-    recordContextPercent(51);
+    recordContextTokens(84_313);
 
-    expect(renderFooter()).toBe('Wego #1 · opus-5 · think: high · ctx: 51%');
+    expect(renderFooter()).toBe('Wego #1 · opus-5 · think: high · ctx: 84k');
   });
 
   it('is omitted when container.json pins none', () => {
@@ -402,5 +383,16 @@ describe('reasoning effort', () => {
     recordEffort('  HIGH  ');
 
     expect(renderFooter()).toBe('Wego #1 · opus-5 · think: high');
+  });
+});
+
+describe('formatTokens', () => {
+  it('rounds to whole thousands', () => {
+    expect(formatTokens(84_313)).toBe('84k');
+    expect(formatTokens(84_713)).toBe('85k');
+  });
+
+  it('renders a sub-thousand count as-is rather than 0k', () => {
+    expect(formatTokens(512)).toBe('512');
   });
 });
