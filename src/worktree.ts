@@ -254,6 +254,15 @@ export function worktreePath(repo: string, branch: string): string {
  * this is a responsiveness budget, not a correctness one — an incremental
  * update that overruns it is abandoned and the previous graph is left in place.
  */
+/**
+ * How long `git fetch` may take before a worker spawn gives up on it.
+ *
+ * Shorter than the reindex budget on purpose. A reindex is local work that
+ * finishes; a fetch can block on a prompt or an unreachable host, and it runs
+ * on the host's only thread.
+ */
+const FETCH_TIMEOUT_MS = 30_000;
+
 const GRAPH_REINDEX_TIMEOUT_MS = 120_000;
 
 /**
@@ -273,7 +282,17 @@ const GRAPH_REINDEX_TIMEOUT_MS = 120_000;
  */
 function refreshAndResolveBaseRef(repo: string): string | null {
   try {
-    git(repo, ['fetch', 'origin', '--quiet']);
+    // Bounded and non-interactive, unlike the other git calls in this module.
+    // This is the one that reaches the network, and `createWorktree` runs
+    // synchronously inside the single host process — so a credential helper
+    // that prompts, or a host that black-holes the connection, would stall
+    // every group's messages, not just this spawn.
+    execFileSync('git', ['-C', repo, 'fetch', 'origin', '--quiet'], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'ignore', 'pipe'],
+      timeout: FETCH_TIMEOUT_MS,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', SSH_ASKPASS: '' },
+    });
   } catch (err) {
     log.warn('Worktree base: fetch failed, branching from local HEAD', { repo, err });
     return null;
@@ -296,6 +315,16 @@ function refreshAndResolveBaseRef(repo: string): string | null {
   return null;
 }
 
+/** A commit sha, or null when the ref does not resolve. Never throws. */
+function revParseOrNull(repo: string, ref: string): string | null {
+  try {
+    return git(repo, ['rev-parse', ref]).trim() || null;
+  } catch {
+    // An unresolvable ref is a reason to skip a comparison, not to fail a spawn.
+    return null;
+  }
+}
+
 /**
  * Bring the owning checkout's code graph up to date.
  *
@@ -315,7 +344,7 @@ function refreshAndResolveBaseRef(repo: string): string | null {
  * missing binary or a slow index must not stop a worker from spawning. Set
  * `NANOCLAW_GRAPH_REINDEX=0` to skip it entirely.
  */
-function reindexCodeGraph(repo: string): void {
+function reindexCodeGraph(repo: string, base: string | null): void {
   if (process.env.NANOCLAW_GRAPH_REINDEX === '0') return;
 
   if (!fs.existsSync(path.join(repo, '.code-review-graph', 'graph.db'))) {
@@ -326,11 +355,35 @@ function reindexCodeGraph(repo: string): void {
     return;
   }
 
+  // The indexer reads the owning checkout's WORKING TREE, which sits at that
+  // checkout's own HEAD. The new worktree is branched from `base`. When the two
+  // differ — which is exactly the stale-checkout case this function exists to
+  // serve — indexing would describe code the worker is not looking at. A graph
+  // that describes the wrong tree is the same plausible lie as a partial one,
+  // so leave the previous graph alone and say why.
+  if (base) {
+    const head = revParseOrNull(repo, 'HEAD');
+    const baseSha = revParseOrNull(repo, base);
+    if (head && baseSha && head !== baseSha) {
+      log.info('Worktree base: owning checkout is not at the base ref, skipping reindex', {
+        repo,
+        base,
+        head,
+        baseSha,
+        hint: 'indexing here would describe a different tree than the worktree gets',
+      });
+      return;
+    }
+  }
+
   try {
     execFileSync('code-review-graph', ['update'], {
       cwd: repo,
       encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'pipe'],
+      // stdout is per-file progress and is discarded rather than captured:
+      // buffering it caps the child at Node's 1 MB default, and a large repo
+      // would be killed with ENOBUFS part-way through writing the graph.
+      stdio: ['ignore', 'ignore', 'pipe'],
       timeout: GRAPH_REINDEX_TIMEOUT_MS,
     });
     log.info('Worktree base: code graph reindexed', { repo });
@@ -362,17 +415,28 @@ export function createWorktree(repo: string, branch: string): string {
   // statement of intent rather than a constraint: an agent that starts in the
   // new worktree finds an up-to-date base and a graph that describes it.
   const base = refreshAndResolveBaseRef(repo);
-  reindexCodeGraph(repo);
+  reindexCodeGraph(repo, base);
 
   fs.mkdirSync(path.dirname(target), { recursive: true });
   try {
-    git(repo, ['worktree', 'add', target, '-b', branch, ...(base ? [base] : [])]);
+    // `--no-track` because `-b <branch> origin/main` makes git DWIM an
+    // upstream: it sets branch.<name>.merge to refs/heads/main, so a worker
+    // running `git push` under push.default=upstream would push onto main.
+    // The no-base form set no upstream, and that property is preserved here.
+    git(repo, ['worktree', 'add', target, '-b', branch, ...(base ? ['--no-track', base] : [])]);
   } catch (err) {
-    // `-b` fails when the branch is already there. Checking it out is the same
-    // intent, so retry — but only once, and let the second failure surface. The
-    // base ref is dropped here on purpose: an existing branch has its own
-    // history, and forcing it onto `base` would silently discard commits.
-    log.info('Worktree branch already exists — checking it out instead', { repo, branch, err });
+    // Usually the branch already exists, and checking it out is the same
+    // intent. It is no longer the only cause: `base` was resolved a moment ago
+    // and can be pruned or renamed before it is used, so the log names both
+    // possibilities rather than asserting the common one. Retry once, and let
+    // the second failure surface.
+    log.info('Worktree add failed; retrying without a base ref', {
+      repo,
+      branch,
+      base: base ?? 'HEAD',
+      likely: 'the branch already exists, or the base ref went away',
+      err,
+    });
     git(repo, ['worktree', 'add', target, branch]);
   }
   log.info('Worktree created', { repo, branch, target, base: base ?? 'HEAD' });

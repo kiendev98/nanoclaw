@@ -515,6 +515,32 @@ describe('createWorktree base ref', () => {
     expect(fs.existsSync(path.join(created, freshFile))).toBe(true);
   });
 
+  /**
+   * `git worktree add -b <branch> origin/main` makes git DWIM an upstream:
+   * it writes branch.<name>.merge = refs/heads/main. A worker running
+   * `git push` under push.default=upstream would then push onto main. The
+   * no-base form set no upstream, and passing a base must not change that.
+   */
+  it('does not set an upstream on the worker branch', () => {
+    const { repo } = initStaleClone();
+    const branch = `ncl-test-${process.pid}-notrack`;
+
+    created = createWorktree(repo, branch);
+
+    const upstream = (): string => {
+      try {
+        return execFileSync('git', ['-C', created as string, 'config', '--get', `branch.${branch}.merge`], {
+          encoding: 'utf-8',
+        }).trim();
+      } catch {
+        // `git config --get` exits 1 when the key is absent, which is the pass.
+        return '';
+      }
+    };
+
+    expect(upstream()).toBe('');
+  });
+
   it('still creates a worktree when the repository has no origin', () => {
     // A laptop offline, or a repo that was never pushed. Degrading to local
     // HEAD is correct; refusing to spawn the worker is not.
