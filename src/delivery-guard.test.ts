@@ -2,7 +2,7 @@
  * Tests for `runGuarded`'s hold-with-no-requestHold branch.
  *
  * `DeliveryGuardSpec.requestHold` became optional so a guarded action can
- * define no admin-approval path at all (workers.create — see
+ * define no admin-approval path at all (workers.spawn — see
  * src/modules/agent-to-agent/guard.ts). Every real action's own decide fn
  * either always allows/denies (no hold branch) or supplies a requestHold, so
  * this path is unreachable from any registered action today; it exists as a

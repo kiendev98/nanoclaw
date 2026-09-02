@@ -8,7 +8,7 @@
  * default `group` scope, and unknown/missing config, fail-closed — holds for
  * the requesting group's admin chain.
  *
- * workers.create — creating a worker never requires admin approval, for any
+ * workers.spawn — creating a worker never requires admin approval, for any
  * cli_scope. The containment that replaces the hold is the operator
  * allowlist: `resolveRepo` (../../worktree.js) resolves `repo` only against
  * `NANOCLAW_PROJECT_ROOTS` (default empty, src/config.ts), and an
@@ -69,17 +69,17 @@ export const agentsCreate = defineGuardedAction({
   },
 });
 
-export const workersCreate = defineGuardedAction({
-  action: 'workers.create',
+export const workersSpawn = defineGuardedAction({
+  action: 'workers.spawn',
   // No grantActionName: this decision never holds, so there is no grant to
   // bind and no approval handler to pair it with — see the file header, and
   // src/guard/conformance.test.ts, which enforces exactly that pairing.
   decide: async (input) => {
-    if (input.actor.kind !== 'agent') return DENY('create_worker is a container-originated action.');
+    if (input.actor.kind !== 'agent') return DENY('spawn_worker is a container-originated action.');
     // Creating a worker never requires admin approval, for any cli_scope: the
     // operator allowlist (NANOCLAW_PROJECT_ROOTS, resolved by resolveRepo) is
     // the containment, not this decision.
-    return ALLOW('create_worker requires no approval — repo is bounded by the operator allowlist');
+    return ALLOW('spawn_worker requires no approval — repo is bounded by the operator allowlist');
   },
 });
 

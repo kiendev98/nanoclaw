@@ -184,7 +184,7 @@ describe('sessions with a channel keep the nudge', () => {
 
 describe('a slash-command brief survives the trip into the worker', () => {
   it('dispatches as a real command rather than arriving as prose', async () => {
-    // `create_worker` delivers `task` as an ordinary a2a chat row, and
+    // `spawn_worker` delivers `task` as an ordinary a2a chat row, and
     // `formatMessagesWithCommands` hands a passthrough command STRAIGHT to the
     // SDK. Wrap, quote or prefix it anywhere along the way and it silently
     // degrades to prose — the worker then improvises a plausible answer

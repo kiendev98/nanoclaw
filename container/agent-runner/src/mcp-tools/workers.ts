@@ -1,5 +1,5 @@
 /**
- * Repo worker MCP tool: create_worker.
+ * Repo worker MCP tool: spawn_worker.
  *
  * A worker is not a companion agent. It is a delegate that stands inside
  * ANOTHER repository — its own process, its own working directory, a git
@@ -14,7 +14,7 @@
  * that hop was the whole reason this tool was split out of `create_agent`.
  *
  * BLOCKING, BUT BOUNDED (the ask_user_question / canvas_read pattern): the
- * tool writes a `create_worker` system action carrying its `requestId`, then
+ * tool writes a `spawn_worker` system action carrying its `requestId`, then
  * polls `findCliResponse(requestId)` for the host's answer. The bound is one
  * minute because `git worktree add` on a large checkout is not instant — one
  * of the repositories this runs against is 7.5 GB.
@@ -83,9 +83,9 @@ interface WorkerResponse {
   result?: { name?: string; repo?: string; message?: string; error?: string };
 }
 
-export const createWorker: McpToolDefinition = {
+export const spawnWorker: McpToolDefinition = {
   tool: {
-    name: 'create_worker',
+    name: 'spawn_worker',
     description:
       "Delegate a task into ANOTHER repository. Creates (or reuses) a worker: a separate agent with its OWN process and its OWN working directory, standing inside a git worktree of that repository and loading that repository's CLAUDE.md, skills and settings. " +
       'CHOOSING BETWEEN THIS AND THE Task TOOL: compare the repository you need against the one you are standing in. ' +
@@ -135,7 +135,7 @@ export const createWorker: McpToolDefinition = {
       id: requestId,
       kind: 'system',
       content: JSON.stringify({
-        action: 'create_worker',
+        action: 'spawn_worker',
         requestId,
         waitUntil,
         // Passed through unvalidated ON PURPOSE. This container cannot be
@@ -148,7 +148,7 @@ export const createWorker: McpToolDefinition = {
       }),
     });
 
-    log(`create_worker: ${requestId} → "${name}" in "${repo}"`);
+    log(`spawn_worker: ${requestId} → "${name}" in "${repo}"`);
 
     const deadline = waitUntil;
     while (Date.now() < deadline) {
@@ -156,7 +156,7 @@ export const createWorker: McpToolDefinition = {
       if (response) {
         markCompleted([response.id]);
         const parsed = JSON.parse(response.content) as WorkerResponse;
-        log(`create_worker response: ${requestId} → ${parsed.status}`);
+        log(`spawn_worker response: ${requestId} → ${parsed.status}`);
         if (parsed.status === 'error') {
           return err(parsed.result?.error || `Could not create a worker for "${repo}".`);
         }
@@ -165,7 +165,7 @@ export const createWorker: McpToolDefinition = {
       await sleep(Math.min(POLL_INTERVAL_MS, bound));
     }
 
-    log(`create_worker timeout: ${requestId}`);
+    log(`spawn_worker timeout: ${requestId}`);
     return ok(
       `Worker "${name}" for "${repo}" is still being created — checking out a large repository takes a while. ` +
         `You will be woken when it exists and has your task. Tell the human you are waiting rather than going silent.`,
@@ -173,4 +173,4 @@ export const createWorker: McpToolDefinition = {
   },
 };
 
-registerTools([createWorker]);
+registerTools([spawnWorker]);

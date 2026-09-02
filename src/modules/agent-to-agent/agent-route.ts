@@ -235,7 +235,7 @@ async function resolveTargetSession(
 /**
  * What became of an a2a message: delivered to the target's inbox, or held on
  * an `agent_message_policies` card. Reported rather than inferred because a
- * caller that speaks for the sender — `create_worker`, which delivers a brief
+ * caller that speaks for the sender — `spawn_worker`, which delivers a brief
  * on the orchestrator's behalf — must not tell it the brief arrived when an
  * admin is still holding it.
  */

@@ -1,6 +1,6 @@
 /**
  * The one body that mints an agent group, for both `create_agent` (a
- * long-lived companion) and `create_worker` (a delegate standing in a
+ * long-lived companion) and `spawn_worker` (a delegate standing in a
  * repository worktree).
  *
  * It exists as a shared function rather than as two similar ones because

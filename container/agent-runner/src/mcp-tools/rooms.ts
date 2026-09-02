@@ -13,7 +13,7 @@
  *
  * This module USED to extend a base `create_agent` MCP tool with the flow's
  * `purpose` / `allow_guests` / `room` params. That tool is gone: an agent
- * inside a container now creates only repo workers (`create_worker`), and
+ * inside a container now creates only repo workers (`spawn_worker`), and
  * `extendTool` throws on a tool that is not registered. The host-side
  * `create_agent` delivery action survives untouched — it is what
  * `slack-agent-flow` registers over and what the CLI and setup paths drive —
