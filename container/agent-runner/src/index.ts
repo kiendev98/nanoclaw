@@ -19,7 +19,7 @@
  *     .heartbeat                  ← touched for liveness detection
  *     outbox/                     ← outbound files
  *     inbox/<messageId>/          ← received attachments, written by the host
- *     agent/                      NANOCLAW_AGENT_DIR — the group folder, and cwd
+ *     agent/                      NANOCLAW_AGENT_DIR — the group folder (state only)
  *       CLAUDE.md                 ← composed project document
  *       container.json            ← per-group config
  *       memory/                   ← persistent memory tree
@@ -49,13 +49,39 @@ import { createProvider, type ProviderName } from './providers/factory.js';
 import { resolvePluginServer } from './plugin-mcp.js';
 import type { McpServerConfig } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
-import { AGENT_DIR, EXTRA_DIR } from './roots.js';
+import { EXTRA_DIR, PROJECT_DIR } from './roots.js';
 
 function log(msg: string): void {
   console.error(`[agent-runner] ${msg}`);
 }
 
-const CWD = AGENT_DIR;
+/**
+ * The directory the agent stands in.
+ *
+ * PROJECT_DIR, not AGENT_DIR. cwd is the only thing that decides which
+ * project's CLAUDE.md, `.claude/skills/` and `.claude/settings.json` a session
+ * loads — Claude Code walks UP from cwd for all three — so for a repo worker it
+ * has to be the worktree. `roots.ts` already defaults PROJECT_DIR to AGENT_DIR,
+ * so an ordinary group is unaffected: same value, same behaviour as before.
+ *
+ * Reading AGENT_DIR here silently defeated the whole worker-workspace feature.
+ * The host resolved the worktree correctly at every step — created it, stored
+ * `agent_groups.workspace_path`, exported `NANOCLAW_PROJECT_DIR`, and pointed
+ * the spawn's own cwd at it via `resolveSpawnCwd` — and then this line handed
+ * the SDK the group folder anyway.
+ *
+ * It failed silently rather than loudly because a group folder lives INSIDE a
+ * repository (saber, for this install). So `git rev-parse --show-toplevel`
+ * walked up out of the group folder and returned that repository: a valid root,
+ * a valid branch, real commits, all of them the wrong ones. A worker asked for
+ * `wego-ai` reported saber and never noticed. Worse, a write would have landed
+ * on the shared checkout's `main` instead of the worker's own branch, so the
+ * isolation the worktree exists to provide was not real.
+ *
+ * AGENT_DIR stays the agent's STATE directory — memory and footer telemetry
+ * must not follow cwd into a repository.
+ */
+const CWD = PROJECT_DIR;
 
 async function main(): Promise<void> {
   const config = loadConfig();
