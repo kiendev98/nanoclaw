@@ -8,12 +8,18 @@ export const TASKS_SYSTEM_THREAD_ID = 'system:tasks';
 export async function createSession(session: Session): Promise<void> {
   await getDb().run(
     `INSERT INTO sessions (id, agent_group_id, messaging_group_id, thread_id, agent_provider, status, container_status, last_active, created_at,
-                           workspace_path, bound_messaging_group_id, bound_root_message_id)
+                           workspace_path, bound_messaging_group_id, bound_root_message_id, pending_run_request)
        VALUES (@id, @agent_group_id, @messaging_group_id, @thread_id, @agent_provider, @status, @container_status, @last_active, @created_at,
-               @workspace_path, @bound_messaging_group_id, @bound_root_message_id)`,
+               @workspace_path, @bound_messaging_group_id, @bound_root_message_id, @pending_run_request)`,
     // Defaulted rather than required: every existing caller builds a Session
-    // literal, and a required field would make each one carry three nulls.
-    { workspace_path: null, bound_messaging_group_id: null, bound_root_message_id: null, ...session },
+    // literal, and required fields would make each one carry four nulls.
+    {
+      workspace_path: null,
+      bound_messaging_group_id: null,
+      bound_root_message_id: null,
+      pending_run_request: null,
+      ...session,
+    },
   );
 }
 
@@ -197,6 +203,7 @@ export async function updateSession(
       | 'workspace_path'
       | 'bound_messaging_group_id'
       | 'bound_root_message_id'
+      | 'pending_run_request'
     >
   >,
 ): Promise<void> {

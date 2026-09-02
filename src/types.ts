@@ -215,6 +215,16 @@ export interface Session {
    * `undefined` and `null` identically; no consumer distinguishes them.
    */
   bound_root_message_id?: string | null;
+  /**
+   * Who is waiting for this task session's next run to finish, as a JSON
+   * `PendingRunRequest`, or null when nobody is.
+   *
+   * It lives on the session rather than on the occurrence because the host
+   * learns a run has finished from its `task_log` row, which names the series
+   * and not the occurrence that produced it. One waiter per series at a time,
+   * which is what a queue of runs means anyway.
+   */
+  pending_run_request?: string | null;
 }
 
 // ── Session DB entities ──

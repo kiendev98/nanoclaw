@@ -145,7 +145,10 @@ CREATE TABLE sessions (
   -- minting a new session. All three are NULL for an ordinary chat session.
   workspace_path            TEXT,
   bound_messaging_group_id  TEXT,
-  bound_root_message_id     TEXT
+  bound_root_message_id     TEXT,
+  -- Who is waiting for this task session's next run to finish, as JSON. Set by
+  -- run_task, read and cleared when the run's task_log arrives.
+  pending_run_request       TEXT
 );
 CREATE INDEX idx_sessions_agent_group ON sessions(agent_group_id);
 CREATE INDEX idx_sessions_lookup ON sessions(messaging_group_id, thread_id);

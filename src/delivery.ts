@@ -7,11 +7,13 @@ import {
   getRunningSessions,
   getActiveSessions,
   createPendingQuestion,
+  getSession,
   isTaskThread,
   TASKS_SYSTEM_THREAD_ID,
   updateSession,
 } from './db/sessions.js';
 import { appendRunLog } from './modules/scheduling/run-log.js';
+import { answerPendingRunRequest } from './modules/scheduling/run-task.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import {
@@ -394,10 +396,21 @@ async function deliverMessage(
   if (msg.kind === 'task_log') {
     if (session.messaging_group_id === null && isTaskThread(session.thread_id) && session.thread_id) {
       const series = session.thread_id.slice(`${TASKS_SYSTEM_THREAD_ID}:`.length);
+      const summary = typeof content.text === 'string' ? content.text : '';
       try {
-        await appendRunLog(session.agent_group_id, series, typeof content.text === 'string' ? content.text : '');
+        await appendRunLog(session.agent_group_id, series, summary);
       } catch (err) {
         log.warn('Failed to append task run log', { id: msg.id, sessionId: session.id, err });
+      }
+      // A run's final text IS the answer a `run_task` caller is waiting for,
+      // and this row is the only place the host learns the run produced one.
+      // Re-read rather than trusting `session`: the park was written after
+      // this delivery pass loaded it.
+      try {
+        const fresh = await getSession(session.id);
+        if (fresh) await answerPendingRunRequest(fresh, summary);
+      } catch (err) {
+        log.warn('Failed to answer a pending run_task', { id: msg.id, sessionId: session.id, err });
       }
     } else {
       log.warn('task_log row outside a task session — ignoring', { id: msg.id, sessionId: session.id });

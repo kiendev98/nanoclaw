@@ -42,6 +42,7 @@ export const migration027: Migration = {
     await db.exec(`ALTER TABLE sessions ADD COLUMN workspace_path TEXT;`);
     await db.exec(`ALTER TABLE sessions ADD COLUMN bound_messaging_group_id TEXT;`);
     await db.exec(`ALTER TABLE sessions ADD COLUMN bound_root_message_id TEXT;`);
+    await db.exec(`ALTER TABLE sessions ADD COLUMN pending_run_request TEXT;`);
     await db.exec(`CREATE INDEX idx_sessions_bound ON sessions(bound_messaging_group_id, bound_root_message_id);`);
 
     // Children before parents throughout, so foreign keys stay satisfied at

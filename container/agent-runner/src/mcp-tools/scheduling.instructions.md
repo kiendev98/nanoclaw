@@ -23,3 +23,23 @@ Use good judgement on whether it's appropriate to check in with the user about t
 `--process-after` accepts UTC timestamps or naive local timestamps interpreted in the instance timezone (shown in the `<context timezone="..."/>` header).
 
 Run `ncl tasks create --help` for schedules, options, and pre-task gate scripts (checks that run before you wake).
+
+## Tasks in another repository
+
+Pass `--repo <name>` on create. The series gets its own git worktree on branch `nanoclaw/<series-id>`, and every run of it starts there, so the run loads that repository's `CLAUDE.md`, skills and settings. The name comes from the operator allowlist and is never a path; an unknown name is refused.
+
+The branch belongs to the series, not to a run, so all runs of one series share a worktree and its uncommitted work.
+
+## `run_task` — run one now and get the result back
+
+`ncl tasks run <id>` fires a run and returns. Use the `run_task` tool instead when you need to know how the run ended, because a CLI call cannot hand a result back later.
+
+```
+run_task({ series: "pr-review-a25c" })                  fire and forget
+run_task({ series: "pr-review-a25c", notify: true })     result wakes you later
+run_task({ series: "pr-review-a25c", wait_ms: 60000 })   wait, then fall back to the wake
+```
+
+A task run is a whole agent turn in another session, so prefer `notify` for anything long — a large `wait_ms` mostly means sitting idle. Nothing is lost when the bound expires: the result arrives by wake instead.
+
+You cannot `run_task` the series you are currently running as. Waiting on your own session waits for a container that cannot start until your turn ends.
