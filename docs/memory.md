@@ -51,6 +51,16 @@ the group runs, so every provider gets the same behavior. For Claude it is
 wired through the Agent SDK; other providers wire it through their own
 session-start mechanism.
 
+Claude receives it as a command hook in the SDK's `settings` option, and that
+option is the only channel that works: the SDK accepts a `SessionStart` entry
+in its programmatic `hooks` map and never calls it. `settings` is loaded as
+its own layer and merges with the settings files, so an operator's own
+`SessionStart` hooks still run beside this one. Nothing is written to disk —
+a registration that persisted the hook would land in the operator's real
+`~/.claude/settings.json` under the local driver, because that driver inherits
+`HOME` on purpose. Registration therefore removes any entry an earlier version
+left there, and writes nothing otherwise.
+
 Only those two files are injected, and each is capped at 16k characters (a
 truncation notice tells the agent to slim the file). For anything deeper, the
 agent follows links from the index and reads the files directly. This keeps

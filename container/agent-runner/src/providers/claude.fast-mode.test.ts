@@ -51,20 +51,26 @@ async function drive(options: ConstructorParameters<typeof ClaudeProvider>[0]): 
   }
 }
 
+function settingsOf(): Record<string, unknown> {
+  return (lastOptions?.settings ?? {}) as Record<string, unknown>;
+}
+
 describe('fast mode reaches the SDK through settings', () => {
   it('sends settings.fastMode when enabled', async () => {
     await drive({ fastMode: true });
-    expect(lastOptions?.settings).toEqual({ fastMode: true });
+    expect(settingsOf().fastMode).toBe(true);
   });
 
-  it('sends no settings key at all when not enabled', async () => {
+  // `settings` is no longer optional — the memory SessionStart hook rides it —
+  // so the absent case is now about the key, not about the object.
+  it('sends no fastMode key at all when not enabled', async () => {
     await drive({});
-    expect(lastOptions && 'settings' in lastOptions).toBe(false);
+    expect('fastMode' in settingsOf()).toBe(false);
   });
 
-  it('sends no settings key when explicitly false', async () => {
+  it('sends no fastMode key when explicitly false', async () => {
     await drive({ fastMode: false });
-    expect(lastOptions && 'settings' in lastOptions).toBe(false);
+    expect('fastMode' in settingsOf()).toBe(false);
   });
 
   it('leaves the settingSources chain untouched either way', async () => {
