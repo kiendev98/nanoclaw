@@ -199,6 +199,28 @@ describe('composeSessionSpec', () => {
     expect(compose().containers[0].env).not.toHaveProperty('NANOCLAW_PROJECT_DIR');
   });
 
+  /**
+   * A worker does not resume its previous conversation, and `workspace_path` is
+   * the only thing that says one is a worker.
+   *
+   * The worktree is durable and holds work that cannot be rebuilt; a transcript
+   * is rebuildable from the files it was reasoning about. Carrying it forward is
+   * what made a thread an unbounded bill — every later task paying for every
+   * earlier one, on every turn. `poll-loop.ts` reads this and clears the stored
+   * continuation.
+   */
+  it('marks a repo worker for a fresh session', () => {
+    const spec = composeWithWorkspace('/Users/kien/.config/nanoclaw/worktrees/saber-nanoclaw-scout');
+    expect(spec.containers[0].env.NANOCLAW_FRESH_SESSION).toBe('1');
+  });
+
+  it('leaves an ordinary group resuming exactly as before', () => {
+    // Absence, not '0' — the runner tests for the string '1', and a group that
+    // never had a workspace must pass byte-for-byte the env it always passed.
+    expect(composeWithWorkspace(null).containers[0].env).not.toHaveProperty('NANOCLAW_FRESH_SESSION');
+    expect(compose().containers[0].env).not.toHaveProperty('NANOCLAW_FRESH_SESSION');
+  });
+
   it('does not move the agent STATE directory — only cwd', () => {
     // Memory and footer telemetry live in the group folder and must not follow
     // cwd into a repository. The group-folder mount is what carries them, and

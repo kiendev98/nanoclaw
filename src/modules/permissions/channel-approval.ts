@@ -110,9 +110,22 @@ async function visibleAgentGroupsForApprover(
   agentGroups: AgentGroup[],
   approverUserId: string | null | undefined,
 ): Promise<AgentGroup[]> {
-  if (!approverUserId) return agentGroups;
+  // A repo worker is not an agent anyone should wire a channel to. It is a
+  // worktree with a spawn record attached: scoped to one repository and one
+  // originating thread, its output lane hard-wired back to the orchestrator
+  // that created it (`session-manager.ts`), and its session created with no
+  // messaging group at all. Connect a channel to one and the messages have
+  // nowhere to go.
+  //
+  // They reached this list because `agent_groups` is nanoclaw's only spawnable
+  // record, so a worker has to live there — and the filter below keyed on
+  // privilege alone, which every worker passes. The result was `saber-worker`
+  // and `wego-ai-worker` offered beside real agents, under a card warning that
+  // whoever is approved can reach anything that agent can reach.
+  const selectable = agentGroups.filter((agentGroup) => !agentGroup.origin_session_id);
+  if (!approverUserId) return selectable;
   const visible: AgentGroup[] = [];
-  for (const agentGroup of agentGroups) {
+  for (const agentGroup of selectable) {
     if (await hasAdminPrivilege(approverUserId, agentGroup.id)) visible.push(agentGroup);
   }
   return visible;

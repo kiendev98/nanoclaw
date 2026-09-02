@@ -185,7 +185,17 @@ function response(): { status: string; result: Record<string, string> } | undefi
   return undefined;
 }
 
-/** Chat rows written into some OTHER agent group — the brief, on its way out. */
+/**
+ * Chat rows written into some OTHER agent group — the brief, on its way out.
+ *
+ * Deliberately no unwrapping here, and the brief is deliberately verbatim. The
+ * handoff instruction that pairs with a worker's fresh transcript lives in the
+ * composed project document (`project-doc-compose.ts`), NOT in front of the
+ * task: prefixing it would push a leading `/` off the start of the message, and
+ * `categorizeMessage` treats anything not starting with `/` as prose. Every
+ * slash command would have degraded silently. The verbatim test below is what
+ * caught that.
+ */
 function briefsTo(agentGroupId: string): string[] {
   return writes()
     .filter(([group, , message]) => group === agentGroupId && message.kind === 'chat')
