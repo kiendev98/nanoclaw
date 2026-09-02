@@ -85,22 +85,6 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   // a Codex thread id never gets handed to Claude or vice versa.
   let continuation: string | undefined = migrateLegacyContinuation(config.providerName);
 
-  // A repo worker starts every task with a clean transcript. The host sets this
-  // for exactly the groups that carry a `workspace_path` (`container-runner.ts`),
-  // so an ordinary group never sees it and resumes exactly as before.
-  //
-  // Same mechanism as the size/age rotation below, and for a related reason:
-  // there, resuming an oversized transcript hangs the first turn; here, it is
-  // simply not worth what it costs. A worker's durable state is its worktree,
-  // which persists across tasks either way. Its transcript is rebuildable from
-  // those files, and carrying it forward makes every task in a thread pay for
-  // every task before it.
-  if (continuation && process.env.NANOCLAW_FRESH_SESSION === '1') {
-    log('Worker session — starting fresh rather than resuming');
-    clearContinuation(config.providerName);
-    continuation = undefined;
-  }
-
   // Before resuming, drop a session whose on-disk transcript has grown too
   // large/old to cold-resume within the host's idle ceiling. Without this a
   // long-lived hub keeps trying to reload an ever-growing .jsonl, hangs the
@@ -158,6 +142,25 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     markProcessing(ids);
 
     const routing = extractRouting(messages);
+
+    // A repo worker starts every TASK with a clean transcript — per batch, not
+    // per container start. The distinction is the whole point: the case this
+    // targets is a second task arriving in a thread that already has a worker,
+    // and that path reuses a WARM container. Resetting only at startup would
+    // have left exactly that case resuming, which is the unbounded bill it
+    // exists to stop.
+    //
+    // The host sets this for groups carrying a `workspace_path`
+    // (`container-runner.ts`), so an ordinary group never sees it and resumes
+    // as before. Same two lines as the `/clear` branch below.
+    //
+    // A worker's durable state is its worktree, which persists across tasks
+    // either way. Its transcript is rebuildable from those files.
+    if (continuation && process.env.NANOCLAW_FRESH_SESSION === '1') {
+      log('Worker task — starting a fresh session rather than resuming');
+      continuation = undefined;
+      clearContinuation(config.providerName);
+    }
 
     // Command handling: the host router gates filtered and unauthorized
     // admin commands before they reach the container. The only command

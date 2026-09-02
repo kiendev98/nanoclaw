@@ -39,6 +39,7 @@
 import { PROJECT_ROOTS } from '../../config.js';
 import { findWorkerForOrigin, getAgentGroup, updateAgentGroup } from '../../db/agent-groups.js';
 import { getSession } from '../../db/sessions.js';
+import { getSessionDriver } from '../../drivers/index.js';
 import { requestWake } from '../../request-wake.js';
 import { GuardDenyError } from '../../guard/index.js';
 import { log } from '../../log.js';
@@ -274,6 +275,28 @@ export async function validateSpawnWorker(content: Record<string, unknown>, sess
   }
   if (!req.task) {
     await respond(session, req, 'error', 'spawn_worker failed: task is required.');
+    return false;
+  }
+  // A worker's whole mechanism is a host git worktree under `WORKTREES_DIR`,
+  // handed to the session as its cwd. Nothing mounts that path into a
+  // container, and nothing can cheaply: a worktree's `.git` is a pointer file
+  // into the parent repository, so the parent has to come too.
+  //
+  // Refused here rather than left to fail, because the failure has no shape an
+  // operator can read. The spawn gets a cwd that does not exist inside the
+  // container, dies at the first query, and the undelivered brief keeps it
+  // respawning every 2 seconds — the same silent loop `#reportMissingRunnerDeps`
+  // exists to explain.
+  const driver = getSessionDriver().kind;
+  if (driver !== 'local') {
+    await respond(
+      session,
+      req,
+      'error',
+      `spawn_worker failed: repo workers need the local runtime driver, and this install runs '${driver}'. ` +
+        'A worker stands in a host git worktree that is not mounted into a container.',
+    );
+    log.warn('spawn_worker refused: driver cannot reach a host worktree', { driver, repo: req.repo });
     return false;
   }
   const sourceGroup = await getAgentGroup(session.agent_group_id);

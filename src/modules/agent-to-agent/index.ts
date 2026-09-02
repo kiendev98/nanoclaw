@@ -55,4 +55,21 @@ registerDeliveryAction('spawn_worker', spawnWorker, {
   onDeny: denySpawnWorker,
 });
 
+// The pre-rename name, kept as an alias for one release.
+//
+// The host and the runner update independently — even under the local driver,
+// where a `git pull` gives the running host process old code while the next
+// spawn reads the new runner off disk. That window has a bad failure: the
+// runner writes `action: 'create_worker'`, the host logs "Unknown system
+// action" and never answers, so the container's blocking tool polls out its
+// full wait and then reports the worker "is still being created … you will be
+// woken when it exists". A false success for a worker that will never exist.
+//
+// Same guard, same precheck, same handler — only the name differs.
+registerDeliveryAction('create_worker', spawnWorker, {
+  guardAction: workersSpawn,
+  precheck: validateSpawnWorker,
+  onDeny: denySpawnWorker,
+});
+
 registerApprovalHandler(A2A_MESSAGE_GATE_ACTION, applyA2aMessageGate);

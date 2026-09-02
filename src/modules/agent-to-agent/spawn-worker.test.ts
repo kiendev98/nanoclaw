@@ -120,6 +120,12 @@ vi.mock('../../session-manager.js', () => ({
 vi.mock('../../container-runner.js', () => ({
   wakeContainer: vi.fn().mockResolvedValue(undefined),
 }));
+// Mutable so one test can assert the docker refusal. `local` is this fork's
+// default and what every other test in this file assumes.
+const driverKind = { value: 'local' };
+vi.mock('../../drivers/index.js', () => ({
+  getSessionDriver: () => ({ kind: driverKind.value }),
+}));
 vi.mock('../../db/sessions.js', () => ({
   getSession: (id: string) => ({ id, agent_group_id: id.startsWith('sess-of-') ? id.slice(8) : 'ag-1' }),
   getPendingApproval: (id: string) => liveApprovals.get(id),
@@ -400,6 +406,32 @@ describe('spawn_worker — reuse for one (repo, thread) pair', () => {
     await runSpawnWorker(request());
 
     expect(mockCreateAgentGroup).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('spawn_worker — a driver that cannot reach a host worktree', () => {
+  // A worktree lives on the host under WORKTREES_DIR and nothing mounts it into
+  // a container — and nothing cheaply can, since a worktree's `.git` is a
+  // pointer file into the parent repository. Left to fail, the spawn gets a cwd
+  // that does not exist, dies at the first query, and the undelivered brief
+  // respawns it every 2 seconds with no readable cause.
+  it('refuses under docker instead of minting a worker that cannot start', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    driverKind.value = 'docker';
+
+    try {
+      await runSpawnWorker(request());
+    } finally {
+      driverKind.value = 'local';
+    }
+
+    const answer = response();
+    expect(answer?.status).toBe('error');
+    expect(answer?.result.error).toContain('local runtime driver');
+    expect(answer?.result.error).toContain('docker');
+    // Nothing half-made: no group, and no brief delivered anywhere.
+    expect(mockCreateAgentGroup).not.toHaveBeenCalled();
+    expect(writes().filter(([, , message]) => message.kind === 'chat')).toEqual([]);
   });
 });
 

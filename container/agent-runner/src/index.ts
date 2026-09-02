@@ -83,6 +83,58 @@ function log(msg: string): void {
  */
 const CWD = PROJECT_DIR;
 
+/** The flat instruction file the host composes into AGENT_DIR on every spawn. */
+const PROJECT_DOC = 'CLAUDE.md';
+
+/**
+ * The composed project document, for a worker only, as system-prompt text.
+ *
+ * Claude Code discovers this file by walking UP from cwd. An ordinary group's
+ * cwd IS the group folder, so the walk finds it and this returns nothing.
+ * A worker's cwd is its worktree, somewhere under `~/.config/nanoclaw/worktrees`
+ * — the walk never passes through AGENT_DIR and the document is simply absent.
+ *
+ * `additionalDirectories` does NOT cover this. It grants the tools permission to
+ * read a path; it does not load a CLAUDE.md as project memory. Verified against
+ * the real CLI: `claude -p --add-dir <dir-holding-CLAUDE.md>` from an unrelated
+ * cwd cannot see its contents, while running with cwd set to that directory can.
+ * Relying on it would have shipped a worker with no persona, no runtime
+ * contract, no destinations map and no `ncl` instructions — silently, because an
+ * agent missing its instructions still answers, just generically.
+ *
+ * Injecting it is exact rather than approximate: the host already inlines every
+ * instruction source into this one flat file with no imports
+ * (`project-doc-compose.ts`), which is the same content the walk would have
+ * loaded. Cost is identical too — it is the same bytes in the same context.
+ *
+ * Fails soft. A worker with no document is worse off, but so is a worker whose
+ * runner refused to start.
+ */
+function workerProjectDoc(): string {
+  if (PROJECT_DIR === AGENT_DIR) return '';
+  const docPath = path.join(AGENT_DIR, PROJECT_DOC);
+  let body: string;
+  try {
+    body = fs.readFileSync(docPath, 'utf-8').trim();
+  } catch {
+    log(`No project document at ${docPath} — continuing without it`);
+    return '';
+  }
+  if (!body) return '';
+  // Anchored absolutely, because the document's own prose says things like
+  // "beside `memory/` in your agent folder" and every relative path in it would
+  // otherwise resolve into the repository worktree — leaving a stray
+  // `instructions.prepend.md` inside a git checkout while the real persona file
+  // is never touched.
+  return [
+    `Your agent state directory is \`${AGENT_DIR}\`. Every path below that is`,
+    'described as being in "your agent folder" lives there, NOT in your current',
+    'working directory, which is a repository worktree you are working in.',
+    '',
+    body,
+  ].join('\n');
+}
+
 async function main(): Promise<void> {
   const config = loadConfig();
   const providerName = config.provider.toLowerCase() as ProviderName;
@@ -102,10 +154,11 @@ async function main(): Promise<void> {
   // with every instruction source inlined, no imports. Memory is supplied
   // separately by each provider's native lifecycle hook.
   const taskId = getTaskSeriesId();
-  const instructions = buildSystemPromptAddendum(
+  const addendum = buildSystemPromptAddendum(
     config.assistantName || undefined,
     taskId ? { kind: 'task', taskId } : { kind: 'chat' },
   );
+  const instructions = [addendum, workerProjectDoc()].filter(Boolean).join('\n\n');
 
   // Discover additional directories mounted at /workspace/extra/*
   const additionalDirectories: string[] = [];
