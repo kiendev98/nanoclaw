@@ -1,12 +1,12 @@
 /**
  * What identifies a repo-scoped worker.
  *
- * Read by `create-worker.ts`, which owns the action that mints one.
+ * Read by `spawn-worker.ts`, which owns the action that mints one.
  *
  * A worker is not "an agent someone asked for". It is the pair
  * **(repository, originating thread)**, and everything else about it is
  * derived. That is the whole answer to the trap this module exists to close:
- * a second `create_worker` in the same thread used to mint a second
+ * a second `spawn_worker` in the same thread used to mint a second
  * agent on a second branch, which could not see the first one's work and
  * silently produced two divergent answers to one conversation.
  *

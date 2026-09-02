@@ -1,14 +1,30 @@
 /**
- * The one body that mints an agent group, for both `create_agent` (a
- * long-lived companion) and `create_worker` (a delegate standing in a
- * repository worktree).
+ * The body that mints an agent group for `spawn_worker` — a delegate standing
+ * in a repository worktree.
  *
- * It exists as a shared function rather than as two similar ones because
- * every step here is a way to lose data quietly if it drifts: the folder
- * dedupe that must not adopt deleted-group residue, the traversal check on
- * the derived path, the bidirectional destination rows that are the ACL, and
- * the projection into the requester's running container without which the
- * new name resolves to "dropped: unknown destination".
+ * **It deliberately duplicates the equivalent body inside `create-agent.ts`,
+ * and that is a fork decision, not an oversight.** This started as one shared
+ * function called by both. Sharing it meant gutting `create-agent.ts` — an
+ * upstream file — from 207 lines to 127, which left a 144-line diff to
+ * re-resolve on every upstream merge, forever. `create-agent.ts` is now held
+ * byte-identical to upstream and this copy serves the worker path alone.
+ *
+ * The trade: duplication inside a file we own is free at merge time; a diff
+ * against a file upstream owns is not. Optimising for line count here would be
+ * optimising the wrong number.
+ *
+ * **What that costs, and what to do about it.** The two copies can drift
+ * silently, and every step here is a way to lose data quietly when they do:
+ * the folder dedupe that must not adopt deleted-group residue, the traversal
+ * check on the derived path, the bidirectional destination rows that are the
+ * ACL, and the projection into the requester's running container without which
+ * the new name resolves to "dropped: unknown destination". One of those
+ * matters specifically to workers: the child's `parent` row is what stops the
+ * `a2a.send` guard denying a worker's reply to its orchestrator.
+ *
+ * So when an upstream sync touches `create-agent.ts`, diff its minting body
+ * against this one and decide deliberately whether the change applies here.
+ * Nothing enforces it.
  *
  * AUTHORIZATION IS THE CALLER'S RESPONSIBILITY. This performs privileged
  * central-DB writes a confined container is otherwise barred from; it is only

@@ -143,6 +143,25 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     const routing = extractRouting(messages);
 
+    // A repo worker starts every TASK with a clean transcript — per batch, not
+    // per container start. The distinction is the whole point: the case this
+    // targets is a second task arriving in a thread that already has a worker,
+    // and that path reuses a WARM container. Resetting only at startup would
+    // have left exactly that case resuming, which is the unbounded bill it
+    // exists to stop.
+    //
+    // The host sets this for groups carrying a `workspace_path`
+    // (`container-runner.ts`), so an ordinary group never sees it and resumes
+    // as before. Same two lines as the `/clear` branch below.
+    //
+    // A worker's durable state is its worktree, which persists across tasks
+    // either way. Its transcript is rebuildable from those files.
+    if (continuation && process.env.NANOCLAW_FRESH_SESSION === '1') {
+      log('Worker task — starting a fresh session rather than resuming');
+      continuation = undefined;
+      clearContinuation(config.providerName);
+    }
+
     // Command handling: the host router gates filtered and unauthorized
     // admin commands before they reach the container. The only command
     // the runner handles directly is /clear (session reset).
@@ -557,21 +576,25 @@ export async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          const { sent, hasUnwrapped, taskBlocks, resultBlocks, scratchpad } = await dispatchResultText(event.text, routing, {
-            midTurnSent,
-            // For emitsMidTurnText providers the result door NEVER delivers
-            // content (error results excepted, below): mid-turn streaming is
-            // the single content door. The result door's remaining job is
-            // the nudge decision — see turnDelivered.
-            suppressDelivery: emitsMidTurnText,
-            // "Did anything user-visible go out this turn?" — door
-            // deliveries (midTurnSent) plus any chat row written since the
-            // turn boundary (which also sees MCP send_message calls the
-            // frame-local count can't). When false and the result still
-            // carries content, the wrap-nudge fires so the model re-sends
-            // and the retry streams through the mid-turn door.
-            turnDelivered: emitsMidTurnText ? midTurnSent > 0 || chatRowWrittenSince(turnStartSeq) : undefined,
-          });
+          const { sent, hasUnwrapped, taskBlocks, resultBlocks, scratchpad } = await dispatchResultText(
+            event.text,
+            routing,
+            {
+              midTurnSent,
+              // For emitsMidTurnText providers the result door NEVER delivers
+              // content (error results excepted, below): mid-turn streaming is
+              // the single content door. The result door's remaining job is
+              // the nudge decision — see turnDelivered.
+              suppressDelivery: emitsMidTurnText,
+              // "Did anything user-visible go out this turn?" — door
+              // deliveries (midTurnSent) plus any chat row written since the
+              // turn boundary (which also sees MCP send_message calls the
+              // frame-local count can't). When false and the result still
+              // carries content, the wrap-nudge fires so the model re-sends
+              // and the retry streams through the mid-turn door.
+              turnDelivered: emitsMidTurnText ? midTurnSent > 0 || chatRowWrittenSince(turnStartSeq) : undefined,
+            },
+          );
           const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
           // One-door task delivery: the final text becomes the run log entry
           // while explicit append-log calls remain optional additive notes.

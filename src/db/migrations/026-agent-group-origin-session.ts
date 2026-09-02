@@ -9,7 +9,7 @@ import type { Migration } from './index.js';
  * exists for one repository AND one conversation, and the pair is the REUSE
  * key.
  *
- * A second `create_worker` for the same repo in the same thread would otherwise mint a
+ * A second `spawn_worker` for the same repo in the same thread would otherwise mint a
  * second worker on a second branch, which cannot see the first one's work.
  * `(origin_session_id, workspace_path)` is the pair that says "this worker
  * already exists", and `workspace_path` is itself derived from
@@ -30,7 +30,7 @@ export const migration026: Migration = {
   name: 'agent-group-origin-session',
   async up(db) {
     await db.exec(`ALTER TABLE agent_groups ADD COLUMN origin_session_id TEXT;`);
-    // The reuse lookup runs on every `create_worker`, on the
+    // The reuse lookup runs on every `spawn_worker`, on the
     // discriminating column.
     await db.exec(
       `CREATE INDEX IF NOT EXISTS idx_agent_groups_origin_session ON agent_groups(origin_session_id) WHERE origin_session_id IS NOT NULL;`,

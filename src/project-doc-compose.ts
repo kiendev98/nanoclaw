@@ -114,6 +114,36 @@ export async function composeGroupProjectDoc(group: AgentGroup, groupDir: string
   const persona = readGroupPersona(groupDir);
   if (persona) push('Persona', persona);
 
+  // A repo worker starts every task with a clean transcript — the host sets
+  // NANOCLAW_FRESH_SESSION for any group carrying a `workspace_path`
+  // (`container-runner.ts`). The worktree still holds every file the last task
+  // touched, so almost nothing is lost. The exception is the one thing that
+  // never became a file: what was tried, rejected, and why.
+  //
+  // So continuity moves into the workspace. This belongs in the standing
+  // document rather than in front of the task, and that placement is
+  // load-bearing: `categorizeMessage` treats a message not starting with `/`
+  // as prose, so prefixing a brief would silently degrade every slash-command
+  // task and the worker would improvise a plausible answer instead.
+  if (group.workspace_path) {
+    push(
+      'Handoff notes',
+      [
+        'You are a repo worker, and each task you receive starts with a clean',
+        'transcript. Earlier tasks in this thread left no conversation behind —',
+        'only the worktree you are standing in.',
+        '',
+        '- **Before you start:** read `NOTES.md` at the root of your worktree if',
+        '  it exists. It is the only record of earlier decisions, dead ends, and',
+        '  open questions.',
+        '- **When you finish:** append what the next task would regret not',
+        '  knowing — what you rejected and why, what is still open. Keep it',
+        '  short. It is a handoff, not a changelog; the diff already says what',
+        '  changed.',
+      ].join('\n'),
+    );
+  }
+
   const baseDoc = path.resolve(process.cwd(), spec.baseDocPath);
   if (fs.existsSync(baseDoc)) {
     push(BASE_DOC_SECTION, fs.readFileSync(baseDoc, 'utf-8'));

@@ -1,7 +1,7 @@
 /**
  * `ncl worktrees` — the manual lifecycle for repo-scoped worker worktrees.
  *
- * A worker created by `create_worker` gets a git worktree under
+ * A worker created by `spawn_worker` gets a git worktree under
  * `WORKTREES_DIR`, and nothing has ever deleted one automatically. An earlier
  * reaper was removed on purpose (282b8f6d): a worker's agent group row is the
  * record that it existed, and a daemon that deletes directories is a daemon
@@ -173,7 +173,7 @@ registerResource({
   table: '(filesystem)',
   description:
     `Git worktree of a repo-scoped worker, under ${WORKTREES_DIR}. Created by ` +
-    '`create_worker` and removed only here, by hand — nothing deletes one automatically. ' +
+    '`spawn_worker` and removed only here, by hand — nothing deletes one automatically. ' +
     'OPERATOR-ONLY: not runnable from inside a container.',
   idColumn: 'path',
   columns: [

@@ -1,10 +1,10 @@
-## Delegating work in another repository (`create_worker`)
+## Delegating work in another repository (`spawn_worker`)
 
-`mcp__nanoclaw__create_worker({ repo, task })` puts a WORKER inside a git worktree of that repository. It is a separate agent with its own process and its own working directory, so it loads that repository's `CLAUDE.md`, skills and settings. You stay where you are and hold the conversation.
+`mcp__nanoclaw__spawn_worker({ repo, task })` puts a WORKER inside a git worktree of that repository. It is a separate agent with its own process and its own working directory, so it loads that repository's `CLAUDE.md`, skills and settings. You stay where you are and hold the conversation.
 
 One call does everything: the worker is created (or the existing one is reused) and `task` is delivered to it as its brief. Do not follow the call with a message. The call returns when the worker exists and has been briefed — its ANSWER arrives later, as a message that wakes you.
 
-The choice between this and the SDK `Task` tool is in the tool's own description: same repository → `Task`; different repository → `create_worker`. Read it there.
+The choice between this and the SDK `Task` tool is in the tool's own description: same repository → `Task`; different repository → `spawn_worker`. Read it there.
 
 ### Rules
 
