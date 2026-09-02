@@ -49,7 +49,7 @@ import { createProvider, type ProviderName } from './providers/factory.js';
 import { resolvePluginServer } from './plugin-mcp.js';
 import type { McpServerConfig } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
-import { EXTRA_DIR, PROJECT_DIR } from './roots.js';
+import { AGENT_DIR, EXTRA_DIR, PROJECT_DIR } from './roots.js';
 
 function log(msg: string): void {
   console.error(`[agent-runner] ${msg}`);
@@ -109,6 +109,12 @@ async function main(): Promise<void> {
 
   // Discover additional directories mounted at /workspace/extra/*
   const additionalDirectories: string[] = [];
+  // A worker stands in its worktree, so AGENT_DIR is no longer on the path
+  // Claude Code walks up from cwd. It still has to be reachable: the composed
+  // CLAUDE.md the host writes per spawn lives there, and so does the memory
+  // tree. Added only when the two differ, so an ordinary group passes exactly
+  // the list it passed before.
+  if (PROJECT_DIR !== AGENT_DIR && fs.existsSync(AGENT_DIR)) additionalDirectories.push(AGENT_DIR);
   const extraBase = EXTRA_DIR;
   if (fs.existsSync(extraBase)) {
     for (const entry of fs.readdirSync(extraBase)) {
