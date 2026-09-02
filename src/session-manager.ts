@@ -138,6 +138,9 @@ export async function resolveSession(
       container_status: 'stopped',
       last_active: null,
       created_at: new Date().toISOString(),
+      workspace_path: null,
+      bound_messaging_group_id: null,
+      bound_root_message_id: null,
     };
 
     try {
@@ -161,15 +164,31 @@ export async function resolveSession(
 }
 
 /** Find or create the per-agent-group session used for scheduled tasks. */
-/** Find or create the isolated session for one task series (thread `system:tasks:<seriesId>`). */
+/**
+ * Find or create the isolated session for one task series (thread
+ * `system:tasks:<seriesId>`).
+ *
+ * @param workspacePath Host directory the task's agent runs in, for a series
+ *   that named a repository. Re-stamped on every call rather than only at
+ *   creation: `ncl worktrees prune` and a human's `rm -rf` both move the
+ *   worktree without touching this row, and the spawn reads the COLUMN, so a
+ *   stale value starts the agent in a directory that is no longer there.
+ */
 export async function resolveTaskSession(
   agentGroupId: string,
   seriesId: string,
+  workspacePath: string | null = null,
 ): Promise<{ session: Session; created: boolean }> {
   const threadId = taskThreadId(seriesId);
   return withSessionCreationLock(`system\0${agentGroupId}\0${threadId}`, async () => {
     const existing = await findSystemSession(agentGroupId, threadId);
-    if (existing) return { session: existing, created: false };
+    if (existing) {
+      if (workspacePath !== null && workspacePath !== existing.workspace_path) {
+        await updateSession(existing.id, { workspace_path: workspacePath });
+        return { session: { ...existing, workspace_path: workspacePath }, created: false };
+      }
+      return { session: existing, created: false };
+    }
 
     const id = generateId();
     const session: Session = {
@@ -182,6 +201,9 @@ export async function resolveTaskSession(
       container_status: 'stopped',
       last_active: null,
       created_at: new Date().toISOString(),
+      workspace_path: workspacePath,
+      bound_messaging_group_id: null,
+      bound_root_message_id: null,
     };
 
     try {

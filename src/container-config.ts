@@ -403,7 +403,10 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
  * container always sees fresh config. Returns the `ContainerConfig` for
  * use by the caller (buildMounts, composeSessionSpec, etc.).
  */
-export async function materializeContainerJson(agentGroupId: string): Promise<ContainerConfig> {
+export async function materializeContainerJson(
+  agentGroupId: string,
+  sessionWorkspacePath?: string | null,
+): Promise<ContainerConfig> {
   const group = await getAgentGroup(agentGroupId);
   if (!group) throw new Error(`Agent group not found: ${agentGroupId}`);
 
@@ -416,6 +419,16 @@ export async function materializeContainerJson(agentGroupId: string): Promise<Co
   const config: ContainerConfig = {
     ...configFromDb(row, group),
     hostClaudeExecutable: resolveClaudeExecutable(process.env.PATH),
+    // A task session's worktree overrides the group's directory. The runner
+    // reads THIS field to pick the cwd it hands the SDK (agent-runner's
+    // `resolveCwd`), so the driver spec's `cwd` alone is not enough — the
+    // spawn would stand in the worktree while the SDK reasoned from the group
+    // folder.
+    //
+    // Inherits an existing hazard rather than adding one: `container.json` is
+    // one file per GROUP, rewritten at every spawn, so two sessions of one
+    // group starting at once already race on every field here.
+    ...(sessionWorkspacePath ? { workspacePath: sessionWorkspacePath } : {}),
   };
 
   const p = path.join(GROUPS_DIR, group.folder, 'container.json');

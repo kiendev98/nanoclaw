@@ -193,6 +193,28 @@ export interface Session {
   container_status: 'running' | 'idle' | 'stopped';
   last_active: string | null;
   created_at: string;
+  /**
+   * Host directory this session's agent runs in, or null for the group folder.
+   *
+   * Set only by a task that named a repository. It is a stored value rather
+   * than a derived one because `composeSessionSpec` turns THIS column into the
+   * spawn's cwd — re-deriving at spawn time would create the right directory
+   * and still start in the old one whenever the derivation changed.
+   */
+  workspace_path?: string | null;
+  /** Messaging group of the Slack thread this session owns, if it opened one. */
+  bound_messaging_group_id?: string | null;
+  /**
+   * Root message id of that thread, exactly as the adapter returned it.
+   *
+   * THESE THREE ARE OPTIONAL, AND A ROW NEVER OMITS THEM. Every read is
+   * `SELECT *`, so the database always supplies all three as null. They are
+   * declared optional purely so the many `Session` literals that predate them
+   * — most of them upstream test fixtures — do not each have to carry three
+   * explicit nulls, which is fork divergence bought for nothing. Treat
+   * `undefined` and `null` identically; no consumer distinguishes them.
+   */
+  bound_root_message_id?: string | null;
 }
 
 // ── Session DB entities ──
