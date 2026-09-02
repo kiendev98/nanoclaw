@@ -13,7 +13,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../mailbox/sqlite/connection.js';
-import { spawnWorker, defaultWorkerName } from './workers.js';
+import { spawnWorker, defaultWorkerName, workerWaitBound } from './workers.js';
 
 function outboundActions(): Array<{ id: string; kind: string; content: Record<string, unknown> }> {
   return (
@@ -48,7 +48,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  delete process.env.NANOCLAW_CREATE_WORKER_WAIT_MS;
+  workerWaitBound.ms = 60_000;
   closeSessionDb();
 });
 
@@ -83,7 +83,7 @@ describe('defaultWorkerName', () => {
 
 describe('spawn_worker — the request the host reads', () => {
   it('writes one spawn_worker system action carrying repo, task, name and its deadline', async () => {
-    process.env.NANOCLAW_CREATE_WORKER_WAIT_MS = '1';
+    workerWaitBound.ms = 1;
     const before = Date.now();
 
     await spawnWorker.handler({ repo: 'wego/saber', task: 'audit the gates' });
@@ -106,7 +106,7 @@ describe('spawn_worker — the request the host reads', () => {
     // `slack-agent-flow` registers over the `create_agent` delivery action and
     // matches on the action string to provision a Slack bot, a DM and a room.
     // A worker arriving under that name would come back as a Slack persona.
-    process.env.NANOCLAW_CREATE_WORKER_WAIT_MS = '1';
+    workerWaitBound.ms = 1;
 
     await spawnWorker.handler({ repo: 'saber', task: 'x' });
 
@@ -117,7 +117,7 @@ describe('spawn_worker — the request the host reads', () => {
     // A task beginning with '/' is dispatched as a real command in the
     // worker's session. Trimming aside, anything this tool adds to it —
     // a wrapper, a quote, a prefix — silently demotes it to prose.
-    process.env.NANOCLAW_CREATE_WORKER_WAIT_MS = '1';
+    workerWaitBound.ms = 1;
 
     await spawnWorker.handler({ repo: 'saber', task: '/blueprint FMTA-343' });
 
@@ -180,7 +180,7 @@ describe('spawn_worker — the blocking round trip', () => {
   it('degrades to "you will be woken" when the wait runs out — never to a failure', async () => {
     // Creation is still running. Reporting an error here would have the caller
     // tell the human about a failure that did not happen.
-    process.env.NANOCLAW_CREATE_WORKER_WAIT_MS = '20';
+    workerWaitBound.ms = 20;
 
     const r = await spawnWorker.handler({ repo: 'saber', task: 'audit the gates', name: 'Scout' });
 

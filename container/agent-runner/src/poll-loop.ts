@@ -60,6 +60,12 @@ export interface PollLoopConfig {
     instructions?: string;
   };
   /**
+   * Start every TASK with a clean transcript instead of resuming. True for a
+   * repo worker, which `container.json` identifies by carrying a
+   * `workspacePath`; absent for an ordinary group, which resumes as before.
+   */
+  freshSessionPerTask?: boolean;
+  /**
    * Optional stop signal. In production the loop runs until the container
    * dies; tests pass a signal so an abandoned loop actually exits instead of
    * polling forever and stealing messages from the next test's DB.
@@ -150,13 +156,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // have left exactly that case resuming, which is the unbounded bill it
     // exists to stop.
     //
-    // The host sets this for groups carrying a `workspace_path`
-    // (`container-runner.ts`), so an ordinary group never sees it and resumes
+    // Set for groups carrying a `workspace_path`, which reaches the runner
+    // through `container.json` — so an ordinary group never sees it and resumes
     // as before. Same two lines as the `/clear` branch below.
     //
     // A worker's durable state is its worktree, which persists across tasks
     // either way. Its transcript is rebuildable from those files.
-    if (continuation && process.env.NANOCLAW_FRESH_SESSION === '1') {
+    if (continuation && config.freshSessionPerTask) {
       log('Worker task — starting a fresh session rather than resuming');
       continuation = undefined;
       clearContinuation(config.providerName);

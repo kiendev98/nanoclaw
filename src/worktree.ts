@@ -34,18 +34,21 @@
 import { execFileSync } from 'child_process';
 import { createHash } from 'crypto';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 
+import { WORKTREES_DIR } from './home.js';
 import { log } from './log.js';
 
-const HOME_DIR = process.env.HOME || os.homedir();
-
 /**
- * Where worktrees are created. Deliberately under `~/.config/nanoclaw` rather
- * than inside any repository — see the module comment on the upward walk.
+ * Where worktrees are created: one tree under the host home.
+ *
+ * The path is not what matters — the property is. No ancestor of it holds a
+ * `CLAUDE.md`. See the module comment on the upward walk: a worktree inside its
+ * target checkout loads the outer checkout's guidance on top of its own.
+ *
+ * Re-exported because callers have always imported it from here.
  */
-export const WORKTREES_DIR = path.join(HOME_DIR, '.config', 'nanoclaw', 'worktrees');
+export { WORKTREES_DIR };
 
 /**
  * Parse `NANOCLAW_PROJECT_ROOTS` into absolute directories.
@@ -341,12 +344,11 @@ function revParseOrNull(repo: string, ref: string): string | null {
  * repo with no graph is left alone and the operator is told to build it once.
  *
  * Best-effort and never throws, for the same reason as the fetch above: a
- * missing binary or a slow index must not stop a worker from spawning. Set
- * `NANOCLAW_GRAPH_REINDEX=0` to skip it entirely.
+ * missing binary or a slow index must not stop a worker from spawning. A repo
+ * with no graph is skipped below, which is the only case an off-switch ever
+ * served.
  */
 function reindexCodeGraph(repo: string, base: string | null): void {
-  if (process.env.NANOCLAW_GRAPH_REINDEX === '0') return;
-
   if (!fs.existsSync(path.join(repo, '.code-review-graph', 'graph.db'))) {
     log.info('Worktree base: no code graph in the owning checkout, skipping reindex', {
       repo,

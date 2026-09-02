@@ -85,23 +85,22 @@ describe('stripInheritedClaudeEnv', () => {
  */
 describe('resolveSpawnCwd', () => {
   it('defaults to the group folder, so an existing install is unaffected', () => {
-    expect(resolveSpawnCwd({}, { NANOCLAW_AGENT_DIR: '/groups/cli-with-kien' })).toBe('/groups/cli-with-kien');
+    expect(resolveSpawnCwd(undefined, { NANOCLAW_AGENT_DIR: '/groups/cli-with-kien' })).toBe('/groups/cli-with-kien');
   });
 
-  it('uses the project directory when one is set, leaving AGENT_DIR alone', () => {
+  it("uses the spec's cwd when one is set, leaving AGENT_DIR alone", () => {
     const rootEnv = { NANOCLAW_AGENT_DIR: '/groups/cli-with-kien' };
-    const env = { NANOCLAW_PROJECT_DIR: '/worktrees/saber-feat-abc' };
 
-    expect(resolveSpawnCwd(env, rootEnv)).toBe('/worktrees/saber-feat-abc');
+    expect(resolveSpawnCwd('/worktrees/saber-feat-abc', rootEnv)).toBe('/worktrees/saber-feat-abc');
     // The state directory must NOT follow cwd: memory and footer telemetry
     // stay with the agent, not with whatever repo it is visiting.
     expect(rootEnv.NANOCLAW_AGENT_DIR).toBe('/groups/cli-with-kien');
   });
 
-  it('treats a whitespace-only override as unset rather than chdir-ing to nothing', () => {
+  it('treats a whitespace-only cwd as unset rather than chdir-ing to nothing', () => {
     // An empty value reaching `spawn` would resolve cwd to the host's own
     // directory — the nanoclaw checkout — which is how the 11,618-token
     // CLAUDE.md leak got into every session in the first place.
-    expect(resolveSpawnCwd({ NANOCLAW_PROJECT_DIR: '   ' }, { NANOCLAW_AGENT_DIR: '/groups/g' })).toBe('/groups/g');
+    expect(resolveSpawnCwd('   ', { NANOCLAW_AGENT_DIR: '/groups/g' })).toBe('/groups/g');
   });
 });

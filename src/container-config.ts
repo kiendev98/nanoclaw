@@ -11,6 +11,7 @@
 import fs from 'fs';
 import path from 'path';
 
+import { resolveClaudeExecutable } from './claude-executable.js';
 import { DEFAULT_MODEL, FAST_MODE, GROUPS_DIR, TIMEZONE } from './config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
@@ -254,6 +255,22 @@ export interface ContainerConfig {
   timezone?: string;
   /** Session isolation tier for the group's containers; absent = the composer's default ('container'). */
   runtimeTier?: 'container' | 'vm';
+  /**
+   * The repository or worktree a REPO WORKER stands in; absent for an ordinary
+   * group. Carried as the column rather than a derived flag, because a flag
+   * records a conclusion and the next reader cannot tell which fact produced
+   * it. The runner reads it for two decisions: its working directory, and
+   * whether to start each task with a fresh transcript.
+   */
+  workspacePath?: string;
+  /**
+   * Absolute path to this host's `claude` binary, for a runner executing OUTSIDE
+   * a container. Written at spawn because only the host can see its own PATH.
+   *
+   * A containerised runner ignores it — the image installs `claude` at
+   * `/pnpm/claude`, and a host path would name nothing inside the container.
+   */
+  hostClaudeExecutable?: string;
 }
 
 /**
@@ -377,6 +394,7 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     fastMode: FAST_MODE || undefined,
     timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : undefined,
     runtimeTier: parseRuntimeTier(row.runtime_tier, group.name),
+    workspacePath: group.workspace_path ?? undefined,
   };
 }
 
@@ -392,7 +410,13 @@ export async function materializeContainerJson(agentGroupId: string): Promise<Co
   const row = await getContainerConfig(agentGroupId);
   if (!row) throw new Error(`Container config not found for agent group: ${agentGroupId}`);
 
-  const config = configFromDb(row, group);
+  // Resolved per spawn rather than once at load: PATH is a property of the
+  // host at this moment, and an install that gains `claude` should not need a
+  // restart to find it.
+  const config: ContainerConfig = {
+    ...configFromDb(row, group),
+    hostClaudeExecutable: resolveClaudeExecutable(process.env.PATH),
+  };
 
   const p = path.join(GROUPS_DIR, group.folder, 'container.json');
   const dir = path.dirname(p);
