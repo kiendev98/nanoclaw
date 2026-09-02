@@ -5,6 +5,7 @@ import { TIMEZONE } from '../../config.js';
 import type { TaskRecord } from '../../mailbox/index.js';
 import { resolveTaskSession, withMailboxSession } from '../../session-manager.js';
 import { parseZonedToUtc } from '../../timezone.js';
+import { prepareTaskWorkspace } from './task-workspace.js';
 
 export const MAX_DAILY_FIRES = 4;
 
@@ -28,6 +29,8 @@ export interface PreparedScheduledTask {
   recurrence: string | null;
   script: string | null;
   processAfter: string;
+  /** Repository name this series stands in, or null for the group folder. */
+  repo: string | null;
 }
 
 export type ScheduledTaskRow = TaskRecord;
@@ -108,6 +111,7 @@ export function prepareScheduledTask(input: {
   script?: string | null;
   dangerouslyOverrideRecurrenceLimit?: boolean;
   timezone?: string;
+  repo?: string | null;
 }): PreparedScheduledTask {
   if (!input.prompt) throw new Error('--prompt is required');
   const recurrence = input.recurrence ?? null;
@@ -125,7 +129,7 @@ export function prepareScheduledTask(input: {
     processAfter = parseProcessAfter(input.processAfter, tz);
   }
 
-  return { name: input.name, prompt: input.prompt, recurrence, script, processAfter };
+  return { name: input.name, prompt: input.prompt, recurrence, script, processAfter, repo: input.repo ?? null };
 }
 
 /** Persist a prepared task through NanoClaw's single task/session representation. */
@@ -135,7 +139,12 @@ export async function createScheduledTask(
   options?: { status?: 'pending' | 'paused'; originSessionId?: string | null },
 ): Promise<{ session: { id: string; agent_group_id: string }; row: ScheduledTaskRow }> {
   const id = makeTaskId(task.name);
-  const { session } = await resolveTaskSession(agentGroupId, id);
+  // Prepared BEFORE the session is resolved, so an unresolvable repository
+  // aborts the create rather than leaving a scheduled task that fails at its
+  // first fire, hours later, in a log nobody is reading.
+  const workspace = task.repo ? prepareTaskWorkspace(task.repo, id) : null;
+  if (workspace && !workspace.ok) throw new Error(workspace.error);
+  const { session } = await resolveTaskSession(agentGroupId, id, workspace?.path ?? null);
 
   const row = await withMailboxSession(agentGroupId, session.id, async (db) => {
     await db.insertTask({
@@ -147,6 +156,7 @@ export async function createScheduledTask(
         prompt: task.prompt,
         script: task.script,
         originSessionId: options?.originSessionId ?? null,
+        repo: task.repo,
       }),
       status: options?.status ?? 'pending',
     });

@@ -138,10 +138,18 @@ CREATE TABLE sessions (
   status             TEXT DEFAULT 'active',
   container_status   TEXT DEFAULT 'stopped',
   last_active        TEXT,
-  created_at         TEXT NOT NULL
+  created_at         TEXT NOT NULL,
+  -- Task-scoped workspace and Slack thread binding (module:scheduling:task-workspace).
+  -- workspace_path is the directory this session's agent runs in; the two bound_*
+  -- columns are the thread it opened, so a reply resolves back to it instead of
+  -- minting a new session. All three are NULL for an ordinary chat session.
+  workspace_path            TEXT,
+  bound_messaging_group_id  TEXT,
+  bound_root_message_id     TEXT
 );
 CREATE INDEX idx_sessions_agent_group ON sessions(agent_group_id);
 CREATE INDEX idx_sessions_lookup ON sessions(messaging_group_id, thread_id);
+CREATE INDEX idx_sessions_bound ON sessions(bound_messaging_group_id, bound_root_message_id);
 
 -- Pending interactive questions
 CREATE TABLE pending_questions (

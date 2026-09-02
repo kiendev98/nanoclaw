@@ -18,6 +18,7 @@ import { migration015 } from './015-cli-scope.js';
 import { migration016 } from './016-messaging-group-instance.js';
 import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
 import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
+import { migration027 } from './027-scheduling-task-workspace.js';
 import { migration018 } from './018-approvals-approver-user-id.js';
 import { migration019 } from './019-wiring-threads.js';
 import { migration020 } from './020-container-config-timezone.js';
@@ -95,6 +96,11 @@ export const migrations: Migration[] = [
   migration024,
   migration025,
   migration026,
+  // A built-in rather than a registered module migration: `registerMigration`
+  // only fires when the modules barrel is imported, which is the host entry
+  // point alone, so a registered migration is invisible to every test and to
+  // any tool that opens the database without booting the host.
+  migration027,
 ];
 
 /**
