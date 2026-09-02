@@ -670,8 +670,13 @@ export class ClaudeProvider implements AgentProvider {
         model: this.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         effort: this.effort as any,
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
+        // `bypassPermissions` was chosen because a chat message has nowhere to render an
+        // approval prompt. That holds for `default`, but not for `auto`: auto's classifier
+        // DENIES a dangerous call with a stated reason rather than asking, so it needs no
+        // approval UI. Under the local driver the blast radius is the whole user account,
+        // which made the old posture the riskiest available. Override in .env to roll back
+        // without a rebuild.
+        permissionMode: (process.env.NANOCLAW_PERMISSION_MODE as 'auto' | 'bypassPermissions' | undefined) ?? 'auto',
         settingSources: ['project', 'user', 'local'],
         // Only sent when enabled, so an install that never turns it on passes
         // exactly the options it always did. `fastMode` is a Settings member

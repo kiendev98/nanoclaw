@@ -4,11 +4,15 @@
  * ## What this trades away
  *
  * Read this before choosing it. The Docker driver's container IS the permission
- * boundary: the provider runs with `permissionMode: 'bypassPermissions'` and
- * `allowDangerouslySkipPermissions: true`, because a chat message has nowhere
- * to render an approval prompt. Under Docker the blast radius is a container
- * with an enumerated set of mounts. Under this driver it is the user account
- * the host runs as.
+ * boundary. Under Docker the blast radius is a container with an enumerated set
+ * of mounts. Under this driver it is the user account the host runs as.
+ *
+ * The provider now runs with `permissionMode: 'auto'` rather than
+ * `bypassPermissions`, precisely because of that difference: auto's classifier
+ * denies a dangerous call with a stated reason instead of prompting, so it
+ * needs no approval UI — the constraint that made bypass look inevitable when a
+ * chat message is the only surface. It is a gate, not a boundary, and it does
+ * not turn this driver into an isolated one.
  *
  * So this driver provides **no isolation of any kind**. It does not sandbox the
  * filesystem, does not confine the network, and cannot enforce a read-only
