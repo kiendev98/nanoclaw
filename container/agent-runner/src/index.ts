@@ -49,39 +49,35 @@ import { createProvider, type ProviderName } from './providers/factory.js';
 import { resolvePluginServer } from './plugin-mcp.js';
 import type { McpServerConfig } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
-import { AGENT_DIR, EXTRA_DIR, PROJECT_DIR } from './roots.js';
+import { AGENT_DIR, EXTRA_DIR, IS_HOSTED } from './roots.js';
 
 function log(msg: string): void {
   console.error(`[agent-runner] ${msg}`);
 }
 
 /**
- * The directory the agent stands in.
+ * The directory the agent stands in: `container.json`'s `workspacePath` for a
+ * repo worker, the group folder for everyone else.
  *
- * PROJECT_DIR, not AGENT_DIR. cwd is the only thing that decides which
- * project's CLAUDE.md, `.claude/skills/` and `.claude/settings.json` a session
- * loads — Claude Code walks UP from cwd for all three — so for a repo worker it
- * has to be the worktree. `roots.ts` already defaults PROJECT_DIR to AGENT_DIR,
- * so an ordinary group is unaffected: same value, same behaviour as before.
+ * cwd is the only thing that decides which project's CLAUDE.md,
+ * `.claude/skills/` and `.claude/settings.json` a session loads — Claude Code
+ * walks UP from cwd for all three — so for a worker it has to be the worktree.
  *
- * Reading AGENT_DIR here silently defeated the whole worker-workspace feature.
- * The host resolved the worktree correctly at every step — created it, stored
- * `agent_groups.workspace_path`, exported `NANOCLAW_PROJECT_DIR`, and pointed
- * the spawn's own cwd at it via `resolveSpawnCwd` — and then this line handed
- * the SDK the group folder anyway.
- *
- * It failed silently rather than loudly because a group folder lives INSIDE a
- * repository (saber, for this install). So `git rev-parse --show-toplevel`
- * walked up out of the group folder and returned that repository: a valid root,
- * a valid branch, real commits, all of them the wrong ones. A worker asked for
- * `wego-ai` reported saber and never noticed. Worse, a write would have landed
+ * Reading AGENT_DIR here once silently defeated the whole worker feature. The
+ * host resolved the worktree correctly at every step and this line handed the
+ * SDK the group folder anyway. It failed silently rather than loudly because a
+ * group folder lives INSIDE a repository, so `git rev-parse --show-toplevel`
+ * walked up out of it and returned that repository: a valid root, a valid
+ * branch, real commits, all of them the wrong ones. A write would have landed
  * on the shared checkout's `main` instead of the worker's own branch, so the
  * isolation the worktree exists to provide was not real.
  *
  * AGENT_DIR stays the agent's STATE directory — memory and footer telemetry
  * must not follow cwd into a repository.
  */
-const CWD = PROJECT_DIR;
+function resolveCwd(workspacePath: string | undefined): string {
+  return workspacePath || AGENT_DIR;
+}
 
 /** The flat instruction file the host composes into AGENT_DIR on every spawn. */
 const PROJECT_DOC = 'CLAUDE.md';
@@ -110,8 +106,8 @@ const PROJECT_DOC = 'CLAUDE.md';
  * Fails soft. A worker with no document is worse off, but so is a worker whose
  * runner refused to start.
  */
-function workerProjectDoc(): string {
-  if (PROJECT_DIR === AGENT_DIR) return '';
+function workerProjectDoc(cwd: string): string {
+  if (cwd === AGENT_DIR) return '';
   const docPath = path.join(AGENT_DIR, PROJECT_DOC);
   let body: string;
   try {
@@ -137,6 +133,7 @@ function workerProjectDoc(): string {
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  const CWD = resolveCwd(config.workspacePath);
   const providerName = config.provider.toLowerCase() as ProviderName;
   const mailbox = getAgentMailbox();
   await mailbox.start(await readMailboxContext());
@@ -158,7 +155,7 @@ async function main(): Promise<void> {
     config.assistantName || undefined,
     taskId ? { kind: 'task', taskId } : { kind: 'chat' },
   );
-  const instructions = [addendum, workerProjectDoc()].filter(Boolean).join('\n\n');
+  const instructions = [addendum, workerProjectDoc(CWD)].filter(Boolean).join('\n\n');
 
   // Discover additional directories mounted at /workspace/extra/*
   const additionalDirectories: string[] = [];
@@ -167,7 +164,7 @@ async function main(): Promise<void> {
   // CLAUDE.md the host writes per spawn lives there, and so does the memory
   // tree. Added only when the two differ, so an ordinary group passes exactly
   // the list it passed before.
-  if (PROJECT_DIR !== AGENT_DIR && fs.existsSync(AGENT_DIR)) additionalDirectories.push(AGENT_DIR);
+  if (CWD !== AGENT_DIR && fs.existsSync(AGENT_DIR)) additionalDirectories.push(AGENT_DIR);
   const extraBase = EXTRA_DIR;
   if (fs.existsSync(extraBase)) {
     for (const entry of fs.readdirSync(extraBase)) {
@@ -213,6 +210,9 @@ async function main(): Promise<void> {
     model: config.model,
     effort: config.effort,
     fastMode: config.fastMode,
+    // Only outside a container. `IS_HOSTED` is the host driver's own signal, so
+    // a containerised runner keeps the SDK default even if the field is set.
+    claudeExecutable: IS_HOSTED ? config.hostClaudeExecutable : undefined,
   });
   provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
 
@@ -222,6 +222,7 @@ async function main(): Promise<void> {
       providerName,
       cwd: CWD,
       systemContext: { instructions },
+      freshSessionPerTask: Boolean(config.workspacePath),
     });
   } finally {
     await mailbox.stop();

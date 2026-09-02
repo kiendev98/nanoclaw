@@ -18,7 +18,7 @@ import { describe, it, expect, afterAll, beforeEach, afterEach } from 'bun:test'
 
 import { initTestSessionDb, closeSessionDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages, writeMessageOut } from '../db/messages-out.js';
-import { spawnWorker } from './workers.js';
+import { spawnWorker, workerWaitBound } from './workers.js';
 import { extendTool, registerTools, resetToolExtensions } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -209,11 +209,11 @@ describe('extendTool — passthrough keys land in the written payload', () => {
 describe('extendTool — fixture extension of spawn_worker (end to end)', () => {
   beforeEach(() => {
     initTestSessionDb();
-    process.env.NANOCLAW_CREATE_WORKER_WAIT_MS = '1';
+    workerWaitBound.ms = 1;
   });
 
   afterEach(() => {
-    delete process.env.NANOCLAW_CREATE_WORKER_WAIT_MS;
+    workerWaitBound.ms = 60_000;
     closeSessionDb();
   });
 

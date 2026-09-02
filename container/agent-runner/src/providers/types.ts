@@ -94,6 +94,11 @@ export interface ProviderOptions {
    */
   effort?: string;
   /**
+   * Absolute path to the `claude` binary, for a runner executing outside a
+   * container. Omitted inside one, where the SDK's own default is correct.
+   */
+  claudeExecutable?: string;
+  /**
    * API fast serving tier: faster output at a higher per-token price. Passed
    * through to the underlying SDK. If omitted, the SDK default is used.
    */

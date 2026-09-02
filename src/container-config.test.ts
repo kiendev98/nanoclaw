@@ -64,6 +64,16 @@ describe('resolveGroupTimezone', () => {
     expect(configFromDb((await getContainerConfig(GROUP.id))!, GROUP).timezone).toBeUndefined();
   });
 
+  it('configFromDb carries a worker workspace path and omits it for an ordinary group', async () => {
+    const row = (await getContainerConfig(GROUP.id))!;
+    const worker = { ...GROUP, workspace_path: '/Users/kien/.saber/worktrees/saber-abc123-x' };
+
+    expect(configFromDb(row, worker).workspacePath).toBe('/Users/kien/.saber/worktrees/saber-abc123-x');
+    // Absence, not an empty string: the runner treats presence as "I am a
+    // worker", so a blank value would make every ordinary group one.
+    expect(configFromDb(row, GROUP).workspacePath).toBeUndefined();
+  });
+
   // The composer widens a corrupt selection to 'all' rather than dropping
   // skills. This reading used to be a bare cast, so a row that is not JSON
   // threw here first and the tolerance never applied: every spawn failed, and

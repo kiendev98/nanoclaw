@@ -115,7 +115,7 @@ export async function composeGroupProjectDoc(group: AgentGroup, groupDir: string
   if (persona) push('Persona', persona);
 
   // A repo worker starts every task with a clean transcript — the host sets
-  // NANOCLAW_FRESH_SESSION for any group carrying a `workspace_path`
+  // a fresh session for any group carrying a `workspace_path`
   // (`container-runner.ts`). The worktree still holds every file the last task
   // touched, so almost nothing is lost. The exception is the one thing that
   // never became a file: what was tried, rejected, and why.

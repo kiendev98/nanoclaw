@@ -181,22 +181,22 @@ describe('composeSessionSpec', () => {
    * which repository's `CLAUDE.md`, `.claude/skills/` and
    * `.claude/settings.json` a session loads.
    *
-   * It rides the composed env lane as `NANOCLAW_PROJECT_DIR`, which is what
-   * `roots.ts` and the local driver's `resolveSpawnCwd` already read (a5622111).
+   * It rides the typed `ContainerSpec.cwd`, which the local driver's
+   * `resolveSpawnCwd` reads, and `container.json`'s `workspacePath`, which the
+   * runner reads. No environment variable carries it.
    */
-  it('publishes a repo-scoped group workspace as NANOCLAW_PROJECT_DIR', () => {
-    const spec = composeWithWorkspace('/Users/kien/.config/nanoclaw/worktrees/saber-nanoclaw-scout');
-    expect(spec.containers[0].env.NANOCLAW_PROJECT_DIR).toBe(
-      '/Users/kien/.config/nanoclaw/worktrees/saber-nanoclaw-scout',
-    );
+  it('publishes a repo-scoped group workspace as the container cwd', () => {
+    const spec = composeWithWorkspace('/Users/kien/.saber/worktrees/saber-nanoclaw-scout');
+    expect(spec.containers[0].cwd).toBe('/Users/kien/.saber/worktrees/saber-nanoclaw-scout');
+    expect(spec.containers[0].env).not.toHaveProperty('NANOCLAW_PROJECT_DIR');
   });
 
-  it('sets no NANOCLAW_PROJECT_DIR for a group without one', () => {
+  it('sets no cwd for a group without a workspace', () => {
     // Absence is the contract, not an empty string: the driver falls back to
     // NANOCLAW_AGENT_DIR, and an empty value reaching `spawn` would resolve cwd
     // to the host's own checkout — the 11,618-token CLAUDE.md leak of 5a592b62.
-    expect(composeWithWorkspace(null).containers[0].env).not.toHaveProperty('NANOCLAW_PROJECT_DIR');
-    expect(compose().containers[0].env).not.toHaveProperty('NANOCLAW_PROJECT_DIR');
+    expect(composeWithWorkspace(null).containers[0].cwd).toBeUndefined();
+    expect(compose().containers[0].cwd).toBeUndefined();
   });
 
   /**
@@ -209,14 +209,13 @@ describe('composeSessionSpec', () => {
    * earlier one, on every turn. `poll-loop.ts` reads this and clears the stored
    * continuation.
    */
-  it('marks a repo worker for a fresh session', () => {
-    const spec = composeWithWorkspace('/Users/kien/.config/nanoclaw/worktrees/saber-nanoclaw-scout');
-    expect(spec.containers[0].env.NANOCLAW_FRESH_SESSION).toBe('1');
-  });
-
-  it('leaves an ordinary group resuming exactly as before', () => {
-    // Absence, not '0' — the runner tests for the string '1', and a group that
-    // never had a workspace must pass byte-for-byte the env it always passed.
+  it('carries no fresh-session variable — the signal rides container.json', () => {
+    // `workspacePath` reaches the runner as config, not as an environment
+    // variable, so the runner derives "this is a worker" from the same column
+    // the host read. Asserted for the worker case too, because a leftover
+    // variable would be a second source of truth for one fact.
+    const worker = composeWithWorkspace('/Users/kien/.saber/worktrees/saber-nanoclaw-scout');
+    expect(worker.containers[0].env).not.toHaveProperty('NANOCLAW_FRESH_SESSION');
     expect(composeWithWorkspace(null).containers[0].env).not.toHaveProperty('NANOCLAW_FRESH_SESSION');
     expect(compose().containers[0].env).not.toHaveProperty('NANOCLAW_FRESH_SESSION');
   });

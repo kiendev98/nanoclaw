@@ -9,8 +9,8 @@ import type { Migration } from './index.js';
  * cwd — verified empirically, and it does NOT stop at a git repository root —
  * so cwd, and only cwd, decides whose `CLAUDE.md`, `.claude/skills/` and
  * `.claude/settings.json` a session loads. The value reaches the spawn as
- * `NANOCLAW_PROJECT_DIR`, which `container/agent-runner/src/roots.ts` already
- * consumes (commit a5622111).
+ * `ContainerSpec.cwd` and `container.json`, which the driver and the runner
+ * read respectively (commit a5622111).
  *
  * Deliberately NOT on `container_configs`. That table holds runtime knobs an
  * operator tunes (provider, model, limits); this is the group's identity — the

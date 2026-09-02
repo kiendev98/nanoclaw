@@ -25,6 +25,17 @@ export interface RunnerConfig {
   effort?: string;
   /** API fast serving tier (host-configured; see the host's container-config). */
   fastMode?: boolean;
+  /**
+   * The repository or worktree this agent stands in, when it is a repo worker.
+   * Absent for an ordinary group, which is what distinguishes the two: a worker
+   * starts every task with a clean transcript, an ordinary group resumes.
+   */
+  workspacePath?: string;
+  /**
+   * This host's `claude` binary, when the runner executes outside a container.
+   * Ignored in a container, which has its own at the SDK's default path.
+   */
+  hostClaudeExecutable?: string;
 }
 
 const DEFAULT_MAX_MESSAGES = 10;
@@ -55,6 +66,8 @@ export function loadConfig(): RunnerConfig {
     model: (raw.model as string) || undefined,
     effort: (raw.effort as string) || undefined,
     fastMode: raw.fastMode === true || undefined,
+    workspacePath: (raw.workspacePath as string) || undefined,
+    hostClaudeExecutable: (raw.hostClaudeExecutable as string) || undefined,
   };
 
   return _config;

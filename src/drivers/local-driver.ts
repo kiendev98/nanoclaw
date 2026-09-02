@@ -57,6 +57,7 @@ import { spawn, type ChildProcess } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
+import { resolveClaudeExecutable } from '../claude-executable.js';
 import { log } from '../log.js';
 
 import {
@@ -155,9 +156,8 @@ const CLAUDE_SESSION_ENV_VARS = [
  * Falls back to the group folder, so an install that sets no override keeps
  * its exact previous behaviour.
  */
-export function resolveSpawnCwd(env: NodeJS.ProcessEnv, rootEnv: NodeJS.ProcessEnv): string | undefined {
-  const projectDir = (env.NANOCLAW_PROJECT_DIR ?? '').trim();
-  return projectDir || rootEnv.NANOCLAW_AGENT_DIR;
+export function resolveSpawnCwd(specCwd: string | undefined, rootEnv: NodeJS.ProcessEnv): string | undefined {
+  return (specCwd ?? '').trim() || rootEnv.NANOCLAW_AGENT_DIR;
 }
 
 export function stripInheritedClaudeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -203,33 +203,6 @@ interface SessionRecord {
   key: SessionKey;
   labels: Record<string, string>;
   startedAt: string;
-}
-
-/**
- * Find the `claude` binary on the host's PATH.
- *
- * The runner defaults to `/pnpm/claude`, where the agent image installs it.
- * Nothing is there on a host, so the driver has to say where the real one is.
- * That process is also what reads the OS keychain, which is what lets a host
- * run authenticate as the user with no token — so failing to find it is not a
- * missing convenience, it is the whole credential story gone.
- *
- * Returns undefined rather than throwing: the runner then falls back to its
- * container default and fails with the SDK's own message, which names the path
- * it looked for. That is a better error than one invented here.
- */
-function resolveClaudeExecutable(pathEnv: string | undefined): string | undefined {
-  for (const dir of (pathEnv ?? '').split(path.delimiter)) {
-    if (!dir) continue;
-    const candidate = path.join(dir, 'claude');
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      return candidate;
-    } catch {
-      // not here, keep looking
-    }
-  }
-  return undefined;
 }
 
 /** Is this pid still ours and alive? Signal 0 tests without delivering. */
@@ -468,14 +441,18 @@ export class LocalSessionDriver implements SessionDriver {
     }
     stripInheritedClaudeEnv(env);
 
-    const executable = resolveClaudeExecutable(env.PATH);
-    if (executable) env.NANOCLAW_CLAUDE_EXECUTABLE = executable;
-    else log.warn('No `claude` on PATH — the agent will fail with the container default path', { name });
+    // Warned here and delivered elsewhere: `container-config.ts` writes the
+    // resolved path into `container.json`, which is the runner's config
+    // channel. This spawn is the last moment a human-visible warning is worth
+    // emitting, because the failure that follows happens inside the child.
+    if (!resolveClaudeExecutable(env.PATH)) {
+      log.warn('No `claude` on PATH — the agent will fail with the container default path', { name });
+    }
 
     this.#reportMissingRunnerDeps(name);
 
     const child = spawn(this.#runtimeBin, ['run', this.#runnerEntry], {
-      cwd: resolveSpawnCwd(env, rootEnv),
+      cwd: resolveSpawnCwd(spec.containers.find((c) => c.role === 'agent')?.cwd, rootEnv),
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: false,

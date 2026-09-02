@@ -577,6 +577,7 @@ export class ClaudeProvider implements AgentProvider {
   private model?: string;
   private effort?: string;
   private fastMode?: boolean;
+  private claudeExecutable?: string;
   private memorySessionHook?: MemorySessionHookRegistration;
 
   constructor(options: ProviderOptions = {}) {
@@ -588,6 +589,7 @@ export class ClaudeProvider implements AgentProvider {
     this.model = options.model;
     this.effort = options.effort;
     this.fastMode = options.fastMode;
+    this.claudeExecutable = options.claudeExecutable;
     this.env = {
       ...(options.env ?? {}),
       CLAUDE_CODE_AUTO_COMPACT_WINDOW,
@@ -660,7 +662,7 @@ export class ClaudeProvider implements AgentProvider {
         // matters beyond the path — this is the process that reads the OS
         // keychain, so it is also what makes the host run authenticate as the
         // user with no token.
-        pathToClaudeCodeExecutable: process.env.NANOCLAW_CLAUDE_EXECUTABLE || '/pnpm/claude',
+        pathToClaudeCodeExecutable: this.claudeExecutable || '/pnpm/claude',
         systemPrompt: instructions
           ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions }
           : undefined,
@@ -674,9 +676,12 @@ export class ClaudeProvider implements AgentProvider {
         // approval prompt. That holds for `default`, but not for `auto`: auto's classifier
         // DENIES a dangerous call with a stated reason rather than asking, so it needs no
         // approval UI. Under the local driver the blast radius is the whole user account,
-        // which made the old posture the riskiest available. Override in .env to roll back
-        // without a rebuild.
-        permissionMode: (process.env.NANOCLAW_PERMISSION_MODE as 'auto' | 'bypassPermissions' | undefined) ?? 'auto',
+        // which made the old posture the riskiest available.
+        //
+        // Stated here rather than read from the environment. An env override let the
+        // safest posture be undone by one line in a `.env` -- silently, and by anything
+        // that can write that file. Rolling back is deliberately a code change now.
+        permissionMode: 'auto',
         settingSources: ['project', 'user', 'local'],
         // Only sent when enabled, so an install that never turns it on passes
         // exactly the options it always did. `fastMode` is a Settings member

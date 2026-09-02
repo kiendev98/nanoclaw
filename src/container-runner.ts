@@ -969,22 +969,16 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     TZ: containerConfig.timezone ?? TIMEZONE,
     ...mailboxEnvironment,
   };
-  // The repository this agent stands in, when it stands in one. cwd is the only
-  // thing that decides which project's CLAUDE.md, `.claude/skills/` and
-  // `.claude/settings.json` a session loads — Claude Code walks UP from cwd for
-  // all three — so this is what makes a worker a worker.
-  //
-  // It rides the typed `env` lane rather than a new SessionSpec field because
-  // the runner already reads it: `roots.ts` exports
-  // `PROJECT_DIR = root('NANOCLAW_PROJECT_DIR', AGENT_DIR)` and the local
-  // driver's `resolveSpawnCwd` uses it for the spawn's cwd (a5622111).
-  // Omitted when the group has none, so an ordinary group's spawn is byte-for-
-  // byte what it was: the driver falls back to NANOCLAW_AGENT_DIR.
+  // The repository this agent stands in, when it stands in one, reaches the
+  // driver as `ContainerSpec.cwd` and the runner as `container.json`'s
+  // `workspacePath`. cwd is the only thing that decides which project's
+  // CLAUDE.md, `.claude/skills/` and `.claude/settings.json` a session loads —
+  // Claude Code walks UP from cwd for all three — so this is what makes a
+  // worker a worker.
   //
   // NOT a substitute for NANOCLAW_AGENT_DIR, which stays the group folder in
   // every case — memory and footer telemetry must not follow cwd into a repo.
   if (agentGroup.workspace_path) {
-    env.NANOCLAW_PROJECT_DIR = agentGroup.workspace_path;
     // A worker does not resume its previous conversation, and `workspace_path`
     // is the only thing that distinguishes one — an ordinary group never sets
     // this and keeps resuming exactly as before.
@@ -1006,7 +1000,10 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     // a brief would push a leading `/` off the start of the message, and
     // `categorizeMessage` treats anything not starting with `/` as prose —
     // silently degrading every slash-command task.
-    env.NANOCLAW_FRESH_SESSION = '1';
+    //
+    // The signal itself rides `container.json`, which carries `workspacePath`
+    // straight from the DB — no environment variable, and no derived flag whose
+    // origin the next reader would have to guess.
   }
   // The contributed lane (ContainerSpec.contributedEnv): registry-sourced env,
   // exempt from the credential-NAME check and still refused credential VALUES.
@@ -1045,6 +1042,11 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     args: ['exec bun run /app/src/index.ts'],
     mounts: mergeMounts(toMountSpecs(mounts, agentGroup.id), gateway.mounts ?? []),
     contributedEnv,
+    // Absent for an ordinary group, so its spawn is byte-for-byte what it was:
+    // the driver falls back to the group folder. An empty string here would
+    // resolve cwd to the host's own checkout, which is the 11,618-token
+    // CLAUDE.md leak of 5a592b62.
+    cwd: agentGroup.workspace_path ?? undefined,
   };
 
   // The folder label (D9) rides the spec so an admission-side check can pin

@@ -38,14 +38,15 @@ const DEFAULT_WAIT_MS = 60_000;
 const POLL_INTERVAL_MS = 500;
 
 /**
- * The bound, in milliseconds. `NANOCLAW_CREATE_WORKER_WAIT_MS` exists so a
- * test can drive the timeout path in milliseconds instead of a minute; it is
- * not an operator knob and nothing sets it in production.
+ * The bound, in milliseconds.
+ *
+ * Mutable so a test can drive the timeout path in milliseconds instead of a
+ * minute. Deliberately NOT an environment variable: this is a property of the
+ * test run, never of an install, and a name in `process.env` invites someone to
+ * set it in a `.env` where it would silently shorten every worker request.
+ * Nothing in production writes to it.
  */
-function waitMs(): number {
-  const override = Number(process.env.NANOCLAW_CREATE_WORKER_WAIT_MS);
-  return Number.isFinite(override) && override > 0 ? override : DEFAULT_WAIT_MS;
-}
+export const workerWaitBound = { ms: DEFAULT_WAIT_MS };
 
 function log(msg: string): void {
   console.error(`[mcp-tools] ${msg}`);
@@ -129,7 +130,7 @@ export const spawnWorker: McpToolDefinition = {
     // listening. Inside the window the host answers on the inbound row alone;
     // past it the host also wakes the caller, because a late answer written
     // to a row nobody polls is silence.
-    const bound = waitMs();
+    const bound = workerWaitBound.ms;
     const waitUntil = Date.now() + bound;
     await writeMessageOut({
       id: requestId,

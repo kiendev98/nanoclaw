@@ -4,7 +4,6 @@ const ROOT_VARS = [
   'NANOCLAW_WORKSPACE_DIR',
   'NANOCLAW_AGENT_DIR',
   'NANOCLAW_EXTRA_DIR',
-  'NANOCLAW_OUTBOX_DIR',
   'NANOCLAW_SESSION_CONTEXT_PATH',
 ] as const;
 
@@ -74,15 +73,6 @@ describe('roots', () => {
     const r = await loadRoots({ NANOCLAW_WORKSPACE_DIR: '/state/sessions/s1' }, 'derived-outbox');
 
     expect(r.OUTBOX_DIR).toBe('/state/sessions/s1/outbox');
-  });
-
-  it('prefers an explicit outbox over the derived one', async () => {
-    const r = await loadRoots(
-      { NANOCLAW_WORKSPACE_DIR: '/state/sessions/s1', NANOCLAW_OUTBOX_DIR: '/elsewhere/out' },
-      'explicit-outbox',
-    );
-
-    expect(r.OUTBOX_DIR).toBe('/elsewhere/out');
   });
 
   // A driver builds these with path.join, and a stray trailing separator would
