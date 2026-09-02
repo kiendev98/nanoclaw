@@ -15,12 +15,15 @@ import { getAgentGroup } from './db/agent-groups.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import { isUniqueViolation } from './db/errors.js';
 import {
+  composeThreadId,
   createSession,
+  findSessionBoundToThread,
   findSystemSession,
   findSessionByAgentGroup,
   findSessionForAgent,
   getSession,
   taskThreadId,
+  threadRootMessageId,
   updateSession,
 } from './db/sessions.js';
 import { log } from './log.js';
@@ -110,6 +113,25 @@ export async function resolveSession(
 ): Promise<{ session: Session; created: boolean }> {
   const key = sessionCreationKey(agentGroupId, messagingGroupId, threadId, sessionMode);
   return withSessionCreationLock(key, async () => {
+    // A reply in a thread this agent's task opened belongs to THAT session.
+    //
+    // Checked before every other lookup, because none of them can find it: a
+    // task session's own `thread_id` is `system:tasks:<series>` and its
+    // `messaging_group_id` is null, so the ordinary key misses and a new
+    // session is created — with an empty transcript, in the same agent group,
+    // answering in a thread it knows nothing about. That is the failure this
+    // whole binding exists to remove.
+    //
+    // Matched on the LAST SEGMENT of the inbound thread id rather than by
+    // rebuilding `<platform_id>:<ts>`: the format belongs to the Chat SDK and
+    // can change, and a rebuilt guess fails silently by never matching.
+    if (messagingGroupId && threadId) {
+      const bound = await findSessionBoundToThread(messagingGroupId, threadRootMessageId(threadId));
+      if (bound && bound.agent_group_id === agentGroupId) {
+        return { session: bound, created: false };
+      }
+    }
+
     // agent-shared: single session per agent group, regardless of messaging group
     if (sessionMode === 'agent-shared') {
       const existing = await findSessionByAgentGroup(agentGroupId);
@@ -288,7 +310,24 @@ export async function writeSessionRouting(agentGroupId: string, sessionId: strin
   let channelType: string | null = null;
   let platformId: string | null = null;
   let threadId: string | null = session.thread_id;
-  if (session.messaging_group_id) {
+  // A task session that opened a thread answers INTO it. Checked before the
+  // messaging-group branch because a task session has no messaging group at
+  // all — its own `thread_id` is `system:tasks:<series>`, which addresses
+  // nothing — so without this it would fall through to having no route and
+  // answer nobody.
+  //
+  // This is also what removes the need for a `thread` argument on
+  // `send_message`: once the routing row IS the thread, `resolveRouting`
+  // reuses it for any send whose destination matches, unchanged.
+  const boundGroup =
+    session.bound_messaging_group_id && session.bound_root_message_id
+      ? await getMessagingGroup(session.bound_messaging_group_id)
+      : undefined;
+  if (boundGroup) {
+    channelType = boundGroup.channel_type;
+    platformId = boundGroup.platform_id;
+    threadId = composeThreadId(boundGroup.platform_id, session.bound_root_message_id!);
+  } else if (session.messaging_group_id) {
     const mg = await getMessagingGroup(session.messaging_group_id);
     if (mg) {
       channelType = mg.channel_type;

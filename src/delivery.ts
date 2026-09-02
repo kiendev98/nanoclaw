@@ -9,6 +9,7 @@ import {
   createPendingQuestion,
   isTaskThread,
   TASKS_SYSTEM_THREAD_ID,
+  updateSession,
 } from './db/sessions.js';
 import { appendRunLog } from './modules/scheduling/run-log.js';
 import { getAgentGroup } from './db/agent-groups.js';
@@ -259,6 +260,7 @@ async function drainSession(session: Session): Promise<void> {
       await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) =>
         mailbox.markDelivered(msg.id, platformMsgId ?? null),
       );
+      await bindOpenedThread(session, msg, platformMsgId);
       const firstDelivery = delivered.size === 0;
       delivered.add(msg.id);
       await clearAttemptRow(msg.id);
@@ -316,6 +318,48 @@ async function drainSession(session: Session): Promise<void> {
       }
     }
   }
+}
+
+/**
+ * Claim the thread a routeless session just opened, so replies come back to it.
+ *
+ * A task session has no messaging group, so nothing else can route a reply to
+ * it: the inbound thread id has never been seen, `findSessionForAgent` misses,
+ * and a brand new session answers in a thread it knows nothing about.
+ *
+ * ONLY A ROOT POST BINDS. `threadId === null` is what makes a delivery open a
+ * new thread — the bridge falls back to the channel id — and only that root
+ * message's id is a thread key. A reply carries its own id, which names
+ * nothing: measured on a live install, a reply delivered into the thread
+ * rooted at `…925.613579` came back as `1788370933.675069`. Binding on any
+ * delivery would therefore store a value no inbound thread can ever match, and
+ * it would fail silently.
+ *
+ * FIRST CLAIM WINS. A session that already holds a thread keeps it; a second
+ * top-level post is a second conversation, and re-pointing the binding would
+ * abandon the first thread's replies with nothing to route them to.
+ */
+async function bindOpenedThread(
+  session: Session,
+  msg: { kind: string; platformId: string | null; channelType: string | null; threadId: string | null },
+  platformMsgId: string | undefined,
+): Promise<void> {
+  if (session.messaging_group_id || session.bound_root_message_id) return;
+  if (msg.threadId !== null || !platformMsgId) return;
+  if (!msg.platformId || !msg.channelType || msg.channelType === 'agent' || msg.kind === 'system') return;
+
+  const group = await getMessagingGroupByPlatform(msg.channelType, msg.platformId);
+  if (!group) return;
+
+  await updateSession(session.id, {
+    bound_messaging_group_id: group.id,
+    bound_root_message_id: platformMsgId,
+  });
+  log.info('Session bound to the thread it opened', {
+    sessionId: session.id,
+    messagingGroupId: group.id,
+    rootMessageId: platformMsgId,
+  });
 }
 
 async function deliverMessage(

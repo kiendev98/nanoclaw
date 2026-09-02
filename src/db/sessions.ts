@@ -114,6 +114,22 @@ export function threadRootMessageId(threadId: string): string {
 }
 
 /**
+ * The inverse, used on the REPLY path only.
+ *
+ * Composing is avoidable when matching an inbound thread and unavoidable when
+ * addressing an outbound one: the routing row has to name a thread the adapter
+ * will accept. It is confined to this one caller because the two directions
+ * fail differently. A wrong guess here posts at top level, which a human sees
+ * immediately; a wrong guess on the matching side silently mints a second
+ * session, which is the bug the binding exists to prevent.
+ *
+ * The shape is the same one `normalizeDmThreadId` completes for DM threads.
+ */
+export function composeThreadId(platformId: string, rootMessageId: string): string {
+  return `${platformId}:${rootMessageId}`;
+}
+
+/**
  * The session that opened this thread, if one claimed it.
  *
  * Filtered on `status = 'active'`, which is what makes the binding expire by
