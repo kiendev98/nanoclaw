@@ -1,5 +1,5 @@
 /**
- * Tests for `create_worker` — the one call that creates or reuses a repo
+ * Tests for `spawn_worker` — the one call that creates or reuses a repo
  * worker AND briefs it.
  *
  * Three properties carry the feature, and each fails silently if it breaks:
@@ -9,7 +9,7 @@
  *   and the brief went out a turn later.
  * - **Creating a worker never requires admin approval, for any cli_scope.**
  *   The containment is the operator's repo allowlist (below), not a hold —
- *   see `describe('create_worker — no approval gate, for any cli_scope')`.
+ *   see `describe('spawn_worker — no approval gate, for any cli_scope')`.
  *   The container tool's own wait is still bounded at one minute, because a
  *   worktree checkout can outrun it; every late answer WAKES the caller,
  *   because a response row nobody is polling any more is silence.
@@ -27,15 +27,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Session } from '../../types.js';
 
-const WORKER_TEST_ROOT = '/tmp/nanoclaw-test-a2a-create-worker';
-const WORKER_REPOS_ROOT = '/tmp/nanoclaw-test-a2a-create-worker/repos';
+const WORKER_TEST_ROOT = '/tmp/nanoclaw-test-a2a-spawn-worker';
+const WORKER_REPOS_ROOT = '/tmp/nanoclaw-test-a2a-spawn-worker/repos';
 // PROJECT_ROOTS is the allowlist a `repo` argument is resolved against, and it
 // is EMPTY in a real install unless the operator sets NANOCLAW_PROJECT_ROOTS.
 // Literals, not the consts above: vi.mock is hoisted over them.
 vi.mock('../../config.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../config.js')>()),
-  GROUPS_DIR: '/tmp/nanoclaw-test-a2a-create-worker/groups',
-  PROJECT_ROOTS: ['/tmp/nanoclaw-test-a2a-create-worker/repos'],
+  GROUPS_DIR: '/tmp/nanoclaw-test-a2a-spawn-worker/groups',
+  PROJECT_ROOTS: ['/tmp/nanoclaw-test-a2a-spawn-worker/repos'],
 }));
 
 const {
@@ -150,7 +150,7 @@ const WORKTREE = workerWorkspace(path.join(WORKER_REPOS_ROOT, REPO), SESSION.id)
 /** A request as the container tool writes it — still inside its wait window. */
 function request(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    action: 'create_worker',
+    action: 'spawn_worker',
     requestId: 'req-w1',
     waitUntil: Date.now() + 60_000,
     repo: REPO,
@@ -160,8 +160,8 @@ function request(over: Record<string, unknown> = {}): Record<string, unknown> {
   };
 }
 
-async function runCreateWorker(content: Record<string, unknown>): Promise<void> {
-  const wrapped = getDeliveryAction('create_worker');
+async function runSpawnWorker(content: Record<string, unknown>): Promise<void> {
+  const wrapped = getDeliveryAction('spawn_worker');
   expect(wrapped).toBeDefined();
   await wrapped!(content, SESSION);
 }
@@ -171,7 +171,7 @@ function writes(): Array<[string, string, Record<string, unknown>]> {
   return mockSessionWrite.mock.calls as Array<[string, string, Record<string, unknown>]>;
 }
 
-/** The `create_worker` response row the blocking container tool polls for. */
+/** The `spawn_worker` response row the blocking container tool polls for. */
 function response(): { status: string; result: Record<string, string> } | undefined {
   for (const [, , message] of writes()) {
     if (message.kind !== 'system') continue;
@@ -180,7 +180,7 @@ function response(): { status: string; result: Record<string, string> } | undefi
       status: string;
       result: Record<string, string>;
     };
-    if (parsed.type === 'create_worker_response') return parsed;
+    if (parsed.type === 'spawn_worker_response') return parsed;
   }
   return undefined;
 }
@@ -228,11 +228,11 @@ afterEach(() => {
   fs.rmSync(WORKER_TEST_ROOT, { recursive: true, force: true });
 });
 
-describe('create_worker — one call creates the worker and briefs it', () => {
+describe('spawn_worker — one call creates the worker and briefs it', () => {
   it('creates the worktree, stamps it as the cwd, and delivers the task in the SAME request', async () => {
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
 
-    await runCreateWorker(request());
+    await runSpawnWorker(request());
 
     const group = mockCreateAgentGroup.mock.calls[0][0] as { id: string; workspace_path: string };
     expect(fs.existsSync(path.join(group.workspace_path, 'README.md'))).toBe(true);
@@ -248,7 +248,7 @@ describe('create_worker — one call creates the worker and briefs it', () => {
   it('stamps the originating session, which is what makes the worker reusable', async () => {
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
 
-    await runCreateWorker(request());
+    await runSpawnWorker(request());
 
     expect(mockCreateAgentGroup.mock.calls[0][0]).toMatchObject({ origin_session_id: SESSION.id });
   });
@@ -256,7 +256,7 @@ describe('create_worker — one call creates the worker and briefs it', () => {
   it('answers the blocking tool with the worker name and the asynchronous contract', async () => {
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
 
-    await runCreateWorker(request());
+    await runSpawnWorker(request());
 
     const answer = response();
     expect(answer?.status).toBe('created');
@@ -270,7 +270,7 @@ describe('create_worker — one call creates the worker and briefs it', () => {
     // spend a whole extra turn saying what the tool already returned.
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
 
-    await runCreateWorker(request());
+    await runSpawnWorker(request());
 
     expect(wakes()).toEqual([]);
   });
@@ -280,14 +280,14 @@ describe('create_worker — one call creates the worker and briefs it', () => {
     // "you will be notified", so the response row alone reaches nobody.
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
 
-    await runCreateWorker(request({ waitUntil: Date.now() - 1 }));
+    await runSpawnWorker(request({ waitUntil: Date.now() - 1 }));
 
     expect(wakes()).toHaveLength(1);
     expect(wakes()[0]).toContain('"scout"');
   });
 });
 
-describe('create_worker — the task is delivered verbatim', () => {
+describe('spawn_worker — the task is delivered verbatim', () => {
   it('passes a slash-command task through unwrapped, unquoted and unprefixed', async () => {
     // A `task` beginning with '/' is dispatched as a real command inside the
     // worker's session (categorizeMessage → passthrough → raw to the SDK), so
@@ -296,14 +296,14 @@ describe('create_worker — the task is delivered verbatim', () => {
     // improvises a plausible answer instead.
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
 
-    await runCreateWorker(request({ task: '/blueprint FMTA-343' }));
+    await runSpawnWorker(request({ task: '/blueprint FMTA-343' }));
 
     const group = mockCreateAgentGroup.mock.calls[0][0] as { id: string };
     expect(briefsTo(group.id)).toEqual(['/blueprint FMTA-343']);
   });
 });
 
-describe('create_worker — reuse for one (repo, thread) pair', () => {
+describe('spawn_worker — reuse for one (repo, thread) pair', () => {
   const EXISTING = {
     id: 'ag-worker-1',
     name: 'Scout',
@@ -319,7 +319,7 @@ describe('create_worker — reuse for one (repo, thread) pair', () => {
     mockFindWorkerForOrigin.mockResolvedValue(EXISTING);
     mockGetDestinationByTarget.mockResolvedValue({ local_name: 'scout' });
 
-    await runCreateWorker(request());
+    await runSpawnWorker(request());
 
     expect(mockFindWorkerForOrigin).toHaveBeenCalledWith(SESSION.id, WORKTREE);
   });
@@ -332,7 +332,7 @@ describe('create_worker — reuse for one (repo, thread) pair', () => {
     mockFindWorkerForOrigin.mockResolvedValue(EXISTING);
     mockGetDestinationByTarget.mockResolvedValue({ local_name: 'scout' });
 
-    await runCreateWorker(request({ task: 'Now run the gates.' }));
+    await runSpawnWorker(request({ task: 'Now run the gates.' }));
 
     expect(mockCreateAgentGroup).not.toHaveBeenCalled();
     expect(briefsTo(EXISTING.id)).toEqual(['Now run the gates.']);
@@ -355,7 +355,7 @@ describe('create_worker — reuse for one (repo, thread) pair', () => {
     fs.rmSync(WORKTREE, { recursive: true, force: true });
     expect(fs.existsSync(WORKTREE)).toBe(false);
 
-    await runCreateWorker(request({ task: 'Carry on.' }));
+    await runSpawnWorker(request({ task: 'Carry on.' }));
 
     expect(fs.existsSync(WORKTREE)).toBe(true);
     expect(briefsTo(EXISTING.id)).toEqual(['Carry on.']);
@@ -366,7 +366,7 @@ describe('create_worker — reuse for one (repo, thread) pair', () => {
   });
 
   it('never cards an admin for a reuse — creating a worker never holds, at any cli_scope', async () => {
-    // `group` is the confined default for create_agent, but create_worker's
+    // `group` is the confined default for create_agent, but spawn_worker's
     // decision never holds regardless of scope — there is nothing to approve
     // here either way: the worker, its worktree and the destination row all
     // exist already.
@@ -374,7 +374,7 @@ describe('create_worker — reuse for one (repo, thread) pair', () => {
     mockFindWorkerForOrigin.mockResolvedValue(EXISTING);
     mockGetDestinationByTarget.mockResolvedValue({ local_name: 'scout' });
 
-    await runCreateWorker(request());
+    await runSpawnWorker(request());
 
     expect(mockRequestApproval).not.toHaveBeenCalled();
     expect(mockCreateAgentGroup).not.toHaveBeenCalled();
@@ -387,17 +387,17 @@ describe('create_worker — reuse for one (repo, thread) pair', () => {
     mockFindWorkerForOrigin.mockResolvedValue(EXISTING);
     mockGetDestinationByTarget.mockResolvedValue(undefined);
 
-    await runCreateWorker(request());
+    await runSpawnWorker(request());
 
     expect(mockCreateAgentGroup).toHaveBeenCalledTimes(1);
   });
 });
 
-describe('create_worker — an unresolvable repo never falls back', () => {
+describe('spawn_worker — an unresolvable repo never falls back', () => {
   it('refuses a repo outside the allowlist and creates nothing', async () => {
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
 
-    await runCreateWorker(request({ repo: '../../etc' }));
+    await runSpawnWorker(request({ repo: '../../etc' }));
 
     expect(mockCreateAgentGroup).not.toHaveBeenCalled();
     expect(mockInitGroupFilesystem).not.toHaveBeenCalled();
@@ -406,7 +406,7 @@ describe('create_worker — an unresolvable repo never falls back', () => {
   it('refuses an absolute path, and never falls back to the group folder', async () => {
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
 
-    await runCreateWorker(request({ repo: path.join(WORKER_REPOS_ROOT, REPO) }));
+    await runSpawnWorker(request({ repo: path.join(WORKER_REPOS_ROOT, REPO) }));
 
     expect(mockCreateAgentGroup).not.toHaveBeenCalled();
   });
@@ -414,7 +414,7 @@ describe('create_worker — an unresolvable repo never falls back', () => {
   it('errors to the blocking tool, naming the allowlist', async () => {
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
 
-    await runCreateWorker(request({ repo: 'no-such-repo' }));
+    await runSpawnWorker(request({ repo: 'no-such-repo' }));
 
     const answer = response();
     expect(answer?.status).toBe('error');
@@ -423,12 +423,12 @@ describe('create_worker — an unresolvable repo never falls back', () => {
   });
 
   it('refuses an unknown repo without ever carding an admin', async () => {
-    // create_worker never holds regardless of cli_scope, but this failure is
+    // spawn_worker never holds regardless of cli_scope, but this failure is
     // resolved in the precheck, before the guard is even consulted — an
     // unresolvable repo is a request that cannot succeed either way.
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
 
-    await runCreateWorker(request({ repo: 'no-such-repo' }));
+    await runSpawnWorker(request({ repo: 'no-such-repo' }));
 
     expect(mockRequestApproval).not.toHaveBeenCalled();
     expect(mockCreateAgentGroup).not.toHaveBeenCalled();
@@ -437,22 +437,22 @@ describe('create_worker — an unresolvable repo never falls back', () => {
   it('requires a task, and says so rather than creating a worker with no brief', async () => {
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
 
-    await runCreateWorker(request({ task: '' }));
+    await runSpawnWorker(request({ task: '' }));
 
     expect(response()?.status).toBe('error');
     expect(mockCreateAgentGroup).not.toHaveBeenCalled();
   });
 });
 
-describe('create_worker — no approval gate, for any cli_scope', () => {
+describe('spawn_worker — no approval gate, for any cli_scope', () => {
   it('creates and briefs a FRESH worker directly under `group` scope — no approval card, no pending response', async () => {
-    // The rule this whole change pins: create_worker never holds, so `group`
+    // The rule this whole change pins: spawn_worker never holds, so `group`
     // — the confined default that still holds create_agent — must create
     // directly here instead. Flipping this mock to `global` would hide the
     // exact regression this test exists to catch.
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
 
-    await runCreateWorker(request());
+    await runSpawnWorker(request());
 
     expect(mockRequestApproval).not.toHaveBeenCalled();
     const group = mockCreateAgentGroup.mock.calls[0][0] as { id: string };
@@ -465,7 +465,7 @@ describe('create_worker — no approval gate, for any cli_scope', () => {
 
 describe('create_agent — no longer takes a repo', () => {
   it('still holds for `group` scope — the guard rail against this change leaking into create_agent', async () => {
-    // create_worker's own guard rewrite must not have touched agents.create:
+    // spawn_worker's own guard rewrite must not have touched agents.create:
     // a confined (default `group`) agent group still needs admin approval to
     // create an ordinary companion agent.
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
@@ -488,9 +488,14 @@ describe('create_agent — no longer takes a repo', () => {
     await getDeliveryAction('create_agent')!({ name: 'Companion', repo: REPO }, SESSION);
 
     expect(mockCreateAgentGroup).toHaveBeenCalledTimes(1);
-    expect(mockCreateAgentGroup.mock.calls[0][0]).toMatchObject({
-      workspace_path: null,
-      origin_session_id: null,
-    });
+    // Nullish rather than strictly `null`, because the DB outcome is what this
+    // guards and the caller is not where it is decided. `create-agent.ts` is
+    // held byte-identical to upstream and omits both keys entirely;
+    // `createAgentGroup` defaults them to null on the way to the INSERT. An
+    // assertion on the argument shape would fail on an upstream file that is
+    // behaving correctly, which is the opposite of what this test is for.
+    const created = mockCreateAgentGroup.mock.calls[0][0];
+    expect(created.workspace_path ?? null).toBeNull();
+    expect(created.origin_session_id ?? null).toBeNull();
   });
 });

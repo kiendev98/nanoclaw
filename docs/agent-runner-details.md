@@ -443,7 +443,7 @@ themselves are never shown.
 
 - **`system`** — host action result, rendered as `<system_response>`:
   ```xml
-  <system_response from="host" action="create_worker" status="success">{"agent_group_id": "ag-456"}</system_response>
+  <system_response from="host" action="spawn_worker" status="success">{"agent_group_id": "ag-456"}</system_response>
   ```
 
 **Batch formatting:** All pending messages are combined into one prompt. The prompt opens
@@ -650,7 +650,7 @@ ncl tasks cancel <series_id>
 
 Implementation: the host writes `messages_in` task rows into the agent group's system session (`thread_id = system:tasks`). The host sweep wakes that system-session container when a task is due. The task agent chooses its destination at fire time by emitting `<message to="name">...</message>` or using `send_message`.
 
-#### create_worker
+#### spawn_worker
 
 Delegate work into ANOTHER repository. Creates (or reuses) a worker — a separate agent
 with its own process standing in a git worktree of that repository, so it loads that
@@ -659,7 +659,7 @@ in the same call.
 
 ```typescript
 {
-  name: 'create_worker',
+  name: 'spawn_worker',
   params: {
     repo: string,   // repository NAME, resolved host-side against NANOCLAW_PROJECT_ROOTS (required)
     task: string,   // the brief, delivered as the worker's first message (required)
@@ -669,7 +669,7 @@ in the same call.
 ```
 
 Implementation: BLOCKING but bounded. Writes a `messages_out` row with `kind: 'system'`,
-`action: 'create_worker'`, `requestId`, `waitUntil`, `repo`, `task` and `name`, then polls
+`action: 'spawn_worker'`, `requestId`, `waitUntil`, `repo`, `task` and `name`, then polls
 `findCliResponse(requestId)` for up to 60 seconds (the canvas_read / ask_user_question
 pattern). It never blocks on a human: creating a worker needs no admin approval (the guard's
 `workers.create` decision ALLOWs unconditionally; containment is the operator's

@@ -1,11 +1,6 @@
 /**
  * Tests for create_agent host-side authorization.
  *
- * Repo-scoped workers moved out with the feature: `create_worker`
- * (./create-worker.test.ts) owns repo resolution, the worktree, the
- * (repo, thread) reuse key and the brief. What is left here is what
- * `create_agent` still is — a long-lived companion with no repository.
- *
  * Regression guard for the audit finding: `create_agent` is a privileged
  * central-DB write with no host-side authz. Authorization is the guard's
  * `agents.create` decision — trusted owner agent groups ('global') create
@@ -24,7 +19,6 @@ import type { PendingApproval, Session } from '../../types.js';
 // so the residue-skip test controls what is on disk. Absent for every other
 // test, so their behavior is unchanged.
 const A2A_TEST_ROOT = '/tmp/nanoclaw-test-a2a-create-agent';
-// Literal, not the const above: vi.mock is hoisted over it.
 vi.mock('../../config.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../config.js')>()),
   GROUPS_DIR: '/tmp/nanoclaw-test-a2a-create-agent/groups',
@@ -40,8 +34,6 @@ const {
   mockInitGroupFilesystem,
   mockWriteDestinations,
   mockNotifyWrite,
-  mockFindWorkerForOrigin,
-  mockGetDestinationByTarget,
   liveApprovals,
   approvalHandlers,
 } = vi.hoisted(() => ({
@@ -51,8 +43,6 @@ const {
   mockInitGroupFilesystem: vi.fn(),
   mockWriteDestinations: vi.fn(),
   mockNotifyWrite: vi.fn(),
-  mockFindWorkerForOrigin: vi.fn().mockResolvedValue(undefined),
-  mockGetDestinationByTarget: vi.fn().mockResolvedValue(undefined),
   liveApprovals: new Map<string, import('../../types.js').PendingApproval>(),
   approvalHandlers: new Map<string, (ctx: Record<string, unknown>) => Promise<void>>(),
 }));
@@ -72,7 +62,6 @@ vi.mock('../../db/agent-groups.js', () => ({
   getAgentGroup: (id: string) => ({ id, name: id.toUpperCase(), folder: id, agent_provider: null, created_at: '' }),
   getAgentGroupByFolder: () => undefined,
   createAgentGroup: (...a: unknown[]) => mockCreateAgentGroup(...a),
-  findWorkerForOrigin: (...a: unknown[]) => mockFindWorkerForOrigin(...a),
 }));
 vi.mock('../../group-init.js', () => ({
   initGroupFilesystem: (...a: unknown[]) => mockInitGroupFilesystem(...a),
@@ -82,7 +71,6 @@ vi.mock('./write-destinations.js', () => ({
 }));
 vi.mock('./db/agent-destinations.js', () => ({
   getDestinationByName: () => undefined,
-  getDestinationByTarget: (...a: unknown[]) => mockGetDestinationByTarget(...a),
   createDestination: vi.fn(),
   hasDestination: () => true,
   normalizeName: (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-'),

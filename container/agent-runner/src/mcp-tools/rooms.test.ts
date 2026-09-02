@@ -5,7 +5,7 @@
  *
  * The extendTool-based `create_agent` extension is gone with the tool it
  * extended: an agent inside a container now creates only repo workers
- * (`create_worker`), and the host-side `create_agent` delivery action is
+ * (`spawn_worker`), and the host-side `create_agent` delivery action is
  * reached from the CLI and setup paths instead.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';

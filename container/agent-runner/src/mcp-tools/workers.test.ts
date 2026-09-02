@@ -1,5 +1,5 @@
 /**
- * `create_worker` MCP tool tests: arg validation, the system-action row the
+ * `spawn_worker` MCP tool tests: arg validation, the system-action row the
  * host reads, and the blocking round trip against a host-written response row
  * (the canvas_read / ask_user_question pattern).
  *
@@ -13,7 +13,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../mailbox/sqlite/connection.js';
-import { createWorker, defaultWorkerName } from './workers.js';
+import { spawnWorker, defaultWorkerName } from './workers.js';
 
 function outboundActions(): Array<{ id: string; kind: string; content: Record<string, unknown> }> {
   return (
@@ -35,7 +35,7 @@ function seedWorkerResponse(requestId: string, status: string, result: Record<st
       $id: `worker-resp-${requestId}`,
       $seq: 2,
       $timestamp: new Date().toISOString(),
-      $content: JSON.stringify({ type: 'create_worker_response', requestId, status, result }),
+      $content: JSON.stringify({ type: 'spawn_worker_response', requestId, status, result }),
     });
 }
 
@@ -52,11 +52,11 @@ afterEach(() => {
   closeSessionDb();
 });
 
-describe('create_worker — arg validation', () => {
+describe('spawn_worker — arg validation', () => {
   it('requires repo and task, and writes nothing when either is missing', async () => {
-    const noRepo = await createWorker.handler({ task: 'do the thing' });
+    const noRepo = await spawnWorker.handler({ task: 'do the thing' });
     expect(noRepo.isError).toBe(true);
-    const noTask = await createWorker.handler({ repo: 'saber' });
+    const noTask = await spawnWorker.handler({ repo: 'saber' });
     expect(noTask.isError).toBe(true);
     expect(text(noTask)).toContain('task is required');
     expect(outboundActions()).toHaveLength(0);
@@ -65,7 +65,7 @@ describe('create_worker — arg validation', () => {
   it('declares repo and task required, and takes no other way to say the same thing', async () => {
     // A `command` parameter would be a second way to express what `task`
     // already carries. The schema is the contract that keeps it to one.
-    const schema = createWorker.tool.inputSchema as {
+    const schema = spawnWorker.tool.inputSchema as {
       properties: Record<string, unknown>;
       required: string[];
     };
@@ -81,18 +81,18 @@ describe('defaultWorkerName', () => {
   });
 });
 
-describe('create_worker — the request the host reads', () => {
-  it('writes one create_worker system action carrying repo, task, name and its deadline', async () => {
+describe('spawn_worker — the request the host reads', () => {
+  it('writes one spawn_worker system action carrying repo, task, name and its deadline', async () => {
     process.env.NANOCLAW_CREATE_WORKER_WAIT_MS = '1';
     const before = Date.now();
 
-    await createWorker.handler({ repo: 'wego/saber', task: 'audit the gates' });
+    await spawnWorker.handler({ repo: 'wego/saber', task: 'audit the gates' });
 
     const rows = outboundActions();
     expect(rows).toHaveLength(1);
     expect(rows[0].kind).toBe('system');
     expect(rows[0].content).toMatchObject({
-      action: 'create_worker',
+      action: 'spawn_worker',
       repo: 'wego/saber',
       task: 'audit the gates',
       name: 'saber-worker',
@@ -108,9 +108,9 @@ describe('create_worker — the request the host reads', () => {
     // A worker arriving under that name would come back as a Slack persona.
     process.env.NANOCLAW_CREATE_WORKER_WAIT_MS = '1';
 
-    await createWorker.handler({ repo: 'saber', task: 'x' });
+    await spawnWorker.handler({ repo: 'saber', task: 'x' });
 
-    expect(outboundActions()[0].content.action).toBe('create_worker');
+    expect(outboundActions()[0].content.action).toBe('spawn_worker');
   });
 
   it('passes a slash-command task through byte-for-byte', async () => {
@@ -119,15 +119,15 @@ describe('create_worker — the request the host reads', () => {
     // a wrapper, a quote, a prefix — silently demotes it to prose.
     process.env.NANOCLAW_CREATE_WORKER_WAIT_MS = '1';
 
-    await createWorker.handler({ repo: 'saber', task: '/blueprint FMTA-343' });
+    await spawnWorker.handler({ repo: 'saber', task: '/blueprint FMTA-343' });
 
     expect(outboundActions()[0].content.task).toBe('/blueprint FMTA-343');
   });
 });
 
-describe('create_worker — the blocking round trip', () => {
+describe('spawn_worker — the blocking round trip', () => {
   it('returns the host message once the worker exists and has been briefed', async () => {
-    const pending = createWorker.handler({ repo: 'saber', task: 'audit the gates', name: 'Scout' });
+    const pending = spawnWorker.handler({ repo: 'saber', task: 'audit the gates', name: 'Scout' });
 
     await new Promise((resolve) => setTimeout(resolve, 50));
     const requestId = outboundActions()[0].content.requestId as string;
@@ -149,7 +149,7 @@ describe('create_worker — the blocking round trip', () => {
   });
 
   it('returns the reuse message rather than a second worker', async () => {
-    const pending = createWorker.handler({ repo: 'saber', task: 'now run the gates' });
+    const pending = spawnWorker.handler({ repo: 'saber', task: 'now run the gates' });
 
     await new Promise((resolve) => setTimeout(resolve, 50));
     const requestId = outboundActions()[0].content.requestId as string;
@@ -163,7 +163,7 @@ describe('create_worker — the blocking round trip', () => {
   });
 
   it('surfaces a host refusal as a tool error, naming the allowlist', async () => {
-    const pending = createWorker.handler({ repo: 'no-such-repo', task: 'audit the gates' });
+    const pending = spawnWorker.handler({ repo: 'no-such-repo', task: 'audit the gates' });
 
     await new Promise((resolve) => setTimeout(resolve, 50));
     const requestId = outboundActions()[0].content.requestId as string;
@@ -182,7 +182,7 @@ describe('create_worker — the blocking round trip', () => {
     // tell the human about a failure that did not happen.
     process.env.NANOCLAW_CREATE_WORKER_WAIT_MS = '20';
 
-    const r = await createWorker.handler({ repo: 'saber', task: 'audit the gates', name: 'Scout' });
+    const r = await spawnWorker.handler({ repo: 'saber', task: 'audit the gates', name: 'Scout' });
 
     expect(r.isError).toBeUndefined();
     expect(text(r)).toContain('still being created');

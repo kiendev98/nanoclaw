@@ -10,7 +10,7 @@ payload is `instructions.md` in this directory: the rules an agent needs when
 it shares Slack with sibling agents it can room with (`create_room` /
 `add_to_room`) — team-room shape, who posts the introduction, and the
 bot-to-bot self-limit. Creating a sibling is no longer one of its powers: an
-agent inside a container creates repo workers (`create_worker`) and nothing
+agent inside a container creates repo workers (`spawn_worker`) and nothing
 else.
 
 The host composes every container skill's `instructions.md` into each group's

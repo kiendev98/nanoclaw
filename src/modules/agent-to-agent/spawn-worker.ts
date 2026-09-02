@@ -1,6 +1,6 @@
 /**
- * `create_worker` delivery-action bodies — the host half of the container's
- * blocking `create_worker` tool (container/agent-runner/src/mcp-tools/workers.ts).
+ * `spawn_worker` delivery-action bodies — the host half of the container's
+ * blocking `spawn_worker` tool (container/agent-runner/src/mcp-tools/workers.ts).
  *
  * ONE CALL DOES EVERYTHING. Resolving the repository, creating or reusing the
  * worktree and the agent group, wiring both destination rows, and DELIVERING
@@ -9,7 +9,7 @@
  * that its delegate exists and then send it a message in a second turn.
  *
  * SECURITY: creating a worker never requires admin approval (guard's
- * `workers.create` decision, ./guard.ts, ALLOWs unconditionally for any agent
+ * `workers.spawn` decision, ./guard.ts, ALLOWs unconditionally for any agent
  * actor). The containment is the operator allowlist below, not a decision —
  * see `repo`.
  *
@@ -24,7 +24,7 @@
  * the wrong tree.
  *
  * A worker is the pair (repository, originating thread), NOT one per command.
- * A second `create_worker` for the same repo in the same thread returns the
+ * A second `spawn_worker` for the same repo in the same thread returns the
  * FIRST worker and delivers the new task to it; see `worker-identity.ts` for
  * why the branch derives from the origin session.
  *
@@ -109,7 +109,7 @@ async function respond(session: Session, req: WorkerRequest, status: WorkerStatu
       channelType: null,
       threadId: null,
       content: JSON.stringify({
-        type: 'create_worker_response',
+        type: 'spawn_worker_response',
         requestId: req.requestId,
         status,
         result: status === 'error' ? { error: message } : { name: req.name, repo: req.repo, message },
@@ -266,20 +266,20 @@ function briefedText(
  * already. Running the (always-allow) guard for either would be wasted work,
  * not a safety gap.
  */
-export async function validateCreateWorker(content: Record<string, unknown>, session: Session): Promise<boolean> {
+export async function validateSpawnWorker(content: Record<string, unknown>, session: Session): Promise<boolean> {
   const req = parseRequest(content);
   if (!req.repo) {
-    await respond(session, req, 'error', 'create_worker failed: repo is required.');
+    await respond(session, req, 'error', 'spawn_worker failed: repo is required.');
     return false;
   }
   if (!req.task) {
-    await respond(session, req, 'error', 'create_worker failed: task is required.');
+    await respond(session, req, 'error', 'spawn_worker failed: task is required.');
     return false;
   }
   const sourceGroup = await getAgentGroup(session.agent_group_id);
   if (!sourceGroup) {
-    await respond(session, req, 'error', 'create_worker failed: source agent group not found.');
-    log.warn('create_worker failed: missing source group', { sessionAgentGroup: session.agent_group_id, ...req });
+    await respond(session, req, 'error', 'spawn_worker failed: source agent group not found.');
+    log.warn('spawn_worker failed: missing source group', { sessionAgentGroup: session.agent_group_id, ...req });
     return false;
   }
 
@@ -292,7 +292,7 @@ export async function validateCreateWorker(content: Record<string, unknown>, ses
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await respond(session, req, 'error', message);
-    log.warn('create_worker failed: repo not resolvable', { repo: req.repo, err });
+    log.warn('spawn_worker failed: repo not resolvable', { repo: req.repo, err });
     return false;
   }
 
@@ -311,7 +311,7 @@ export async function validateCreateWorker(content: Record<string, unknown>, ses
       const restored = await ensureWorktree(existing, repoPath, session.id);
       if (!restored.ok) {
         await respond(session, req, 'error', restored.error);
-        log.warn('create_worker could not restore a reused worker workspace', {
+        log.warn('spawn_worker could not restore a reused worker workspace', {
           repo: req.repo,
           worker: existing.id,
           err: restored.error,
@@ -320,7 +320,7 @@ export async function validateCreateWorker(content: Record<string, unknown>, ses
       }
       const delivery = await deliverBrief(session, existing.id, req.task);
       await respond(session, req, 'reused', briefedText(localName, req.repo, true, delivery));
-      log.info('create_worker reused an existing worker', {
+      log.info('spawn_worker reused an existing worker', {
         repo: req.repo,
         localName,
         worker: existing.id,
@@ -331,7 +331,7 @@ export async function validateCreateWorker(content: Record<string, unknown>, ses
     // The worker exists but this requester cannot address it. Falling through
     // creates a reachable one rather than naming a handle that does not
     // resolve.
-    log.warn('create_worker: worker exists for this thread but the requester has no destination for it', {
+    log.warn('spawn_worker: worker exists for this thread but the requester has no destination for it', {
       repo: req.repo,
       worker: existing.id,
       originSession: session.id,
@@ -341,22 +341,22 @@ export async function validateCreateWorker(content: Record<string, unknown>, ses
 }
 
 /** Guard deny body: tell the requester, through the same channel it is waiting on. */
-export async function denyCreateWorker(
+export async function denySpawnWorker(
   content: Record<string, unknown>,
   session: Session,
   reason: string,
 ): Promise<void> {
-  await respond(session, parseRequest(content), 'error', `create_worker denied: ${reason}`);
+  await respond(session, parseRequest(content), 'error', `spawn_worker denied: ${reason}`);
 }
 
 /** Guard allow body: creates the worker and briefs it. */
-export async function createWorker(content: Record<string, unknown>, session: Session): Promise<void> {
+export async function spawnWorker(content: Record<string, unknown>, session: Session): Promise<void> {
   const req = parseRequest(content);
   const sourceGroup = await getAgentGroup(session.agent_group_id);
   if (!req.repo || !req.task || !sourceGroup) return; // precheck already answered the requester
 
   // Resolved AGAIN here, and reuse re-checked, in case a concurrent
-  // create_worker call for the same (repo, thread) already created a worker
+  // spawn_worker call for the same (repo, thread) already created a worker
   // between the precheck's lookup and this one. Creating anyway would put two
   // agents on two branches of one repository in one conversation, which is
   // the exact failure the (repo, thread) key exists to prevent.
@@ -366,7 +366,7 @@ export async function createWorker(content: Record<string, unknown>, session: Se
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await respond(session, req, 'error', message);
-    log.error('create_worker failed: repo no longer resolvable', { repo: req.repo, err });
+    log.error('spawn_worker failed: repo no longer resolvable', { repo: req.repo, err });
     return;
   }
 
@@ -375,7 +375,7 @@ export async function createWorker(content: Record<string, unknown>, session: Se
   if (existing && reuseName) {
     const delivery = await deliverBrief(session, existing.id, req.task);
     await respond(session, req, 'reused', briefedText(reuseName, req.repo, true, delivery));
-    log.info('create_worker reused an existing worker', {
+    log.info('spawn_worker reused an existing worker', {
       repo: req.repo,
       localName: reuseName,
       worker: existing.id,
@@ -401,7 +401,7 @@ export async function createWorker(content: Record<string, unknown>, session: Se
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await respond(session, req, 'error', `Cannot create a worker for "${req.repo}": ${message}`);
-    log.error('create_worker failed: could not prepare the repo worktree', { repo: req.repo, err });
+    log.error('spawn_worker failed: could not prepare the repo worktree', { repo: req.repo, err });
     return;
   }
 

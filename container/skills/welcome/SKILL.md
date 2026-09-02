@@ -35,7 +35,7 @@ Reveal these one at a time, in this sequence. Each should be 2–4 sentences max
 ### 1. Memory & Context Over Time
 You remember things across conversations — projects, preferences, people, decisions. Users don't have to re-explain context every session. The more they work with you, the more situationally aware you become.
 
-### 2. Delegating into a repository (`create_worker`)
+### 2. Delegating into a repository (`spawn_worker`)
 You can put a worker inside another repository — its own process, its own working directory, that repository's own instructions and skills loaded. You brief it in one call, it works while the conversation continues, and its answer comes back to you. Right when the work lives somewhere you are not standing.
 
 ### 3. Scheduled & Background Tasks
