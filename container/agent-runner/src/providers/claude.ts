@@ -447,32 +447,60 @@ function claudeConfigDir(): string {
   return process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME || os.homedir(), '.claude');
 }
 
-function writeMemorySessionHook(hook: MemorySessionHookRegistration): void {
-  const configDir = claudeConfigDir();
-  const settingsFile = path.join(configDir, 'settings.json');
-  fs.mkdirSync(configDir, { recursive: true });
+/**
+ * Take the memory hook back out of the settings file an earlier version wrote.
+ *
+ * The hook now rides `options.settings`, so nothing has to be persisted. That
+ * matters because `claudeConfigDir()` is only disposable inside a container: it
+ * resolves through `HOME`, which the local driver inherits from the operator on
+ * purpose, so the registration used to rewrite the operator's real
+ * `~/.claude/settings.json` — reformatting the whole file and leaving a
+ * SessionStart entry that ran, and failed, in every session they started.
+ *
+ * Do NOT "fix" that by pinning `CLAUDE_CONFIG_DIR` to a private directory. That
+ * config dir is the operator's whole harness, and it is how a locally driven
+ * agent receives every command, agent, skill, and rule.
+ *
+ * Removal is what makes the upgrade complete: an orphaned entry keeps failing
+ * forever, and no later run would recognise it. Writes only when an entry is
+ * found, so an install that has none is left byte-identical.
+ */
+function pruneMemorySessionHook(hook: MemorySessionHookRegistration): void {
+  const settingsFile = path.join(claudeConfigDir(), 'settings.json');
+  if (!fs.existsSync(settingsFile)) return;
 
-  const parsed: unknown = fs.existsSync(settingsFile) ? JSON.parse(fs.readFileSync(settingsFile, 'utf-8')) : {};
-  if (!isRecord(parsed)) throw new Error(`${settingsFile} must contain a JSON object`);
-
-  const hooks = parsed.hooks === undefined ? {} : parsed.hooks;
-  if (!isRecord(hooks)) throw new Error(`${settingsFile} hooks must be a JSON object`);
-
-  const sessionStart = hooks.SessionStart === undefined ? [] : hooks.SessionStart;
-  if (!Array.isArray(sessionStart)) throw new Error(`${settingsFile} hooks.SessionStart must be an array`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
+  } catch (err) {
+    log(`Could not read ${settingsFile} to remove the old memory hook: ${errorMessage(err)}`);
+    return;
+  }
+  if (!isRecord(parsed) || !isRecord(parsed.hooks) || !Array.isArray(parsed.hooks.SessionStart)) return;
 
   const memoryCommands = new Set([hook.command, ...hook.legacyCommands]);
-  const nextSessionStart = sessionStart
+  const sessionStart = parsed.hooks.SessionStart;
+  const remaining = sessionStart
     .map((entry) => removeMemoryCommands(entry, memoryCommands))
     .filter((entry) => entry !== undefined);
-  nextSessionStart.push({
-    matcher: hook.sources.join('|'),
-    hooks: [{ type: 'command', command: hook.command, timeout: 10 }],
-  });
+  // Compared by value, not by length: an entry that listed the memory command
+  // beside someone else's survives with a shorter `hooks` array, and dropping
+  // out here on equal lengths would leave that one behind.
+  if (JSON.stringify(remaining) === JSON.stringify(sessionStart)) return;
 
-  hooks.SessionStart = nextSessionStart;
-  parsed.hooks = hooks;
-  fs.writeFileSync(settingsFile, JSON.stringify(parsed, null, 2) + '\n');
+  if (remaining.length > 0) parsed.hooks.SessionStart = remaining;
+  else delete parsed.hooks.SessionStart;
+
+  try {
+    fs.writeFileSync(settingsFile, JSON.stringify(parsed, null, 2) + '\n');
+    log(`Removed the obsolete memory SessionStart hook from ${settingsFile}`);
+  } catch (err) {
+    log(`Could not remove the old memory hook from ${settingsFile}: ${errorMessage(err)}`);
+  }
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function removeMemoryCommands(value: unknown, commands: ReadonlySet<string>): unknown {
@@ -592,7 +620,7 @@ export class ClaudeProvider implements AgentProvider {
   }
 
   registerMemorySessionHook(hook: MemorySessionHookRegistration): void {
-    writeMemorySessionHook(hook);
+    pruneMemorySessionHook(hook);
     this.memorySessionHook = hook;
   }
 
@@ -637,7 +665,8 @@ export class ClaudeProvider implements AgentProvider {
   }
 
   query(input: QueryInput): AgentQuery {
-    if (!this.memorySessionHook) throw new Error('Claude memory session hook was not registered');
+    const memoryHook = this.memorySessionHook;
+    if (!memoryHook) throw new Error('Claude memory session hook was not registered');
     const stream = new MessageStream();
     stream.push(input.prompt);
 
@@ -688,10 +717,26 @@ export class ClaudeProvider implements AgentProvider {
         // all nine twice — and a template overlay stamped into `.claude-shared`
         // to SHADOW a shared skill would find the original reinstated beside it.
         ...(IS_HOSTED ? { plugins: [{ type: 'local' as const, path: SKILLS_PLUGIN_DIR }] } : {}),
-        // Only sent when enabled, so an install that never turns it on passes
-        // exactly the options it always did. `fastMode` is a Settings member
-        // rather than a query option, which is why it rides `settings`.
-        ...(this.fastMode ? { settings: { fastMode: true } } : {}),
+        // The memory hook, and `fastMode` when enabled. Both are Settings
+        // members rather than query options, which is why they ride `settings`.
+        //
+        // This is the only channel that works. The SDK accepts a SessionStart
+        // entry in `hooks` below and never calls it — verified twice, with a
+        // string prompt and with a streaming one — which is what sent this
+        // registration to a settings file in the first place. `settings` is
+        // loaded as its own layer and MERGES with the settings files, so an
+        // operator's own SessionStart hooks still run beside this one.
+        settings: {
+          ...(this.fastMode ? { fastMode: true } : {}),
+          hooks: {
+            SessionStart: [
+              {
+                matcher: memoryHook.sources.join('|'),
+                hooks: [{ type: 'command' as const, command: memoryHook.command, timeout: 10 }],
+              },
+            ],
+          },
+        },
         mcpServers: this.mcpServers,
         hooks: {
           PreToolUse: [{ hooks: [preToolUseHook] }],
