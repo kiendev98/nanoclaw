@@ -459,3 +459,95 @@ describe('createWorktree / removeWorktree', () => {
     });
   });
 });
+
+/**
+ * A worker branches from the REMOTE default branch, not from whatever the
+ * owning checkout's HEAD happened to be.
+ *
+ * The old behaviour was silent in the way that costs the most: the worktree is
+ * created, the agent works in it, and a `main` that was weeks stale only
+ * surfaces as a conflict at merge time. So the assertion is end-to-end against
+ * real git — a commit that exists ONLY on the remote must be present in the
+ * worktree, which is possible only if `createWorktree` fetched first.
+ */
+describe('createWorktree base ref', () => {
+  let created: string | null;
+
+  beforeEach(() => {
+    created = null;
+  });
+
+  afterEach(() => {
+    if (created) fs.rmSync(created, { recursive: true, force: true });
+  });
+
+  /** A clone whose local `main` is one commit behind its origin, unfetched. */
+  function initStaleClone(): { repo: string; freshFile: string } {
+    const seed = initRepo(path.join(tmp, 'seed'));
+    const origin = path.join(tmp, 'origin.git');
+    const run = (cwd: string, args: string[]): void =>
+      void execFileSync('git', ['-C', cwd, ...args], { stdio: 'ignore' });
+
+    execFileSync('git', ['init', '--bare', '-b', 'main', origin], { stdio: 'ignore' });
+    run(seed, ['remote', 'add', 'origin', origin]);
+    run(seed, ['push', '-u', 'origin', 'main']);
+
+    const repo = path.join(tmp, 'clone');
+    execFileSync('git', ['clone', origin, repo], { stdio: 'ignore' });
+
+    // Advance the remote AFTER the clone, and never fetch in `repo`.
+    fs.writeFileSync(path.join(seed, 'fresh.txt'), 'only on origin\n');
+    run(seed, ['add', '.']);
+    run(seed, ['-c', 'user.email=t@e.com', '-c', 'user.name=T', 'commit', '-m', 'fresh']);
+    run(seed, ['push', 'origin', 'main']);
+
+    return { repo, freshFile: 'fresh.txt' };
+  }
+
+  it('fetches origin and branches from the remote default branch', () => {
+    const { repo, freshFile } = initStaleClone();
+    // Precondition: the commit is genuinely absent locally, so a pass cannot
+    // come from the clone having had it all along.
+    expect(fs.existsSync(path.join(repo, freshFile))).toBe(false);
+
+    created = createWorktree(repo, `ncl-test-${process.pid}-baseref`);
+
+    expect(fs.existsSync(path.join(created, freshFile))).toBe(true);
+  });
+
+  /**
+   * `git worktree add -b <branch> origin/main` makes git DWIM an upstream:
+   * it writes branch.<name>.merge = refs/heads/main. A worker running
+   * `git push` under push.default=upstream would then push onto main. The
+   * no-base form set no upstream, and passing a base must not change that.
+   */
+  it('does not set an upstream on the worker branch', () => {
+    const { repo } = initStaleClone();
+    const branch = `ncl-test-${process.pid}-notrack`;
+
+    created = createWorktree(repo, branch);
+
+    const upstream = (): string => {
+      try {
+        return execFileSync('git', ['-C', created as string, 'config', '--get', `branch.${branch}.merge`], {
+          encoding: 'utf-8',
+        }).trim();
+      } catch {
+        // `git config --get` exits 1 when the key is absent, which is the pass.
+        return '';
+      }
+    };
+
+    expect(upstream()).toBe('');
+  });
+
+  it('still creates a worktree when the repository has no origin', () => {
+    // A laptop offline, or a repo that was never pushed. Degrading to local
+    // HEAD is correct; refusing to spawn the worker is not.
+    const repo = initRepo(path.join(tmp, 'no-origin'));
+
+    created = createWorktree(repo, `ncl-test-${process.pid}-noorigin`);
+
+    expect(fs.existsSync(path.join(created, 'README.md'))).toBe(true);
+  });
+});
