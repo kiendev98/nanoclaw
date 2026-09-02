@@ -797,6 +797,7 @@ export async function buildMounts(
   const mounts: VolumeMount[] = [];
   const sessDir = sessionDir(agentGroup.id, session.id);
   const scope = agentGroup.id;
+  if (defaultSurfaces) stageSkillsPlugin(sessDir, containerConfig);
 
   // Session workspace: mailbox-selected state plus outbox and heartbeat files.
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false, mountClass: 'group-state', scope });
@@ -1133,6 +1134,59 @@ export function parseMemoryMb(value: string): number | undefined {
 export function parsePidsLimit(value: string): number | undefined {
   const pids = Number(value);
   return Number.isFinite(pids) && pids > 0 ? Math.floor(pids) : undefined;
+}
+
+/**
+ * Stage the shared skills as a loadable plugin in the session workspace.
+ *
+ * The symlink route below reaches an agent only where a container realizes
+ * `/app/skills` AND the settings directory holding those links is one the agent
+ * searches. A host driver has neither: nothing resolves `/app`, and `HOME` is
+ * inherited so `user` scope is the operator's own `~/.claude`. Every shared
+ * skill was therefore absent, in silence, while the composed project document —
+ * built from host paths — went on naming those skills.
+ *
+ * A plugin is a runtime argument rather than a location, so it depends on
+ * neither. `roots.ts` derives the path from the session workspace, so this is
+ * the only place that has to agree, and no variable carries it.
+ *
+ * Rebuilt per spawn, so a skill dropped from the selection disappears rather
+ * than lingering. Skills are additive: a failure here warns and leaves the
+ * session to start without them.
+ */
+function stageSkillsPlugin(
+  sessDirPath: string,
+  containerConfig: import('./container-config.js').ContainerConfig,
+): void {
+  const dir = path.join(sessDirPath, 'plugin');
+  const sharedSkillsDir = path.join(process.cwd(), 'container', 'skills');
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.mkdirSync(path.join(dir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '.claude-plugin', 'plugin.json'),
+      `${JSON.stringify(
+        {
+          name: 'nanoclaw-shared-skills',
+          version: '1.0.0',
+          description: 'The shared container skills, loaded per session.',
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    const skillsDir = path.join(dir, 'skills');
+    fs.mkdirSync(skillsDir, { recursive: true });
+    for (const skill of selectedSkillNames(containerConfig)) {
+      const src = path.join(sharedSkillsDir, skill);
+      if (fs.existsSync(src)) fs.symlinkSync(src, path.join(skillsDir, skill));
+    }
+  } catch (err) {
+    log.warn('Could not stage the shared-skills plugin; session starts without shared skills', {
+      dir,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**

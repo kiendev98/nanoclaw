@@ -323,10 +323,15 @@ export class LocalSessionDriver implements SessionDriver {
    *
    * Every mount this driver understands is addressed by its containerPath,
    * because that is the contract the runner reads. A mount it does not
-   * recognise is not an error: `/app/src` is the code being executed and
-   * `/app/skills` is reached through the project settings directory, so both
-   * are realized by other means. Unknown paths are logged rather than dropped
-   * in silence.
+   * recognise is not an error: `/app/src` is the code being executed, and
+   * `/app/skills` is dropped on purpose — the shared skills reach a host agent
+   * as a plugin staged into the session workspace instead, which needs no root
+   * of its own (`container-runner.ts`, `stageSkillsPlugin`).
+   *
+   * That second clause used to claim `/app/skills` was "reached through the
+   * project settings directory", describing a mechanism nothing implemented —
+   * which is how every shared skill stayed missing without one line of
+   * evidence. Unknown paths are dropped silently; this comment is the record.
    */
   #deriveRootEnv(spec: SessionSpec, mounts: SessionSpec['containers'][number]['mounts']): Record<string, string> {
     const env: Record<string, string> = {};

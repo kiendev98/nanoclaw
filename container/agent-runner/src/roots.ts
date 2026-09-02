@@ -72,6 +72,26 @@ export const EXTRA_DIR = root('NANOCLAW_EXTRA_DIR', '/workspace/extra');
  */
 export const OUTBOX_DIR = path.join(WORKSPACE_DIR, 'outbox');
 
+/**
+ * The shared skills, staged as a plugin the provider loads per session.
+ *
+ * Derived for the same reason as the outbox: it is always a leaf of the session
+ * workspace, staged there by the host at spawn. Naming it would be a seventh
+ * environment variable for a path that has exactly one possible value.
+ *
+ * Skills also reach a container through `.claude-shared/skills/<name>` ->
+ * `/app/skills/<name>`. That route needs two things a host driver does not
+ * have: a container filesystem to resolve `/app`, and a settings directory the
+ * agent searches — `HOME` is inherited, so `user` scope is the operator's own
+ * `~/.claude`. Both failed, so every shared skill was silently absent while the
+ * composed project document went on naming them.
+ *
+ * A plugin is a runtime argument rather than a location, so it depends on
+ * neither — including in a repo worker, whose cwd moves to its worktree and
+ * takes `project` scope with it.
+ */
+export const SKILLS_PLUGIN_DIR = path.join(WORKSPACE_DIR, 'plugin');
+
 /** Per-session routing context, written by the host before spawn. */
 export const SESSION_CONTEXT_PATH = root('NANOCLAW_SESSION_CONTEXT_PATH', '/app/.nanoclaw-session.json');
 

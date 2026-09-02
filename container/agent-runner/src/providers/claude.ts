@@ -16,7 +16,7 @@ import {
   recordRateLimits,
   recordUtilization,
 } from '../message-footer.js';
-import { AGENT_DIR } from '../roots.js';
+import { AGENT_DIR, IS_HOSTED, SKILLS_PLUGIN_DIR } from '../roots.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
 import { shimCwd } from './cwd-shim.js';
 import { registerProvider } from './provider-registry.js';
@@ -73,18 +73,16 @@ export interface SdkRateLimitInfo {
  * gap between them IS the answer.
  */
 function logContextBreakdown(usage: unknown): void {
-  const u = usage as
-    | {
-        totalTokens?: number;
-        maxTokens?: number;
-        rawMaxTokens?: number;
-        percentage?: number;
-        model?: string;
-        categories?: Array<{ name?: string; tokens?: number }>;
-        memoryFiles?: Array<{ path?: string; tokens?: number }>;
-        mcpTools?: Array<{ serverName?: string; tokens?: number }>;
-      }
-    | null;
+  const u = usage as {
+    totalTokens?: number;
+    maxTokens?: number;
+    rawMaxTokens?: number;
+    percentage?: number;
+    model?: string;
+    categories?: Array<{ name?: string; tokens?: number }>;
+    memoryFiles?: Array<{ path?: string; tokens?: number }>;
+    mcpTools?: Array<{ serverName?: string; tokens?: number }>;
+  } | null;
   if (!u) return;
 
   const top = (rows: Array<{ tokens?: number }> | undefined, label: (row: never) => string): string =>
@@ -124,11 +122,7 @@ function logContextBreakdown(usage: unknown): void {
  * test double), a rejected control request, and a throwing handler. The only
  * caller is footer telemetry, which must never delay a turn or fail one.
  */
-function callIfAvailable<T>(
-  target: unknown,
-  method: string,
-  onValue: (value: T | undefined) => void,
-): void {
+function callIfAvailable<T>(target: unknown, method: string, onValue: (value: T | undefined) => void): void {
   const fn = (target as Record<string, unknown> | null)?.[method];
   if (typeof fn !== 'function') return;
   try {
@@ -683,6 +677,17 @@ export class ClaudeProvider implements AgentProvider {
         // that can write that file. Rolling back is deliberately a code change now.
         permissionMode: 'auto',
         settingSources: ['project', 'user', 'local'],
+        // The shared skills, passed by path because none of the setting sources
+        // above reaches a host-driver agent: `project` is the agent's cwd, which
+        // a repo worker moves to its worktree, and `user` is the operator's own
+        // ~/.claude. The host stages the directory at spawn.
+        //
+        // Only outside a container, and `IS_HOSTED` is the same discriminator
+        // `claudeExecutable` uses. Inside one the `.claude-shared` symlinks
+        // already deliver these skills, so passing the plugin too would register
+        // all nine twice — and a template overlay stamped into `.claude-shared`
+        // to SHADOW a shared skill would find the original reinstated beside it.
+        ...(IS_HOSTED ? { plugins: [{ type: 'local' as const, path: SKILLS_PLUGIN_DIR }] } : {}),
         // Only sent when enabled, so an install that never turns it on passes
         // exactly the options it always did. `fastMode` is a Settings member
         // rather than a query option, which is why it rides `settings`.
