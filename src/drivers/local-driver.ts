@@ -261,6 +261,8 @@ export class LocalSessionDriver implements SessionDriver {
   readonly #exits = new Map<string, number | null>();
   #watchTimer: NodeJS.Timeout | undefined;
   #listeners = new Set<(event: SessionEvent) => void>();
+  /** Latched so the preflight below reports once, not once per respawn. */
+  #runnerDepsReported = false;
 
   constructor(options: LocalDriverOptions) {
     this.#policy = options.policy;
@@ -401,6 +403,42 @@ export class LocalSessionDriver implements SessionDriver {
     return path.join(this.#policy.dataRoot, 'local-sessions', installSlug);
   }
 
+  /**
+   * Say once, loudly, that the runner has no dependencies installed.
+   *
+   * `container/agent-runner` is a separate package and NOT a pnpm workspace
+   * member, so `pnpm install` at the root never touches it. The image installs
+   * it with `bun install --frozen-lockfile` (`container/Dockerfile`); under this
+   * driver the host is the thing that runs the runner and nothing installs it.
+   *
+   * Without this the failure is invisible in the worst way. Every spawn dies
+   * instantly on `Cannot find module '@anthropic-ai/claude-agent-sdk'`, the
+   * undelivered message stays due, and the host respawns every 2 seconds
+   * forever. Install and service health both look fine; only the log shows it,
+   * and it shows it as an endless wall of identical stack traces rather than as
+   * one diagnosable event. Observed in the wild at 64 respawns before anyone
+   * read the log.
+   *
+   * Latched rather than thrown: the driver's contract is to spawn and report
+   * exits, and a throw here would change how one bad install surfaces
+   * everywhere else. One actionable line beats a new failure mode.
+   */
+  #reportMissingRunnerDeps(name: string): void {
+    if (this.#runnerDepsReported) return;
+    const runnerRoot = path.resolve(path.dirname(this.#runnerEntry), '..');
+    const sdk = path.join(runnerRoot, 'node_modules', '@anthropic-ai', 'claude-agent-sdk');
+    if (fs.existsSync(sdk)) {
+      this.#runnerDepsReported = true;
+      return;
+    }
+    this.#runnerDepsReported = true;
+    log.error(
+      'Agent runner has no dependencies installed — every session will fail instantly and respawn in a loop. ' +
+        `Fix with: (cd ${runnerRoot} && bun install --frozen-lockfile)`,
+      { name, runnerRoot },
+    );
+  }
+
   #spawnRunner(
     name: string,
     spec: SessionSpec,
@@ -429,6 +467,8 @@ export class LocalSessionDriver implements SessionDriver {
     const executable = resolveClaudeExecutable(env.PATH);
     if (executable) env.NANOCLAW_CLAUDE_EXECUTABLE = executable;
     else log.warn('No `claude` on PATH — the agent will fail with the container default path', { name });
+
+    this.#reportMissingRunnerDeps(name);
 
     const child = spawn(this.#runtimeBin, ['run', this.#runnerEntry], {
       cwd: resolveSpawnCwd(env, rootEnv),
