@@ -134,3 +134,87 @@ export function getCurrentInReplyTo(): string | null {
   if (!Number.isFinite(age) || age > IN_REPLY_TO_MAX_AGE_MS) return null;
   return row.value;
 }
+
+/**
+ * The escalated question this session is blocked on, and the answer to it.
+ *
+ * These two keys are how a WAITING MCP TOOL and the POLL LOOP find each other.
+ * They cannot share a variable: the MCP server is a separate stdio subprocess,
+ * which is the same reason `current_in_reply_to` lives here rather than in
+ * module state.
+ *
+ * The handshake, in order:
+ *
+ *   1. `ask_user_question` on the agent lane sends the question to the
+ *      orchestrator and sets `open_question` to its id, then polls
+ *      `takeQuestionAnswer`.
+ *   2. The poll loop's follow-up poller sees `open_question` set and a new
+ *      inbound message. It writes the message's text as the answer and clears
+ *      `open_question` — and does NOT push the message into the live query.
+ *   3. The tool takes the answer and returns it as its own result.
+ *
+ * STEP 2's "does not push" is the whole point. The poller's ordinary job is to
+ * feed inbound messages to the model mid-turn; do that here and the model is
+ * handed an answer while it is still blocked inside the tool that asked for
+ * it, and the tool then times out having never seen it. Same message, two
+ * doors, and only one of them reaches a model that can act on it.
+ */
+const OPEN_QUESTION_KEY = 'open_question';
+const QUESTION_ANSWER_KEY = 'question_answer';
+
+/**
+ * Ignore a question older than this — the same shape of guard as
+ * `IN_REPLY_TO_MAX_AGE_MS`, and needed for the same reason: a container
+ * SIGKILLed while a tool was waiting leaves the key behind, and a stale
+ * `open_question` would silently swallow the next ordinary message the
+ * orchestrator sends. Comfortably longer than any tool's own bound, so it
+ * never expires a question that is still being waited on.
+ */
+const OPEN_QUESTION_MAX_AGE_MS = 30 * 60 * 1000;
+
+export function setOpenQuestion(questionId: string): void {
+  setValue(OPEN_QUESTION_KEY, questionId);
+}
+
+export function clearOpenQuestion(): void {
+  deleteValue(OPEN_QUESTION_KEY);
+}
+
+/** The id of the question this session is blocked on, if any is still live. */
+export function getOpenQuestion(): string | null {
+  const row = getAgentMailbox().operations.getState(OPEN_QUESTION_KEY);
+  if (!row) return null;
+  const age = Date.now() - new Date(row.updatedAt).getTime();
+  if (!Number.isFinite(age) || age > OPEN_QUESTION_MAX_AGE_MS) return null;
+  return row.value;
+}
+
+/** Hand an answer to the tool waiting on `questionId`, and close the question. */
+export function setQuestionAnswer(questionId: string, answer: string): void {
+  setValue(QUESTION_ANSWER_KEY, JSON.stringify({ questionId, answer }));
+  deleteValue(OPEN_QUESTION_KEY);
+}
+
+/**
+ * Take the answer to `questionId`, if it has arrived. Consuming: a second call
+ * returns undefined, so a late poll cannot re-deliver an answer the tool has
+ * already returned.
+ *
+ * An answer for a DIFFERENT question is left in place rather than dropped —
+ * it belongs to whoever asked that one.
+ */
+export function takeQuestionAnswer(questionId: string): string | undefined {
+  const raw = getValue(QUESTION_ANSWER_KEY);
+  if (!raw) return undefined;
+  let parsed: { questionId?: string; answer?: string };
+  try {
+    parsed = JSON.parse(raw) as { questionId?: string; answer?: string };
+  } catch {
+    // Unparseable is unusable; drop it so it cannot block every later answer.
+    deleteValue(QUESTION_ANSWER_KEY);
+    return undefined;
+  }
+  if (parsed.questionId !== questionId) return undefined;
+  deleteValue(QUESTION_ANSWER_KEY);
+  return parsed.answer ?? '';
+}

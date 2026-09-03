@@ -3,10 +3,44 @@
  *
  * ask_user_question is a blocking tool call — it writes a messages_out row
  * with a question card, then polls messages_in for the response.
+ *
+ * IT ASKS WHOEVER CAN HEAR IT, and the session routing already says who that
+ * is. `writeSessionRouting` splits on `session.messaging_group_id`: a session
+ * that belongs to a chat routes to that channel and thread, and a session that
+ * belongs to none routes down the agent lane to the group that spawned it.
+ * So `channel_type === 'agent'` is not a test for "am I a worker" — it is the
+ * test for "is there a person at the other end of my only address". A worker
+ * later given a chat of its own stops escalating on the same line, with
+ * nothing to remember to change.
+ *
+ * ON THE AGENT LANE THERE IS NO PERSON, and a question card sent down it used
+ * to fail three times over, silently every time: `performAgentRoute` copies
+ * the row into the orchestrator as kind `chat`, the formatter renders
+ * `content.text` and a card carries none, so the orchestrator woke to an EMPTY
+ * message; the host never created the `pending_questions` row, because that
+ * code sits past delivery.ts's `channel_type === 'agent'` early return, so no
+ * button existed anywhere; and the tool then polled for a response that could
+ * not arrive, for the full five minutes, before reporting a timeout nobody
+ * could explain.
+ *
+ * So on that lane the question is ESCALATED: sent to the orchestrator as
+ * readable prose, and answered by it — from what it already knows, or by
+ * putting the question to a human through its own channel, which is the one
+ * place in the pair that has one. That hop is a filter, not a workaround.
+ * Most worker questions never need to reach a person, because the agent that
+ * wrote the brief already knows the answer.
+ *
+ * THE TOOL STILL BLOCKS, and that is what keeps this cheap. The turn never
+ * ends, so the transcript is never wiped by `freshSessionPerTask` and there is
+ * no resume to arrange — the answer simply becomes this call's return value
+ * and the model carries on mid-thought. The cost is a bound: nobody is
+ * demonstrably waiting at the other end, and the host kills a container whose
+ * heartbeat is 30 minutes stale.
  */
-import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
 import { writeMessageOut } from '../db/messages-out.js';
+import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
 import { getSessionRouting } from '../db/session-routing.js';
+import { setOpenQuestion, clearOpenQuestion, takeQuestionAnswer } from '../db/session-state.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -32,6 +66,162 @@ function err(text: string) {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Seconds a question card waits on the human who can see it. */
+const CHANNEL_TIMEOUT_S = 300;
+
+/**
+ * Seconds an escalated question waits on the orchestrator.
+ *
+ * Longer than the channel bound because this round trip may CONTAIN that one:
+ * the orchestrator can put the question to a human through its own
+ * `ask_user_question`, which itself waits 300s. A bound shorter than the hop
+ * it wraps would give up while the human was still reading the card.
+ *
+ * Still well under the host's 30-minute idle ceiling for a running container
+ * (`reconcile-session.ts`), so a waiting worker is never mistaken for a stuck
+ * one and killed. Unbounded is not an option for the same reason: Claude
+ * Code's own `askUserQuestionTimeout` defaults to `never`, but it can see that
+ * a human is sitting at the terminal. Nothing here can see that.
+ */
+const ESCALATED_TIMEOUT_S = 600;
+
+const POLL_INTERVAL_MS = 1000;
+
+interface QuestionOption {
+  label: string;
+  selectedLabel: string;
+  value: string;
+}
+
+/**
+ * The question as the orchestrator reads it.
+ *
+ * It states the constraint rather than assuming the orchestrator knows it: the
+ * asker cannot reach a person, and this lane is its only address. Without that
+ * line the obvious reading of "ask the user" is that the asker already did,
+ * and the orchestrator answers as a bystander.
+ *
+ * It also says the next message is taken as the answer, because it is. An
+ * orchestrator that replies "ok, let me check with them" has spent the answer
+ * on an acknowledgement and left the asker holding a "let me check" it cannot
+ * act on.
+ */
+export function renderEscalatedQuestion(title: string, question: string, options: QuestionOption[]): string {
+  return [
+    `${title} — I need a decision before I can continue.`,
+    '',
+    question,
+    '',
+    'Options:',
+    ...options.map((o) => `- ${o.value}`),
+    '',
+    'I have no channel of my own and cannot reach a person. This lane back to you is my only address.',
+    'If the choice is yours, answer it. If it is the human’s, ask them and relay what they say.',
+    'Your next message to me is taken as the answer, so send the answer by itself — an acknowledgement would be consumed in its place.',
+  ].join('\n');
+}
+
+type Routing = ReturnType<typeof getSessionRouting>;
+type ToolResult = ReturnType<typeof ok>;
+
+/**
+ * The channel path, unchanged: post a card and wait for a button click.
+ *
+ * The host persists the question (`createPendingQuestion` in delivery.ts) and
+ * routes the click back as a `question_response` system row, which the poll
+ * loop skips by kind — so it reaches this poll and nothing else.
+ */
+async function askHuman(
+  questionId: string,
+  title: string,
+  question: string,
+  options: QuestionOption[],
+  r: Routing,
+  timeout: number,
+): Promise<ToolResult> {
+  await writeMessageOut({
+    id: questionId,
+    kind: 'chat-sdk',
+    platform_id: r.platform_id,
+    channel_type: r.channel_type,
+    thread_id: r.thread_id,
+    content: JSON.stringify({ type: 'ask_question', questionId, title, question, options }),
+  });
+
+  log(`ask_user_question: ${questionId} → "${question}" [${options.map((o) => o.value).join(', ')}]`);
+
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const response = findQuestionResponse(questionId);
+    if (response) {
+      const parsed = JSON.parse(response.content);
+      // Mark the response as completed via processing_ack (outbound.db)
+      markCompleted([response.id]);
+      log(`ask_user_question response: ${questionId} → ${parsed.selectedOption}`);
+      return ok(parsed.selectedOption);
+    }
+    await sleep(POLL_INTERVAL_MS);
+  }
+
+  log(`ask_user_question timeout: ${questionId}`);
+  return err(`Question timed out after ${timeout / 1000}s`);
+}
+
+/**
+ * The agent-lane path: hand the question to the orchestrator and wait.
+ *
+ * SEND BEFORE FLAGGING, deliberately. If the flag were written first and the
+ * send then failed, this session would sit waiting for an answer to a question
+ * nobody received, and the poller would swallow the orchestrator's next
+ * unrelated message to feed it — a silent stall. The other order costs at most
+ * a duplicate: the question arrives, the flag is missing, the poller pushes
+ * the reply at the model as an ordinary message and this call times out. Noisy
+ * beats silent.
+ */
+async function askOrchestrator(
+  questionId: string,
+  title: string,
+  question: string,
+  options: QuestionOption[],
+  r: Routing,
+  timeout: number,
+): Promise<ToolResult> {
+  await writeMessageOut({
+    id: questionId,
+    // `chat`, not `chat-sdk`: on this lane it IS prose. Claiming a card no
+    // renderer here can honour is what made the old failure invisible.
+    kind: 'chat',
+    platform_id: r.platform_id,
+    channel_type: r.channel_type,
+    thread_id: r.thread_id,
+    content: JSON.stringify({ text: renderEscalatedQuestion(title, question, options) }),
+  });
+  setOpenQuestion(questionId);
+
+  log(`ask_user_question (escalated): ${questionId} → "${question}" [${options.map((o) => o.value).join(', ')}]`);
+
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const answer = takeQuestionAnswer(questionId);
+    if (answer !== undefined) {
+      log(`ask_user_question answered by orchestrator: ${questionId} → ${answer}`);
+      return ok(answer);
+    }
+    await sleep(POLL_INTERVAL_MS);
+  }
+
+  // Give the lane back before reporting the timeout. Left set, the flag would
+  // divert the orchestrator's next ordinary message into an answer slot no
+  // one is reading — the message would vanish rather than wake this worker.
+  clearOpenQuestion();
+  log(`ask_user_question (escalated) timeout: ${questionId}`);
+  return err(
+    `Your orchestrator did not answer within ${timeout / 1000}s. Do not ask again — a second question would ` +
+      `wait behind the same silence. Either continue with the safest reading and say plainly which one you took, ` +
+      `or report what you are blocked on and end your turn. A late answer will reach you as a new message.`,
+  );
 }
 
 export const askUserQuestion: McpToolDefinition = {
@@ -71,7 +261,6 @@ export const askUserQuestion: McpToolDefinition = {
     const title = args.title as string;
     const question = args.question as string;
     const rawOptions = args.options as unknown[];
-    const timeout = ((args.timeout as number) || 300) * 1000;
     if (!title || !question || !rawOptions?.length) {
       return err('title, question, and options are required');
     }
@@ -88,44 +277,12 @@ export const askUserQuestion: McpToolDefinition = {
 
     const questionId = generateId();
     const r = routing();
+    const escalated = r.channel_type === 'agent' && Boolean(r.platform_id);
+    const timeout = ((args.timeout as number) || (escalated ? ESCALATED_TIMEOUT_S : CHANNEL_TIMEOUT_S)) * 1000;
 
-    // Write question card to outbound.db
-    await writeMessageOut({
-      id: questionId,
-      kind: 'chat-sdk',
-      platform_id: r.platform_id,
-      channel_type: r.channel_type,
-      thread_id: r.thread_id,
-      content: JSON.stringify({
-        type: 'ask_question',
-        questionId,
-        title,
-        question,
-        options,
-      }),
-    });
-
-    log(`ask_user_question: ${questionId} → "${question}" [${options.join(', ')}]`);
-
-    // Poll for response in inbound.db (host writes the response there)
-    const deadline = Date.now() + timeout;
-    while (Date.now() < deadline) {
-      const response = findQuestionResponse(questionId);
-
-      if (response) {
-        const parsed = JSON.parse(response.content);
-        // Mark the response as completed via processing_ack (outbound.db)
-        markCompleted([response.id]);
-
-        log(`ask_user_question response: ${questionId} → ${parsed.selectedOption}`);
-        return ok(parsed.selectedOption);
-      }
-
-      await sleep(1000);
-    }
-
-    log(`ask_user_question timeout: ${questionId}`);
-    return err(`Question timed out after ${timeout / 1000}s`);
+    return escalated
+      ? askOrchestrator(questionId, title, question, options, r, timeout)
+      : askHuman(questionId, title, question, options, r, timeout);
   },
 };
 
@@ -151,14 +308,21 @@ export const sendCard: McpToolDefinition = {
 
     const id = generateId();
     const r = routing();
+    const fallbackText = (args.fallbackText as string) || '';
+    // Same lane, same missing renderer: a card copied to an orchestrator is
+    // rendered as `content.text`, which a card does not have, so it arrived as
+    // an empty message. `fallbackText` is exactly what this case is for — and
+    // when the caller supplied none, say so rather than send nothing at all.
+    const escalated = r.channel_type === 'agent' && Boolean(r.platform_id);
+    const text = fallbackText || 'A card was sent with no text fallback, so its contents cannot be shown here.';
 
     await writeMessageOut({
       id,
-      kind: 'chat-sdk',
+      kind: escalated ? 'chat' : 'chat-sdk',
       platform_id: r.platform_id,
       channel_type: r.channel_type,
       thread_id: r.thread_id,
-      content: JSON.stringify({ type: 'card', card, fallbackText: (args.fallbackText as string) || '' }),
+      content: JSON.stringify(escalated ? { text } : { type: 'card', card, fallbackText }),
     });
 
     log(`send_card: ${id}`);
