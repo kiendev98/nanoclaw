@@ -417,6 +417,22 @@ export async function processQuery(
   // never re-matched. Dropped at the turn boundary: a block that never
   // closes anywhere is the wrap-nudge's job, not the buffer's.
   let midTurnTail = '';
+  // A worker's answer is its LAST turn, not every turn.
+  //
+  // A `result` event is a TURN boundary, not a completion: the stream also
+  // produces one when the model pauses, compacts, or stops on a limit, and
+  // the query stays open across all of them. Delivering each one sent the
+  // orchestrator — and through it, the human — a running commentary in which
+  // no message could be told apart from the answer.
+  //
+  // So unwrapped agent-lane text accumulates here and is delivered once, in
+  // `finally`, when the stream actually closes. Latest wins: a worker that
+  // pauses three times before finishing reports once, not four times.
+  //
+  // This suppresses only the IMPLICIT lane delivery. `send_message({ to:
+  // "parent" })` is untouched, so a worker that genuinely needs to say "this
+  // will take twenty minutes" still can — it just has to mean it.
+  let pendingLaneReport: { text: string; lane: { channelType: string; platformId: string } } | null = null;
   // Prompt queue for the exchange hook — each result event consumes the
   // oldest unanswered prompt, except a wrapping-retry result, which answers
   // the same prompt again. Unused (and unmaintained) when the provider
@@ -625,12 +641,18 @@ export async function processQuery(
             // A session on the agent lane — a repo worker, which has no
             // channel of its own — has exactly ONE place its output can go,
             // and the host fixed that lane at creation. So unwrapped text is
-            // delivered there rather than nudged: a worker that simply writes
-            // its answer is answered by code, and never has to remember to
-            // address a destination. Everything else keeps the nudge, where
-            // "which destination?" is a real question the model must answer.
+            // taken rather than nudged: a worker that simply writes its answer
+            // is answered by code, and never has to remember to address a
+            // destination. Everything else keeps the nudge, where "which
+            // destination?" is a real question the model must answer.
+            //
+            // Held rather than sent — see `pendingLaneReport`. The turn is
+            // still HANDLED, which is what `autoDelivered` gates, so a held
+            // report suppresses the wrap-nudge exactly as a sent one did.
+            // Nudging a worker to re-wrap text the lane is about to carry
+            // would ask it to solve a problem it does not have.
             const lane = hasUnwrapped ? agentLaneRouting() : null;
-            if (lane && scratchpad) await deliverOnAgentLane(scratchpad, lane, routing.inReplyTo);
+            if (lane && scratchpad) pendingLaneReport = { text: scratchpad, lane };
             const autoDelivered = lane !== null && scratchpad !== '';
             const willRetryWrapping = hasUnwrapped && !unwrappedNudged && !autoDelivered;
             notifyExchangeComplete(onExchangeComplete, {
@@ -689,6 +711,24 @@ export async function processQuery(
   } finally {
     done = true;
     clearInterval(pollHandle);
+    // The stream has closed, so the turn that produced this text WAS the final
+    // one. Flushed here rather than after the loop so an errored run still
+    // reports how far it got — `finally` runs while the exception is in
+    // flight, ahead of the caller's error notice, and the two arrive down the
+    // same lane in that order.
+    //
+    // Never allowed to throw: this frame may already be unwinding a provider
+    // error, and replacing that error with a delivery error would lose the
+    // only account of what actually failed.
+    if (pendingLaneReport) {
+      const report = pendingLaneReport;
+      pendingLaneReport = null;
+      try {
+        await deliverOnAgentLane(report.text, report.lane, routing.inReplyTo);
+      } catch (err) {
+        log(`Final-turn lane delivery failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   }
 
   return { continuation: queryContinuation };
