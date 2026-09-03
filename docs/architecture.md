@@ -907,15 +907,23 @@ MCP tools write to the container's own `outbound.db`. Anything that needs a chan
 **Scheduling**: scheduled-task management is not an MCP surface — it lives on
 `ncl tasks` (create/list/get/update/cancel/pause/resume/run/append-log). Due
 task rows live in the agent group's system session and are woken by the host
-sweep.
+sweep. `ncl tasks create --repo <name>` gives the series its own git worktree
+on branch `nanoclaw/<series-id>`, so its runs load that repository's
+`CLAUDE.md` and skills — the replacement for the old repo-worker delivery
+action, which minted a whole separate agent group per (repo, thread) pair.
+`run_task` (`action: 'run_task'`; series + optional `notify`/`wait_ms`) is the
+one MCP surface scheduling has: a CLI call can start a run but cannot hand a
+result back, so this tool exists to fire a run and, optionally, wait for or
+be woken with its result.
 
 **Central-DB / self-modification** (`kind: 'system'` actions; host authorizes, often via admin approval):
 
 | Tool | What it does |
 |------|-------------|
-| `spawn_worker` | `action: 'spawn_worker'` (repo + task); host resolves the repo, creates or reuses the worktree and agent group, and delivers the brief. Blocking, bounded at 60s. No admin approval — contained by the operator's `NANOCLAW_PROJECT_ROOTS` repo allowlist, not by a hold. There is no `create_agent` MCP tool — the host-side action of that name is driven by the operator and by `slack-agent-flow` |
 | `install_packages` | `action: 'install_packages'`; on approval host rebuilds the per-agent image and restarts |
 | `add_mcp_server` | `action: 'add_mcp_server'`; on approval host updates `container.json` and restarts |
+
+There is no `create_agent` MCP tool — the host-side action of that name is driven by the operator and by `slack-agent-flow`.
 
 See [agent-runner-details.md](agent-runner-details.md) for full MCP tool parameter definitions.
 

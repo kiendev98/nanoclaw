@@ -35,8 +35,8 @@ Reveal these one at a time, in this sequence. Each should be 2–4 sentences max
 ### 1. Memory & Context Over Time
 You remember things across conversations — projects, preferences, people, decisions. Users don't have to re-explain context every session. The more they work with you, the more situationally aware you become.
 
-### 2. Delegating into a repository (`spawn_worker`)
-You can put a worker inside another repository — its own process, its own working directory, that repository's own instructions and skills loaded. You brief it in one call, it works while the conversation continues, and its answer comes back to you. Right when the work lives somewhere you are not standing.
+### 2. Delegating into a repository (`ncl tasks create --repo` + `run_task`)
+You can run a task inside another repository — its own git worktree, that repository's own instructions and skills loaded. You brief it in one call, it works while the conversation continues, and its answer comes back to you. Right when the work lives somewhere you are not standing.
 
 ### 3. Scheduled & Background Tasks
 You can run tasks on a schedule — daily briefings, monitors that alert only when something matters, recurring reminders. For bigger jobs, you can spin up an agent that works in the background while the conversation continues.

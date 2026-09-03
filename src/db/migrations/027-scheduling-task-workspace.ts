@@ -31,7 +31,7 @@ import type { Migration } from './index.js';
  * edited.
  */
 
-/** Every agent group that exists only because `spawn_worker` created it. */
+/** Every agent group that exists only because the old repo-worker delivery action created it. */
 const WORKER_GROUPS = `SELECT id FROM agent_groups WHERE origin_session_id IS NOT NULL`;
 const WORKER_SESSIONS = `SELECT id FROM sessions WHERE agent_group_id IN (${WORKER_GROUPS})`;
 
@@ -47,8 +47,9 @@ export const migration027: Migration = {
 
     // Children before parents throughout, so foreign keys stay satisfied at
     // every step and the runner's `foreign_key_check` has nothing to find.
-    // Deleting the groups is safe by construction: `spawn_worker` is gone, so
-    // nothing can create another and nothing reads the ones left behind.
+    // Deleting the groups is safe by construction: the delivery action that
+    // created them is gone, so nothing can create another and nothing reads
+    // the ones left behind.
     await db.exec(`DELETE FROM pending_approvals WHERE session_id IN (${WORKER_SESSIONS});`);
     await db.exec(`DELETE FROM pending_questions WHERE session_id IN (${WORKER_SESSIONS});`);
     await db.exec(`DELETE FROM sessions WHERE agent_group_id IN (${WORKER_GROUPS});`);

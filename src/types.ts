@@ -27,16 +27,14 @@ export interface AgentGroup {
   /**
    * The session this group was created FOR — set only on a repo-scoped worker.
    *
-   * `workspace_path` says which repository a worker stands in;
-   * this says whose work it is doing. Together they are the REUSE key:
-   * `workspace_path` is derived from (repo, origin session), so
-   * `(origin_session_id, workspace_path)` IS the (repo, thread) pair. A second
-   * `spawn_worker` in the same thread finds the first worker instead
-   * of minting a rival on a branch that cannot see its work.
+   * Unread now: the delivery action that created workers and consulted this
+   * column is gone, and migration 027 deleted every group it had set. The
+   * column stays because dropping it would falsify migration 026 — a
+   * released migration's identity is permanent.
    *
-   * NULL / absent means "not a worker", which is every group that predates the
-   * column. Optional for the same reason `workspace_path` is: absence and NULL
-   * mean the same thing, and `createAgentGroup` normalizes it to NULL.
+   * NULL / absent means "not a worker", which is every group now. Optional for
+   * the same reason `workspace_path` is: absence and NULL mean the same thing,
+   * and `createAgentGroup` normalizes it to NULL.
    */
   origin_session_id?: string | null;
 }

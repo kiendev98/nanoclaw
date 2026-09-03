@@ -12,7 +12,7 @@
  * tool that opens the database without booting the host — see
  * `db/migrations/027-scheduling-task-workspace.ts`.
  *
- * Unguarded, for the same reason `spawn_worker` was: it starts a run of a task
+ * Unguarded: it starts a run of a task
  * series that already exists, in the caller's own agent group, which the
  * caller may already start through `ncl tasks run`. What that run may reach is
  * bounded by the series and by `NANOCLAW_PROJECT_ROOTS`, not by a decision

@@ -11,7 +11,6 @@ import { isSafeAttachmentName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
 import { ensureContainedInboxDir, isPathInside } from './inbox-safety.js';
-import { getAgentGroup } from './db/agent-groups.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import { isUniqueViolation } from './db/errors.js';
 import {
@@ -258,46 +257,14 @@ export async function destroySessionMailbox(agentGroupId: string, sessionId: str
 }
 
 /**
- * The agent group a repo worker answers to, or null when this group is not a
- * worker.
- *
- * A worker is the pair (repository, originating thread): `workspace_path` is
- * the worktree it stands in and `origin_session_id` is the conversation that
- * asked for it, and BOTH are written once, by the action that creates it. The
- * orchestrator is that session's agent group, so the target is fixed at
- * creation and nothing the worker later emits can move it.
- *
- * Returns null for every ordinary agent group — `create_agent` leaves both
- * columns NULL — so no companion's routing changes.
- */
-async function workerOrchestratorGroup(agentGroupId: string): Promise<string | null> {
-  const group = await getAgentGroup(agentGroupId);
-  if (!group?.workspace_path || !group.origin_session_id) return null;
-  const origin = await getSession(group.origin_session_id);
-  if (!origin || origin.agent_group_id === agentGroupId) return null;
-  return origin.agent_group_id;
-}
-
-/**
  * Write the current chat/thread routing for a session into its inbound mailbox.
  *
  * The container uses this to preserve thread_id when an explicitly named
- * destination resolves to the conversation this session is bound to, and — for
- * a worker — as the lane its plain turn output goes down.
+ * destination resolves to the conversation this session is bound to.
  *
  * Derived from session.messaging_group_id → messaging_groups row +
- * session.thread_id, with ONE exception. A repo worker's session is created by
- * `resolveSession(groupId, null, null, 'agent-shared')`, so it has no
- * messaging group and would get `channelType: null, platformId: null` — no
- * channel at all, and anything it wrote as ordinary output would go nowhere,
- * silently. It gets the agent-to-agent lane to its orchestrator instead, which
- * `delivery.ts` already routes through `routeAgentMessage`. Delivery is
- * therefore by CODE, not by the worker remembering to address a destination.
- *
- * That lane is not a wider permission: the route still passes the `a2a.send`
- * guard, which denies any pair with no `agent_destinations` row, and the
- * worker holds exactly one such row — for its own orchestrator, written when
- * it was provisioned.
+ * session.thread_id, with one exception for a task session that opened a
+ * thread — see the `boundGroup` branch below.
  *
  * Called on every container wake alongside the agent-to-agent module's
  * writeDestinations() (when installed) so the latest routing is always in
@@ -332,15 +299,6 @@ export async function writeSessionRouting(agentGroupId: string, sessionId: strin
     if (mg) {
       channelType = mg.channel_type;
       platformId = mg.platform_id;
-    }
-  } else {
-    const orchestrator = await workerOrchestratorGroup(agentGroupId);
-    if (orchestrator) {
-      channelType = 'agent';
-      platformId = orchestrator;
-      // An agent-to-agent message has no thread. Carrying one over would name
-      // a thread in a channel this lane does not address.
-      threadId = null;
     }
   }
 

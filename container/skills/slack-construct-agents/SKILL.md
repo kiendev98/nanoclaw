@@ -10,8 +10,8 @@ payload is `instructions.md` in this directory: the rules an agent needs when
 it shares Slack with sibling agents it can room with (`create_room` /
 `add_to_room`) — team-room shape, who posts the introduction, and the
 bot-to-bot self-limit. Creating a sibling is no longer one of its powers: an
-agent inside a container creates repo workers (`spawn_worker`) and nothing
-else.
+agent inside a container has no tool for that — it can only delegate into
+another repository as a task (`ncl tasks create --repo` + `run_task`).
 
 The host composes every container skill's `instructions.md` into each group's
 CLAUDE.md at spawn (`src/project-doc-compose.ts`), so if you are reading this
