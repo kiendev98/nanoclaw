@@ -480,8 +480,12 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     // and thread identity never reaches session resolution — so "another
     // agent owns this thread" describes nothing there, and skipping on it
     // would silently drop the message for an agent that is meant to read the
-    // whole channel. The live `#ai-anya` wiring is `shared`, so this ordering
-    // is the deployed case, not a corner.
+    // whole channel.
+    //
+    // NOT the `#ai-anya` case: that wiring's `threads` column is NULL, which
+    // inherits Slack's `group.threads: true`, so the guard does fire there.
+    // Its `session_mode` is `shared`, which is a different column and decides
+    // nothing here — do not read one as evidence of the other.
     if (threadsEnabled && boundHere && boundHere.agent_group_id !== agent.agent_group_id && !isMention) {
       log.debug('Skipping a thread owned by another agent group', {
         agentGroupId: agent.agent_group_id,
