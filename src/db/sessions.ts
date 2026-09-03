@@ -280,6 +280,36 @@ export async function getPendingQuestion(questionId: string): Promise<PendingQue
   return { ...rest, options: JSON.parse(options_json) };
 }
 
+/**
+ * The newest question any session of `agentGroupId` is still waiting on.
+ *
+ * Asked by agent group rather than by session because the caller knows only
+ * the group: an orchestrator names its worker by destination, and a
+ * destination resolves to a group. At most one question is ever open per
+ * worker anyway — `ask_user_question` blocks the whole turn, so the asking
+ * session cannot reach a second call while the first is unanswered — which is
+ * what makes "newest" the right and only answer rather than a heuristic.
+ *
+ * FRESHNESS IS THE CALLER'S. This returns the row and says nothing about
+ * whether the tool that wrote it is still listening; the caller compares
+ * `created_at` against the bound that tool waits for. Keeping the clock out of
+ * the query is what lets the bound live next to the tool it belongs to instead
+ * of being duplicated in SQL.
+ */
+export async function getOpenQuestionForAgentGroup(agentGroupId: string): Promise<PendingQuestion | undefined> {
+  const row = await getDb().get<Omit<PendingQuestion, 'options'> & { options_json: string }>(
+    `SELECT pq.* FROM pending_questions pq
+       JOIN sessions s ON s.id = pq.session_id
+      WHERE s.agent_group_id = ?
+      ORDER BY pq.created_at DESC
+      LIMIT 1`,
+    agentGroupId,
+  );
+  if (!row) return undefined;
+  const { options_json, ...rest } = row;
+  return { ...rest, options: JSON.parse(options_json) };
+}
+
 export async function deletePendingQuestion(questionId: string): Promise<void> {
   await getDb().run('DELETE FROM pending_questions WHERE question_id = ?', questionId);
 }

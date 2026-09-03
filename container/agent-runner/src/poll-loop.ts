@@ -15,7 +15,6 @@ import { renderFooter } from './message-footer.js';
 import {
   clearContinuation,
   clearCurrentInReplyTo,
-  isToolAwaitingInbound,
   takeLateAnswerExpected,
   migrateLegacyContinuation,
   setContinuation,
@@ -506,22 +505,14 @@ export async function processQuery(
         // Accumulated context must not engage a warm query by itself.
         if (!newMessages.some((m) => m.trigger === 1)) return;
 
-        // A blocked tool owns the next message, so hold the push for this
-        // tick. That is the whole of what this loop knows about the escalated
-        // question: which message qualifies, and the claim itself, belong to
-        // the tool — see `askOrchestrator` in mcp-tools/interactive.ts.
-        //
-        // Pushing here instead would hand the model an answer while it is
-        // still waiting inside the tool that asked for it, and the tool would
-        // then time out having never seen it. Same message, two doors, and
-        // only one of them reaches a model that can act on it.
-        //
-        // Nothing is consumed by holding. The rows stay pending; the tool
-        // claims at most one, and the next tick pushes whatever is left. If
-        // the waiting tool dies, its flag expires within seconds and this
-        // resumes on its own.
-        if (isToolAwaitingInbound()) return;
-
+        // NOTE: there is deliberately no hold for a blocked tool here any
+        // more. An escalated answer used to arrive as an ordinary `chat` row,
+        // indistinguishable from new work, so this loop had to stop pushing
+        // while a tool was waiting or the answer would reach the model instead
+        // of the tool that asked for it. `answer_worker` writes a
+        // `question_response` system row, and system rows are already filtered
+        // out above — so the answer reaches the waiting tool and nothing else,
+        // while an ordinary message sent during the wait is pushed normally.
         const newIds = newMessages.map((m) => m.id);
         markProcessing(newIds);
 

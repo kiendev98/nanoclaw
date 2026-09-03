@@ -11,7 +11,6 @@ import {
   sqliteFindByRouting,
   sqliteFindCliResponse,
   sqliteFindQuestionResponse,
-  sqliteFindEscalatedAnswers,
   sqliteGetAllDestinations,
   sqliteGetMessageIn,
   sqliteGetMessageIdBySeq,
@@ -139,10 +138,6 @@ export class SqliteAgentMailbox implements AgentMailbox {
   findQuestionResponse(questionId: string): InboundMessage | undefined {
     const row = sqliteFindQuestionResponse(questionId);
     return row && inboundMessage(row);
-  }
-
-  findEscalatedAnswers(sinceIso: string): InboundMessage[] {
-    return sqliteFindEscalatedAnswers(sinceIso).map(inboundMessage);
   }
 
   findCliResponse(requestId: string): InboundMessage | undefined {

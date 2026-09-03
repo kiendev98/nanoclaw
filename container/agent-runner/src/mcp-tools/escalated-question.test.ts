@@ -10,26 +10,32 @@
  * anywhere. And the tool then polled for five minutes for a response that could
  * not arrive.
  *
- * The pairing test for the other half — the poller handing the orchestrator's
- * reply to this waiting tool rather than pushing it at the model — lives in
- * `../escalated-answer.test.ts`, because that half belongs to the poll loop.
+ * There is no pairing poll-loop test any more, and its absence is the point.
+ * The answer used to arrive as an ordinary `chat` row, so the loop had to be
+ * told to stop pushing while a tool waited, and the tool had to guess which
+ * message was its answer. `answer_worker` makes the answer a
+ * `question_response` system row, which the loop already filters out by kind —
+ * so neither the hold nor the guess exists to test.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../mailbox/sqlite/connection.js';
-import {
-  isToolAwaitingInbound,
-  takeLateAnswerExpected,
-  setCurrentInReplyTo,
-  clearCurrentInReplyTo,
-} from '../db/session-state.js';
+import { takeLateAnswerExpected, setCurrentInReplyTo, clearCurrentInReplyTo } from '../db/session-state.js';
 import { askUserQuestion, renderEscalatedQuestion, sendCard } from './interactive.js';
 
-function outbound(): Array<{ id: string; kind: string; channel_type: string | null; content: Record<string, unknown> }> {
+function outbound(): Array<{
+  id: string;
+  kind: string;
+  channel_type: string | null;
+  content: Record<string, unknown>;
+}> {
   return (
-    getOutboundDb()
-      .prepare('SELECT id, kind, channel_type, content FROM messages_out ORDER BY seq')
-      .all() as Array<{ id: string; kind: string; channel_type: string | null; content: string }>
+    getOutboundDb().prepare('SELECT id, kind, channel_type, content FROM messages_out ORDER BY seq').all() as Array<{
+      id: string;
+      kind: string;
+      channel_type: string | null;
+      content: string;
+    }>
   ).map((r) => ({ id: r.id, kind: r.kind, channel_type: r.channel_type, content: JSON.parse(r.content) }));
 }
 
@@ -147,10 +153,10 @@ describe('the escalated question text', () => {
     expect(text).toContain('- Keep it');
   });
 
-  it('says the next message is consumed as the answer', () => {
-    // Without this line an orchestrator replies "ok, let me check with them"
-    // and has spent the answer on an acknowledgement.
-    expect(renderEscalatedQuestion('t', 'q', options)).toContain('next message');
+  it('names the tool that answers it', () => {
+    // An ordinary message reaches the worker as new work and leaves it
+    // blocked, so the orchestrator has to be told which door to use.
+    expect(renderEscalatedQuestion('t', 'q', options)).toContain('answer_worker');
   });
 
   it('says the asker cannot reach a person', () => {
@@ -161,20 +167,38 @@ describe('the escalated question text', () => {
 });
 
 describe('waiting for the orchestrator', () => {
-  /** A reply from the orchestrator, arriving while the tool is blocked. */
-  function reply(text: string, opts: { kind?: string; id?: string; seq?: number } = {}): void {
+  /** The question id the tool minted, read back off its own outbound row. */
+  function askedQuestionId(): string {
+    return outbound()[0].id;
+  }
+
+  /**
+   * The answer, in the shape `answer_worker` makes the host write.
+   *
+   * A `question_response` system row — byte-identical to what a button click
+   * produces on a channel, which is what lets one wait serve both lanes.
+   */
+  function answer(text: string, questionId: string): void {
     getInboundDb()
       .prepare(
         `INSERT OR REPLACE INTO messages_in (id, seq, kind, timestamp, status, content, channel_type, platform_id)
-         VALUES ($id, $seq, $kind, $timestamp, 'pending', $content, 'agent', 'ag-orchestrator')`,
+         VALUES ($id, 3, 'system', $timestamp, 'pending', $content, 'agent', 'ag-orchestrator')`,
       )
       .run({
-        $id: opts.id ?? 'a2a-reply',
-        $seq: opts.seq ?? 3,
-        $kind: opts.kind ?? 'chat',
+        $id: `qr-${questionId}`,
         $timestamp: new Date().toISOString(),
-        $content: JSON.stringify({ text }),
+        $content: JSON.stringify({ type: 'question_response', questionId, selectedOption: text, userId: '' }),
       });
+  }
+
+  /** An ordinary message from the orchestrator, arriving mid-wait. */
+  function chat(text: string, id: string): void {
+    getInboundDb()
+      .prepare(
+        `INSERT OR REPLACE INTO messages_in (id, seq, kind, timestamp, status, content, channel_type, platform_id)
+         VALUES ($id, 5, 'chat', $timestamp, 'pending', $content, 'agent', 'ag-orchestrator')`,
+      )
+      .run({ $id: id, $timestamp: new Date().toISOString(), $content: JSON.stringify({ text }) });
   }
 
   function ackStatus(id: string): string | undefined {
@@ -184,17 +208,22 @@ describe('waiting for the orchestrator', () => {
     return row?.status;
   }
 
-  it('holds the poll loop back while it waits', async () => {
+  it('carries the question alongside the prose, so the host can record it', async () => {
+    // Two readers, one row: `text` for the orchestrator's formatter, which
+    // renders nothing else, and `question` for delivery.ts — which is the only
+    // place that can create the pending row on this lane.
     workerLane();
 
-    const pending = askUserQuestion.handler(ARGS);
-    // Read it while the tool is still blocked — the only window in which the
-    // poll loop ever looks.
-    await new Promise((r) => setTimeout(r, 10));
-    const heldDuring = isToolAwaitingInbound();
-    await pending;
+    await askUserQuestion.handler(ARGS);
 
-    expect(heldDuring).toBe(true);
+    const [row] = outbound();
+    const question = row.content.question as { id: string; title: string; options: unknown[] };
+    expect(typeof row.content.text).toBe('string');
+    expect(question.id).toBe(row.id);
+    expect(question.title).toBe('Legacy migration');
+    // `pending_questions` requires both, and this lane has no card to read
+    // them from.
+    expect(question.options).toHaveLength(2);
   });
 
   it('returns the orchestrator answer as its own result', async () => {
@@ -202,61 +231,54 @@ describe('waiting for the orchestrator', () => {
 
     const pending = askUserQuestion.handler({ ...ARGS, timeout: 5 });
     await new Promise((r) => setTimeout(r, 10));
-    reply('Delete it');
+    answer('Delete it', askedQuestionId());
     const result = await pending;
 
     expect(result.isError).toBeUndefined();
     expect((result.content[0] as { text: string }).text).toBe('Delete it');
   });
 
-  it('claims the message it used, so the model never sees it twice', async () => {
-    // Claimed through `processing_ack` — the same ledger the poll loop reads,
-    // which is what stops both from taking the row.
+  it('claims the response, so the model never sees it twice', async () => {
+    // Claimed through `processing_ack` — the same ledger the poll loop reads.
     workerLane();
 
     const pending = askUserQuestion.handler({ ...ARGS, timeout: 5 });
     await new Promise((r) => setTimeout(r, 10));
-    reply('Delete it');
+    const id = askedQuestionId();
+    answer('Delete it', id);
     await pending;
 
-    expect(ackStatus('a2a-reply')).toBe('completed');
+    expect(ackStatus(`qr-${id}`)).toBe('completed');
   });
 
-  it('ignores a message that predates the question', async () => {
-    // Written BEFORE the tool sent anything, so the orchestrator cannot have
-    // been answering. It stays pending and reaches the model afterwards.
-    workerLane();
-    reply('Unrelated instruction', { id: 'a2a-earlier' });
-    await new Promise((r) => setTimeout(r, 5));
-
-    const result = await askUserQuestion.handler(ARGS);
-
-    expect(result.isError).toBe(true);
-    expect(ackStatus('a2a-earlier')).toBeUndefined();
-  });
-
-  it('passes over a text-less message rather than claiming it', async () => {
-    // A file sent while the worker was blocked. Claiming it would answer the
-    // question with nothing AND destroy the file's own delivery.
+  it('is not answered by an ordinary message sent during the wait', async () => {
+    // THE REGRESSION THIS REPLACED. The tool used to take the first message
+    // carrying text, so "also bump the dep" sent during the same turn was
+    // silently relabelled as the decision and the real answer arrived too
+    // late. Now that message is left pending for the model, and only a
+    // question_response ends the wait.
     workerLane();
 
     const pending = askUserQuestion.handler({ ...ARGS, timeout: 5 });
     await new Promise((r) => setTimeout(r, 10));
-    reply('', { id: 'a2a-file', seq: 3 });
-    reply('Delete it', { id: 'a2a-answer', seq: 5 });
+    chat('also bump the dep', 'a2a-more-work');
+    await new Promise((r) => setTimeout(r, 20));
+    answer('Delete it', askedQuestionId());
     const result = await pending;
 
     expect((result.content[0] as { text: string }).text).toBe('Delete it');
-    expect(ackStatus('a2a-file')).toBeUndefined();
+    expect(ackStatus('a2a-more-work')).toBeUndefined();
   });
 
-  it('releases the poll loop on timeout', async () => {
-    // Left flagged, the loop would keep withholding messages from the model.
+  it("is not answered by a response to somebody else's question", async () => {
     workerLane();
 
-    await askUserQuestion.handler(ARGS);
+    const pending = askUserQuestion.handler({ ...ARGS, timeout: 0.3 });
+    await new Promise((r) => setTimeout(r, 10));
+    answer('Delete it', 'msg-someone-else');
+    const result = await pending;
 
-    expect(isToolAwaitingInbound()).toBe(false);
+    expect(result.isError).toBe(true);
   });
 
   it('tells the caller the failure is not worth repeating', async () => {
@@ -352,12 +374,16 @@ describe('a late answer must not land against an empty transcript', () => {
 
     const pending = askUserQuestion.handler({ ...ARGS, timeout: 5 });
     await new Promise((r) => setTimeout(r, 10));
+    const questionId = outbound()[0].id;
     getInboundDb()
       .prepare(
         `INSERT INTO messages_in (id, seq, kind, timestamp, status, content, channel_type, platform_id)
-         VALUES ('a2a-ok', 7, 'chat', $timestamp, 'pending', $content, 'agent', 'ag-orchestrator')`,
+         VALUES ('qr-ok', 7, 'system', $timestamp, 'pending', $content, 'agent', 'ag-orchestrator')`,
       )
-      .run({ $timestamp: new Date().toISOString(), $content: JSON.stringify({ text: 'Delete it' }) });
+      .run({
+        $timestamp: new Date().toISOString(),
+        $content: JSON.stringify({ type: 'question_response', questionId, selectedOption: 'Delete it', userId: '' }),
+      });
     await pending;
 
     expect(takeLateAnswerExpected()).toBe(false);

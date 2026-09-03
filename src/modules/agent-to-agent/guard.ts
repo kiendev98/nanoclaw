@@ -21,6 +21,12 @@
  * `grantActionName` back AND registering a handler for it (./index.js) — not a
  * one-line change, but still a small, localized one.
  *
+ * workers.answer — answering a worker requires no approval of its own,
+ * because it is not a new capability: `answer_worker` reaches a worker the
+ * caller can already message, and the handler consults a2a.send below for
+ * exactly that pair before it takes the fast path. Like workers.spawn it never
+ * holds, so it carries no `grantActionName` and needs no approval handler.
+ *
  * a2a.send — the decision moved verbatim out of routeAgentMessage, in its
  * original check order: a missing destination row denies; a missing target
  * group denies; self-sends allow without a destination row; an
@@ -80,6 +86,21 @@ export const workersSpawn = defineGuardedAction({
     // operator allowlist (NANOCLAW_PROJECT_ROOTS, resolved by resolveRepo) is
     // the containment, not this decision.
     return ALLOW('spawn_worker requires no approval — repo is bounded by the operator allowlist');
+  },
+});
+
+export const workersAnswer = defineGuardedAction({
+  action: 'workers.answer',
+  // No grantActionName: this decision never holds. The containment is
+  // `a2a.send`, consulted inside the handler with the destination and the
+  // message policy for this exact pair — an answer is a message to that
+  // worker, so it passes exactly when a message would, and anything short of
+  // ALLOW is handed to routeAgentMessage which owns the deny and the card.
+  // Deciding it twice here would be the same rule in two places, and the copy
+  // in this file is the one that would drift.
+  decide: async (input) => {
+    if (input.actor.kind !== 'agent') return DENY('answer_worker is a container-originated action.');
+    return ALLOW('answer_worker is bounded by the a2a.send destination check');
   },
 });
 

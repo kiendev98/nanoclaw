@@ -47,20 +47,13 @@ import { writeSessionMessage } from '../../session-manager.js';
 import type { AgentGroup, Session } from '../../types.js';
 import { createWorktree, resolveRepo } from '../../worktree.js';
 import { routeAgentMessage } from './agent-route.js';
+import { callerStoppedWaiting, notifyAgent } from './blocking-request.js';
 import { getDestinationByTarget } from './db/agent-destinations.js';
 import { provisionAgentGroup } from './provision-agent.js';
 import { workerBranch, workerWorkspace } from './worker-identity.js';
 
 /** How the request ended, as the container tool reads it. */
 type WorkerStatus = 'created' | 'reused' | 'error';
-
-/**
- * Grace on `waitUntil`. Inside the window the tool is still polling and the
- * response row alone reaches it; within this margin of the deadline the race
- * is unwinnable either way, so the requester is woken too. A duplicate wake
- * costs one turn; the other error costs the whole delegation, silently.
- */
-const LATE_MARGIN_MS = 5_000;
 
 interface WorkerRequest {
   requestId: string;
@@ -80,15 +73,6 @@ function parseRequest(content: Record<string, unknown>): WorkerRequest {
     name: str('name'),
     waitUntil: typeof content.waitUntil === 'number' ? content.waitUntil : null,
   };
-}
-
-/** Is the tool that asked still listening, or has its bounded wait run out? */
-function callerStoppedWaiting(req: WorkerRequest): boolean {
-  // An absent deadline means the payload did not come from the tool (a
-  // hand-written row, an older container). Treat it as no longer waiting:
-  // an extra wake is recoverable, a lost answer is not.
-  if (req.waitUntil === null) return true;
-  return Date.now() > req.waitUntil - LATE_MARGIN_MS;
 }
 
 /**
@@ -118,22 +102,7 @@ async function respond(session: Session, req: WorkerRequest, status: WorkerStatu
       trigger: false,
     });
   }
-  if (callerStoppedWaiting(req)) await notifyAgent(session, message);
-}
-
-/** A renderable chat note that wakes the requester — the late-answer path. */
-async function notifyAgent(session: Session, text: string): Promise<void> {
-  await writeSessionMessage(session.agent_group_id, session.id, {
-    id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    kind: 'chat',
-    timestamp: new Date().toISOString(),
-    platformId: session.agent_group_id,
-    channelType: 'agent',
-    threadId: null,
-    content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
-  });
-  const fresh = await getSession(session.id);
-  if (fresh) await requestWake(fresh, 'agent-created');
+  if (callerStoppedWaiting(req.waitUntil)) await notifyAgent(session, message);
 }
 
 /**

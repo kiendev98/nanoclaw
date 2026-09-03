@@ -370,6 +370,7 @@ async function deliverMessage(
     if (!(await hasTable(getDb(), 'agent_destinations'))) {
       throw new Error(`agent-to-agent module not installed — cannot route message ${msg.id}`);
     }
+    await recordEscalatedQuestion(content, msg, session);
     const { routeAgentMessage } = await import('./modules/agent-to-agent/agent-route.js');
     await routeAgentMessage(
       {
@@ -708,6 +709,56 @@ export function getDeliveryAction(action: string): DeliveryActionHandler | undef
  * These are written to messages_out because the container can't write to inbound.db.
  * The host applies them to inbound.db here.
  */
+/**
+ * Persist a question a worker escalated to its orchestrator.
+ *
+ * THE SYMMETRIC TWIN of the `ask_question` block further down, and it has to
+ * live up here because that block is unreachable on this lane: the
+ * `channel_type === 'agent'` branch returns before it. That early return is
+ * exactly why an escalated question used to leave no row anywhere, so no
+ * button existed and nothing could answer it.
+ *
+ * The envelope rides ALONGSIDE the prose rather than replacing it —
+ * `performAgentRoute` renders `content.text` and nothing else, so a structured
+ * payload on its own reaches the orchestrator as an empty message. `title` and
+ * `options` travel with it because `pending_questions` requires both and this
+ * lane has no card to read them from.
+ *
+ * `session` is the ASKER's, since deliverMessage is handed the session that
+ * wrote the row. That is what makes the row resolvable later: `answer_worker`
+ * looks up the open question by the asking agent group.
+ *
+ * Silent on a malformed or absent envelope, because an ordinary agent-to-agent
+ * message carries no `question` field and must not be logged as a fault.
+ */
+async function recordEscalatedQuestion(
+  content: Record<string, unknown>,
+  msg: { id: string; platformId: string | null; channelType: string | null; threadId: string | null },
+  session: Session,
+): Promise<void> {
+  const q = content.question as { id?: unknown; title?: unknown; options?: unknown } | undefined;
+  if (!q || typeof q.id !== 'string' || typeof q.title !== 'string' || !Array.isArray(q.options)) return;
+  // Guarded exactly like the channel path: without the interactive module the
+  // table does not exist, and the question still reaches the orchestrator as
+  // prose — it simply cannot be answered by tool.
+  if (!(await hasTable(getDb(), 'pending_questions'))) return;
+
+  const inserted = await createPendingQuestion({
+    question_id: q.id,
+    session_id: session.id,
+    message_out_id: msg.id,
+    platform_id: msg.platformId,
+    channel_type: msg.channelType,
+    thread_id: msg.threadId,
+    title: q.title,
+    options: normalizeOptions(q.options as never),
+    created_at: new Date().toISOString(),
+  });
+  if (inserted) {
+    log.info('Escalated question recorded', { questionId: q.id, sessionId: session.id });
+  }
+}
+
 async function handleSystemAction(content: Record<string, unknown>, session: Session): Promise<void> {
   const action = content.action as string;
   log.info('System action from agent', { sessionId: session.id, action });

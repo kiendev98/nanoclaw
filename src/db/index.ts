@@ -59,6 +59,7 @@ export {
   updateSession,
   deleteSession,
   createPendingQuestion,
+  getOpenQuestionForAgentGroup,
   getPendingQuestion,
   deletePendingQuestion,
   createPendingApproval,

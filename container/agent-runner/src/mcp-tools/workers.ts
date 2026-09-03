@@ -1,5 +1,5 @@
 /**
- * Repo worker MCP tool: spawn_worker.
+ * Repo worker MCP tools: spawn_worker, answer_worker.
  *
  * A worker is not a companion agent. It is a delegate that stands inside
  * ANOTHER repository — its own process, its own working directory, a git
@@ -23,7 +23,19 @@
  * there is no hold to answer inline. The only thing that can still outrun the
  * bound is the worktree checkout itself: on timeout the tool reports that
  * creation is still running, and the host wakes the caller when it finishes.
+ *
+ * `answer_worker` closes the other half of the loop. A worker has no channel,
+ * so `ask_user_question` sends its question up this same lane and BLOCKS. The
+ * problem that makes a second verb necessary is that no existing door carries
+ * intent: `send_message` and a reused `spawn_worker` both end in
+ * `routeAgentMessage` and write a byte-identical `kind: 'chat'` row, so a
+ * blocked worker could only guess which message was its answer. It guessed by
+ * order, and a second instruction sent during the same turn was silently
+ * relabelled as the decision. This tool writes a `question_response` instead —
+ * the same row a button click produces — so the answer reaches the waiting
+ * call and an ordinary message reaches the model, each by its own door.
  */
+import { findByName, getAllDestinations } from '../destinations.js';
 import { findCliResponse, markCompleted } from '../db/messages-in.js';
 import { writeMessageOut } from '../db/messages-out.js';
 import { registerTools } from './server.js';
@@ -50,6 +62,11 @@ export const workerWaitBound = { ms: DEFAULT_WAIT_MS };
 
 function log(msg: string): void {
   console.error(`[mcp-tools] ${msg}`);
+}
+
+function destinationList(): string {
+  const all = getAllDestinations();
+  return all.length === 0 ? '(none)' : all.map((d) => d.name).join(', ');
 }
 
 function generateId(): string {
@@ -183,4 +200,101 @@ export const spawnWorker: McpToolDefinition = {
   },
 };
 
-registerTools([spawnWorker]);
+/**
+ * How long `answer_worker` waits for the host to say what became of the
+ * answer. Short, because the host does no real work here: it looks up one row
+ * and writes another. Anything longer is waiting on delivery polling, not on
+ * the operation.
+ */
+const ANSWER_WAIT_MS = 30_000;
+
+/** The host's answer to `answer_worker`, as it arrives on the inbound row. */
+interface AnswerResponse {
+  status?: string;
+  result?: { message?: string; error?: string };
+}
+
+export const answerWorker: McpToolDefinition = {
+  tool: {
+    name: 'answer_worker',
+    description:
+      'Answer a worker that is BLOCKED waiting on a question it asked you. Use this and nothing else to reply to such a question. ' +
+      'A worker has no channel of its own, so when it needs a decision it asks you, and it stops until you answer. ' +
+      'WHY THIS IS NOT send_message: an ordinary message reaches the worker as NEW WORK, arriving beside the question rather than in place of it, and the worker stays blocked until it gives up. ' +
+      'This tool unblocks the waiting call, so the worker continues mid-thought with its full context intact. ' +
+      "Answer from what you already know when you can. When the decision is the human's, ask them through your own channel first, then relay their answer here. " +
+      'Send the ANSWER ITSELF, not an acknowledgement — "let me check with them" is a decision the worker cannot act on.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        worker: {
+          type: 'string',
+          description: 'The worker to answer, by the destination name you know it as (the name spawn_worker returned).',
+        },
+        answer: {
+          type: 'string',
+          description:
+            'The decision, stated plainly. Prefer one of the options the worker offered; any text is accepted, since a worker often asks an open question.',
+        },
+      },
+      required: ['worker', 'answer'],
+    },
+  },
+  async handler(args) {
+    const worker = ((args.worker as string) || '').trim();
+    const answer = ((args.answer as string) || '').trim();
+    if (!worker) return err(`worker is required. Options: ${destinationList()}`);
+    if (!answer) return err('answer is required — the decision the worker is waiting on.');
+
+    // Resolved here, against the map the host projected into this session, for
+    // the same reason `send_message` resolves it here: the map only ever holds
+    // destinations this agent group legitimately has. The host re-checks the
+    // destination anyway before it delivers anything.
+    const dest = findByName(worker);
+    if (!dest) return err(`Unknown destination "${worker}". Known: ${destinationList()}`);
+    if (dest.type !== 'agent') {
+      return err(
+        `"${worker}" is a channel, not an agent. answer_worker replies to a worker that asked you a question.`,
+      );
+    }
+
+    const requestId = generateId();
+    const waitUntil = Date.now() + ANSWER_WAIT_MS;
+    await writeMessageOut({
+      id: requestId,
+      kind: 'system',
+      content: JSON.stringify({
+        action: 'answer_worker',
+        requestId,
+        waitUntil,
+        worker: dest.agentGroupId,
+        workerName: worker,
+        answer,
+      }),
+    });
+
+    log(`answer_worker: ${requestId} -> "${worker}"`);
+
+    while (Date.now() < waitUntil) {
+      const response = findCliResponse(requestId);
+      if (response) {
+        markCompleted([response.id]);
+        const parsed = JSON.parse(response.content) as AnswerResponse;
+        log(`answer_worker response: ${requestId} -> ${parsed.status}`);
+        if (parsed.status === 'error') {
+          return err(parsed.result?.error || `Could not answer "${worker}".`);
+        }
+        return ok(parsed.result?.message || `Answer delivered to "${worker}".`);
+      }
+      await sleep(POLL_INTERVAL_MS);
+    }
+
+    log(`answer_worker timeout: ${requestId}`);
+    return ok(
+      `The answer for "${worker}" was sent and is still being delivered. Do not send it again — a second copy ` +
+        `would reach the worker as new work.`,
+    );
+  },
+};
+
+registerTools([spawnWorker, answerWorker]);

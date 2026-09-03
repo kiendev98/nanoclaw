@@ -30,7 +30,8 @@ import { notifyAgent, registerApprovalHandler } from '../approvals/index.js';
 import { A2A_MESSAGE_GATE_ACTION } from './agent-route.js';
 import { createAgent, requestCreateAgentHold, validateCreateAgent } from './create-agent.js';
 import { spawnWorker, denySpawnWorker, validateSpawnWorker } from './spawn-worker.js';
-import { agentsCreate, workersSpawn } from './guard.js';
+import { answerWorker, denyAnswerWorker, validateAnswerWorker } from './answer-worker.js';
+import { agentsCreate, workersSpawn, workersAnswer } from './guard.js';
 import { applyA2aMessageGate } from './message-gate.js';
 
 registerDeliveryAction('create_agent', createAgent, {
@@ -70,6 +71,18 @@ registerDeliveryAction('create_worker', spawnWorker, {
   guardAction: workersSpawn,
   precheck: validateSpawnWorker,
   onDeny: denySpawnWorker,
+});
+
+// `answer_worker` unblocks a worker that is waiting inside
+// `ask_user_question`. It is a separate action rather than a flag on the
+// message path because that path cannot carry intent: `send_message` and a
+// reused `spawn_worker` write byte-identical rows, so a blocked tool had to
+// guess which message was its answer. Like `spawn_worker` it never holds, so
+// there is no approved replay and no approval handler — see ./guard.ts.
+registerDeliveryAction('answer_worker', answerWorker, {
+  guardAction: workersAnswer,
+  precheck: validateAnswerWorker,
+  onDeny: denyAnswerWorker,
 });
 
 registerApprovalHandler(A2A_MESSAGE_GATE_ACTION, applyA2aMessageGate);

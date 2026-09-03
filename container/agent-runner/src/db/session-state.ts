@@ -114,7 +114,6 @@ function getFresh(key: string, maxAgeMs: number): string | null {
   return row.value;
 }
 
-
 /**
  * The a2a reply stamp: the id of the first inbound message in the batch the
  * agent is currently processing. The poll loop publishes it at batch start;
@@ -149,58 +148,6 @@ export function clearCurrentInReplyTo(): void {
 
 export function getCurrentInReplyTo(): string | null {
   return getFresh(IN_REPLY_TO_KEY, IN_REPLY_TO_MAX_AGE_MS);
-}
-
-
-/**
- * Whether an MCP tool is currently blocked waiting for an inbound message.
- *
- * ONE ABSTRACT FACT, deliberately. The poll loop needs to know only "do not
- * push this tick"; it does not need the question id, the answer envelope, or
- * the rule for which message counts. That knowledge belongs to the tool, and
- * an earlier revision that put it in the poll loop had to store the answer in
- * a second key for the tool to collect.
- *
- * That second key was a mailbox with no proof its reader still existed. A
- * container SIGKILLed mid-wait left the flag set for its full lifetime, and
- * the poll loop would then consume and ACK the next ordinary message into a
- * slot nobody was polling — a message destroyed with no trace. There is no
- * such slot now: the tool claims its own answer through `processing_ack`, so
- * if the tool is gone nobody claims the row and it is delivered normally.
- *
- * WHAT MAKES THE FLAG SAFE IS THAT IT IS SHORT-LIVED. The waiting tool
- * refreshes it on every poll iteration, so "fresh" means a tool was alive
- * within the last few seconds — not merely that one started waiting at some
- * point in the last half hour. A dead waiter's flag expires in seconds.
- */
-const AWAITING_INBOUND_KEY = 'awaiting_inbound';
-
-/**
- * How stale the flag may be before the poll loop ignores it.
- *
- * Comfortably more than the 1s refresh interval, so an ordinary scheduling
- * delay never looks like a dead waiter, and small enough that a killed
- * container withholds at most one poll tick.
- */
-const AWAITING_INBOUND_MAX_AGE_MS = 3_000;
-
-/**
- * Say "still waiting" — call once per poll iteration, not once per wait.
- *
- * @param questionId Stored as the value for the log trail only; freshness is
- *   read from the row's own `updatedAt`.
- */
-export function markAwaitingInbound(questionId: string): void {
-  setValue(AWAITING_INBOUND_KEY, questionId);
-}
-
-export function clearAwaitingInbound(): void {
-  deleteValue(AWAITING_INBOUND_KEY);
-}
-
-/** True while a tool is blocked waiting for an inbound message to claim. */
-export function isToolAwaitingInbound(): boolean {
-  return getFresh(AWAITING_INBOUND_KEY, AWAITING_INBOUND_MAX_AGE_MS) !== null;
 }
 
 /**
