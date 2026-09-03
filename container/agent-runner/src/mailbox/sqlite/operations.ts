@@ -113,6 +113,38 @@ export function sqliteFindQuestionResponse(questionId: string): MessageInRow | u
     inbound.close();
   }
 }
+/**
+ * Every unclaimed inbound message that could answer an escalated question, in
+ * arrival order. The caller picks — which message qualifies is the tool's rule,
+ * not the store's.
+ *
+ * Claiming is the point. This mirrors `sqliteFindQuestionResponse`: a row is a
+ * candidate only while it is `pending` AND absent from `processing_ack`, and
+ * the caller acks it by marking it completed. So the waiting tool and the poll
+ * loop compete for the same row through one ledger they both already use,
+ * rather than through a private slot that loses the message when its reader
+ * dies.
+ *
+ * @param sinceIso Ignore anything that arrived before the question was sent. A
+ *   message the orchestrator wrote before it could have seen the question is
+ *   not an answer to it — most often a second instruction queued during the
+ *   same turn.
+ */
+export function sqliteFindEscalatedAnswers(sinceIso: string): MessageInRow[] {
+  const inbound = openInboundDb();
+  try {
+    const rows = inbound
+      .prepare(
+        "SELECT * FROM messages_in WHERE status = 'pending' AND kind IN ('chat', 'chat-sdk') " +
+          'AND timestamp >= ? ORDER BY seq',
+      )
+      .all(sinceIso) as MessageInRow[];
+    const acked = getOutboundDb().prepare('SELECT 1 FROM processing_ack WHERE message_id = ?');
+    return rows.filter((row) => !acked.get(row.id));
+  } finally {
+    inbound.close();
+  }
+}
 
 export function sqliteFindCliResponse(requestId: string): MessageInRow | undefined {
   const inbound = openInboundDb();

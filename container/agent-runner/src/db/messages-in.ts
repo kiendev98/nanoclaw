@@ -107,6 +107,16 @@ export function findQuestionResponse(questionId: string): MessageInRow | undefin
   return message && messageRow(message);
 }
 
+/**
+ * Unclaimed messages that could answer an escalated question, in arrival order.
+ *
+ * @param sinceIso When the question was sent. Anything older cannot be a reply
+ *   to it.
+ */
+export function findEscalatedAnswers(sinceIso: string): MessageInRow[] {
+  return getAgentMailbox().operations.findEscalatedAnswers(sinceIso).map(messageRow);
+}
+
 export function findCliResponse(requestId: string): MessageInRow | undefined {
   const message = getAgentMailbox().operations.findCliResponse(requestId);
   return message && messageRow(message);

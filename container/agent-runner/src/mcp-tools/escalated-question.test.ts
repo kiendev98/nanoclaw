@@ -17,7 +17,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../mailbox/sqlite/connection.js';
-import { setQuestionAnswer, getOpenQuestion, setCurrentInReplyTo, clearCurrentInReplyTo } from '../db/session-state.js';
+import { isToolAwaitingInbound, setCurrentInReplyTo, clearCurrentInReplyTo } from '../db/session-state.js';
 import { askUserQuestion, renderEscalatedQuestion, sendCard } from './interactive.js';
 
 function outbound(): Array<{ id: string; kind: string; channel_type: string | null; content: Record<string, unknown> }> {
@@ -156,19 +156,40 @@ describe('the escalated question text', () => {
 });
 
 describe('waiting for the orchestrator', () => {
-  it('flags the open question so the poller knows to divert the reply', async () => {
+  /** A reply from the orchestrator, arriving while the tool is blocked. */
+  function reply(text: string, opts: { kind?: string; id?: string; seq?: number } = {}): void {
+    getInboundDb()
+      .prepare(
+        `INSERT OR REPLACE INTO messages_in (id, seq, kind, timestamp, status, content, channel_type, platform_id)
+         VALUES ($id, $seq, $kind, $timestamp, 'pending', $content, 'agent', 'ag-orchestrator')`,
+      )
+      .run({
+        $id: opts.id ?? 'a2a-reply',
+        $seq: opts.seq ?? 3,
+        $kind: opts.kind ?? 'chat',
+        $timestamp: new Date().toISOString(),
+        $content: JSON.stringify({ text }),
+      });
+  }
+
+  function ackStatus(id: string): string | undefined {
+    const row = getOutboundDb().prepare('SELECT status FROM processing_ack WHERE message_id = ?').get(id) as
+      | { status: string }
+      | undefined;
+    return row?.status;
+  }
+
+  it('holds the poll loop back while it waits', async () => {
     workerLane();
-    let observed: string | null = null;
 
     const pending = askUserQuestion.handler(ARGS);
-    // Read it while the tool is still blocked — that is the only window in
-    // which the poller ever looks.
+    // Read it while the tool is still blocked — the only window in which the
+    // poll loop ever looks.
     await new Promise((r) => setTimeout(r, 10));
-    observed = getOpenQuestion();
+    const heldDuring = isToolAwaitingInbound();
     await pending;
 
-    expect(observed).not.toBeNull();
-    expect(observed).toBe(outbound()[0].id);
+    expect(heldDuring).toBe(true);
   });
 
   it('returns the orchestrator answer as its own result', async () => {
@@ -176,33 +197,61 @@ describe('waiting for the orchestrator', () => {
 
     const pending = askUserQuestion.handler({ ...ARGS, timeout: 5 });
     await new Promise((r) => setTimeout(r, 10));
-    setQuestionAnswer(getOpenQuestion()!, 'Delete it');
+    reply('Delete it');
     const result = await pending;
 
     expect(result.isError).toBeUndefined();
     expect((result.content[0] as { text: string }).text).toBe('Delete it');
   });
 
-  it('does not take an answer meant for a different question', async () => {
+  it('claims the message it used, so the model never sees it twice', async () => {
+    // Claimed through `processing_ack` — the same ledger the poll loop reads,
+    // which is what stops both from taking the row.
     workerLane();
 
-    const pending = askUserQuestion.handler(ARGS);
+    const pending = askUserQuestion.handler({ ...ARGS, timeout: 5 });
     await new Promise((r) => setTimeout(r, 10));
-    setQuestionAnswer('some-other-question', 'Delete it');
-    const result = await pending;
+    reply('Delete it');
+    await pending;
 
-    expect(result.isError).toBe(true);
+    expect(ackStatus('a2a-reply')).toBe('completed');
   });
 
-  it('releases the lane on timeout, so the next message is not swallowed', async () => {
-    // Left flagged, the orchestrator's next ordinary message would be diverted
-    // into an answer slot nothing is reading — it would vanish instead of
-    // waking this worker.
+  it('ignores a message that predates the question', async () => {
+    // Written BEFORE the tool sent anything, so the orchestrator cannot have
+    // been answering. It stays pending and reaches the model afterwards.
+    workerLane();
+    reply('Unrelated instruction', { id: 'a2a-earlier' });
+    await new Promise((r) => setTimeout(r, 5));
+
+    const result = await askUserQuestion.handler(ARGS);
+
+    expect(result.isError).toBe(true);
+    expect(ackStatus('a2a-earlier')).toBeUndefined();
+  });
+
+  it('passes over a text-less message rather than claiming it', async () => {
+    // A file sent while the worker was blocked. Claiming it would answer the
+    // question with nothing AND destroy the file's own delivery.
+    workerLane();
+
+    const pending = askUserQuestion.handler({ ...ARGS, timeout: 5 });
+    await new Promise((r) => setTimeout(r, 10));
+    reply('', { id: 'a2a-file', seq: 3 });
+    reply('Delete it', { id: 'a2a-answer', seq: 5 });
+    const result = await pending;
+
+    expect((result.content[0] as { text: string }).text).toBe('Delete it');
+    expect(ackStatus('a2a-file')).toBeUndefined();
+  });
+
+  it('releases the poll loop on timeout', async () => {
+    // Left flagged, the loop would keep withholding messages from the model.
     workerLane();
 
     await askUserQuestion.handler(ARGS);
 
-    expect(getOpenQuestion()).toBeNull();
+    expect(isToolAwaitingInbound()).toBe(false);
   });
 
   it('tells the caller the failure is not worth repeating', async () => {

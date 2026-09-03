@@ -38,9 +38,9 @@
  * heartbeat is 30 minutes stale.
  */
 import { writeMessageOut } from '../db/messages-out.js';
-import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
+import { findQuestionResponse, findEscalatedAnswers, markCompleted } from '../db/messages-in.js';
 import { getSessionRouting } from '../db/session-routing.js';
-import { setOpenQuestion, clearOpenQuestion, takeQuestionAnswer, getCurrentInReplyTo } from '../db/session-state.js';
+import { markAwaitingInbound, clearAwaitingInbound, getCurrentInReplyTo } from '../db/session-state.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -169,16 +169,44 @@ async function askHuman(
   return err(`Question timed out after ${timeout / 1000}s`);
 }
 
+/** The text an inbound message carries, or '' when it carries none. */
+function messageText(row: { content: string }): string {
+  let text: unknown;
+  try {
+    text = (JSON.parse(row.content) as { text?: unknown }).text;
+  } catch {
+    text = row.content;
+  }
+  return typeof text === 'string' ? text.trim() : '';
+}
+
 /**
  * The agent-lane path: hand the question to the orchestrator and wait.
  *
- * SEND BEFORE FLAGGING, deliberately. If the flag were written first and the
- * send then failed, this session would sit waiting for an answer to a question
- * nobody received, and the poller would swallow the orchestrator's next
- * unrelated message to feed it — a silent stall. The other order costs at most
- * a duplicate: the question arrives, the flag is missing, the poller pushes
- * the reply at the model as an ordinary message and this call times out. Noisy
- * beats silent.
+ * THIS TOOL CLAIMS ITS OWN ANSWER. The poll loop is told one abstract fact —
+ * some tool is waiting — and holds its push for that tick. Finding the
+ * message, deciding it qualifies, and acking it all happen here. That is the
+ * same shape as `askHuman` above, which needs no poll-loop cooperation at all
+ * because a `question_response` is a `system` row the loop already skips by
+ * kind. An escalated answer is an ordinary `chat` row with no mark on it, so
+ * the claim is what distinguishes it — through `processing_ack`, the one
+ * ledger both sides already write.
+ *
+ * That is not a stylistic preference. An earlier revision had the poll loop
+ * write the answer into a second state key for this tool to collect, and that
+ * key was a mailbox with no proof its reader existed: a container SIGKILLed
+ * mid-wait left the flag set, and the next ordinary message was then consumed
+ * and acked into a slot nobody was polling. Destroyed, with no trace. Nothing
+ * can be lost that way now — if this tool is gone, nobody claims the row and
+ * the poll loop delivers it normally.
+ *
+ * FLAG BEFORE SEND, which is the opposite of what this used to do. The old
+ * order existed because a flag left behind by a failed send would swallow the
+ * orchestrator's next unrelated message for the key's full thirty-minute life
+ * — a silent stall. The flag is refreshed every iteration now and expires in
+ * seconds, so a failed send costs one poll tick, and flagging first closes the
+ * window where the poller could push the answer at a model that is blocked
+ * inside this call and cannot act on it.
  */
 async function askOrchestrator(
   questionId: string,
@@ -188,48 +216,63 @@ async function askOrchestrator(
   r: Routing,
   timeout: number,
 ): Promise<ToolResult> {
-  await writeMessageOut({
-    id: questionId,
-    // Address the orchestrator SESSION that briefed this worker, not whichever
-    // of its sessions spoke to the group most recently. `resolveTargetSession`
-    // falls back to peer affinity without this, and destinations are
-    // group-scoped — so a scheduled task or a second thread that messaged this
-    // worker since the brief would take the question instead. That wrong
-    // session may itself hold a thread binding, which would then surface the
-    // question inside an unrelated human thread.
-    in_reply_to: getCurrentInReplyTo(),
-    // `chat`, not `chat-sdk`: on this lane it IS prose. Claiming a card no
-    // renderer here can honour is what made the old failure invisible.
-    kind: 'chat',
-    platform_id: r.platform_id,
-    channel_type: r.channel_type,
-    thread_id: r.thread_id,
-    content: JSON.stringify({ text: renderEscalatedQuestion(title, question, options) }),
-  });
-  setOpenQuestion(questionId);
+  // Captured BEFORE the send. An answer is necessarily later than the question
+  // it answers, so anything already waiting is a second instruction the
+  // orchestrator queued during this turn — not a reply to something it had not
+  // yet seen.
+  const askedAt = new Date().toISOString();
+  markAwaitingInbound(questionId);
 
-  log(`ask_user_question (escalated): ${questionId} → "${question}" [${options.map((o) => o.value).join(', ')}]`);
+  try {
+    await writeMessageOut({
+      id: questionId,
+      // Address the orchestrator SESSION that briefed this worker, not whichever
+      // of its sessions spoke to the group most recently. `resolveTargetSession`
+      // falls back to peer affinity without this, and destinations are
+      // group-scoped — so a scheduled task or a second thread that messaged this
+      // worker since the brief would take the question instead. That wrong
+      // session may itself hold a thread binding, which would then surface the
+      // question inside an unrelated human thread.
+      in_reply_to: getCurrentInReplyTo(),
+      // `chat`, not `chat-sdk`: on this lane it IS prose. Claiming a card no
+      // renderer here can honour is what made the old failure invisible.
+      kind: 'chat',
+      platform_id: r.platform_id,
+      channel_type: r.channel_type,
+      thread_id: r.thread_id,
+      content: JSON.stringify({ text: renderEscalatedQuestion(title, question, options) }),
+    });
 
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const answer = takeQuestionAnswer(questionId);
-    if (answer !== undefined) {
-      log(`ask_user_question answered by orchestrator: ${questionId} → ${answer}`);
-      return ok(answer);
+    log(`ask_user_question (escalated): ${questionId} → "${question}" [${options.map((o) => o.value).join(', ')}]`);
+
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      // The first message carrying text wins. A text-less row — a file the
+      // orchestrator sent while this was blocked — is skipped rather than
+      // claimed, so it stays pending and reaches the model after this returns.
+      const answer = findEscalatedAnswers(askedAt).find((m) => messageText(m) !== '');
+      if (answer) {
+        const text = messageText(answer);
+        markCompleted([answer.id]);
+        log(`ask_user_question answered by orchestrator: ${questionId} → ${text}`);
+        return ok(text);
+      }
+      markAwaitingInbound(questionId);
+      await sleep(POLL_INTERVAL_MS);
     }
-    await sleep(POLL_INTERVAL_MS);
-  }
 
-  // Give the lane back before reporting the timeout. Left set, the flag would
-  // divert the orchestrator's next ordinary message into an answer slot no
-  // one is reading — the message would vanish rather than wake this worker.
-  clearOpenQuestion();
-  log(`ask_user_question (escalated) timeout: ${questionId}`);
-  return err(
-    `Your orchestrator did not answer within ${timeout / 1000}s. Do not ask again — a second question would ` +
-      `wait behind the same silence. Either continue with the safest reading and say plainly which one you took, ` +
-      `or report what you are blocked on and end your turn. A late answer will reach you as a new message.`,
-  );
+    log(`ask_user_question (escalated) timeout: ${questionId}`);
+    return err(
+      `Your orchestrator did not answer within ${timeout / 1000}s. Do not ask again — a second question would ` +
+        `wait behind the same silence. Either continue with the safest reading and say plainly which one you took, ` +
+        `or report what you are blocked on and end your turn. A late answer will reach you as a new message.`,
+    );
+  } finally {
+    // Give the lane back on EVERY exit, including a throwing send. Left set it
+    // would withhold the poll loop's next push, though only for the seconds it
+    // takes the flag to expire.
+    clearAwaitingInbound();
+  }
 }
 
 export const askUserQuestion: McpToolDefinition = {

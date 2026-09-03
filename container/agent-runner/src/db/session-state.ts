@@ -94,6 +94,26 @@ export function setContinuation(providerName: string, id: string): void {
 export function clearContinuation(providerName: string): void {
   deleteValue(continuationKey(providerName));
 }
+/**
+ * Read a key, treating anything older than `maxAgeMs` as absent.
+ *
+ * Every key here is written by one process and read by another, and none of
+ * them survives the container that wrote it. A SIGKILL leaves whatever was set
+ * behind, so each reader needs an age bound — this is that bound, once,
+ * instead of once per key.
+ *
+ * @param maxAgeMs How recently the key must have been written to count.
+ * @returns The stored value, or null when the key is missing, unparseable, or
+ *   too old.
+ */
+function getFresh(key: string, maxAgeMs: number): string | null {
+  const row = getAgentMailbox().operations.getState(key);
+  if (!row) return null;
+  const age = Date.now() - new Date(row.updatedAt).getTime();
+  if (!Number.isFinite(age) || age > maxAgeMs) return null;
+  return row.value;
+}
+
 
 /**
  * The a2a reply stamp: the id of the first inbound message in the batch the
@@ -128,93 +148,57 @@ export function clearCurrentInReplyTo(): void {
 }
 
 export function getCurrentInReplyTo(): string | null {
-  const row = getAgentMailbox().operations.getState(IN_REPLY_TO_KEY);
-  if (!row) return null;
-  const age = Date.now() - new Date(row.updatedAt).getTime();
-  if (!Number.isFinite(age) || age > IN_REPLY_TO_MAX_AGE_MS) return null;
-  return row.value;
+  return getFresh(IN_REPLY_TO_KEY, IN_REPLY_TO_MAX_AGE_MS);
 }
+
 
 /**
- * The escalated question this session is blocked on, and the answer to it.
+ * Whether an MCP tool is currently blocked waiting for an inbound message.
  *
- * These two keys are how a WAITING MCP TOOL and the POLL LOOP find each other.
- * They cannot share a variable: the MCP server is a separate stdio subprocess,
- * which is the same reason `current_in_reply_to` lives here rather than in
- * module state.
+ * ONE ABSTRACT FACT, deliberately. The poll loop needs to know only "do not
+ * push this tick"; it does not need the question id, the answer envelope, or
+ * the rule for which message counts. That knowledge belongs to the tool, and
+ * an earlier revision that put it in the poll loop had to store the answer in
+ * a second key for the tool to collect.
  *
- * The handshake, in order:
+ * That second key was a mailbox with no proof its reader still existed. A
+ * container SIGKILLed mid-wait left the flag set for its full lifetime, and
+ * the poll loop would then consume and ACK the next ordinary message into a
+ * slot nobody was polling — a message destroyed with no trace. There is no
+ * such slot now: the tool claims its own answer through `processing_ack`, so
+ * if the tool is gone nobody claims the row and it is delivered normally.
  *
- *   1. `ask_user_question` on the agent lane sends the question to the
- *      orchestrator and sets `open_question` to its id, then polls
- *      `takeQuestionAnswer`.
- *   2. The poll loop's follow-up poller sees `open_question` set and a new
- *      inbound message. It writes the message's text as the answer and clears
- *      `open_question` — and does NOT push the message into the live query.
- *   3. The tool takes the answer and returns it as its own result.
- *
- * STEP 2's "does not push" is the whole point. The poller's ordinary job is to
- * feed inbound messages to the model mid-turn; do that here and the model is
- * handed an answer while it is still blocked inside the tool that asked for
- * it, and the tool then times out having never seen it. Same message, two
- * doors, and only one of them reaches a model that can act on it.
+ * WHAT MAKES THE FLAG SAFE IS THAT IT IS SHORT-LIVED. The waiting tool
+ * refreshes it on every poll iteration, so "fresh" means a tool was alive
+ * within the last few seconds — not merely that one started waiting at some
+ * point in the last half hour. A dead waiter's flag expires in seconds.
  */
-const OPEN_QUESTION_KEY = 'open_question';
-const QUESTION_ANSWER_KEY = 'question_answer';
+const AWAITING_INBOUND_KEY = 'awaiting_inbound';
 
 /**
- * Ignore a question older than this — the same shape of guard as
- * `IN_REPLY_TO_MAX_AGE_MS`, and needed for the same reason: a container
- * SIGKILLed while a tool was waiting leaves the key behind, and a stale
- * `open_question` would silently swallow the next ordinary message the
- * orchestrator sends. Comfortably longer than any tool's own bound, so it
- * never expires a question that is still being waited on.
+ * How stale the flag may be before the poll loop ignores it.
+ *
+ * Comfortably more than the 1s refresh interval, so an ordinary scheduling
+ * delay never looks like a dead waiter, and small enough that a killed
+ * container withholds at most one poll tick.
  */
-const OPEN_QUESTION_MAX_AGE_MS = 30 * 60 * 1000;
-
-export function setOpenQuestion(questionId: string): void {
-  setValue(OPEN_QUESTION_KEY, questionId);
-}
-
-export function clearOpenQuestion(): void {
-  deleteValue(OPEN_QUESTION_KEY);
-}
-
-/** The id of the question this session is blocked on, if any is still live. */
-export function getOpenQuestion(): string | null {
-  const row = getAgentMailbox().operations.getState(OPEN_QUESTION_KEY);
-  if (!row) return null;
-  const age = Date.now() - new Date(row.updatedAt).getTime();
-  if (!Number.isFinite(age) || age > OPEN_QUESTION_MAX_AGE_MS) return null;
-  return row.value;
-}
-
-/** Hand an answer to the tool waiting on `questionId`, and close the question. */
-export function setQuestionAnswer(questionId: string, answer: string): void {
-  setValue(QUESTION_ANSWER_KEY, JSON.stringify({ questionId, answer }));
-  deleteValue(OPEN_QUESTION_KEY);
-}
+const AWAITING_INBOUND_MAX_AGE_MS = 3_000;
 
 /**
- * Take the answer to `questionId`, if it has arrived. Consuming: a second call
- * returns undefined, so a late poll cannot re-deliver an answer the tool has
- * already returned.
+ * Say "still waiting" — call once per poll iteration, not once per wait.
  *
- * An answer for a DIFFERENT question is left in place rather than dropped —
- * it belongs to whoever asked that one.
+ * @param questionId Stored as the value for the log trail only; freshness is
+ *   read from the row's own `updatedAt`.
  */
-export function takeQuestionAnswer(questionId: string): string | undefined {
-  const raw = getValue(QUESTION_ANSWER_KEY);
-  if (!raw) return undefined;
-  let parsed: { questionId?: string; answer?: string };
-  try {
-    parsed = JSON.parse(raw) as { questionId?: string; answer?: string };
-  } catch {
-    // Unparseable is unusable; drop it so it cannot block every later answer.
-    deleteValue(QUESTION_ANSWER_KEY);
-    return undefined;
-  }
-  if (parsed.questionId !== questionId) return undefined;
-  deleteValue(QUESTION_ANSWER_KEY);
-  return parsed.answer ?? '';
+export function markAwaitingInbound(questionId: string): void {
+  setValue(AWAITING_INBOUND_KEY, questionId);
+}
+
+export function clearAwaitingInbound(): void {
+  deleteValue(AWAITING_INBOUND_KEY);
+}
+
+/** True while a tool is blocked waiting for an inbound message to claim. */
+export function isToolAwaitingInbound(): boolean {
+  return getFresh(AWAITING_INBOUND_KEY, AWAITING_INBOUND_MAX_AGE_MS) !== null;
 }

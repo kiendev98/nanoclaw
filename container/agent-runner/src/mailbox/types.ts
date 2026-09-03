@@ -48,6 +48,7 @@ export interface MailboxOperations {
   markScriptSkipped(skips: Array<{ id: string; reason: string }>): void;
   getMessageIn(id: string): InboundMessage | undefined;
   findQuestionResponse(questionId: string): InboundMessage | undefined;
+  findEscalatedAnswers(sinceIso: string): InboundMessage[];
   findCliResponse(requestId: string): InboundMessage | undefined;
   writeMessageOut(message: OutboundMessageDraft): Promise<number>;
   getMessageIdBySeq(sequence: number): string | null;

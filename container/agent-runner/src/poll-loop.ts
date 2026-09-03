@@ -15,11 +15,10 @@ import { renderFooter } from './message-footer.js';
 import {
   clearContinuation,
   clearCurrentInReplyTo,
-  getOpenQuestion,
+  isToolAwaitingInbound,
   migrateLegacyContinuation,
   setContinuation,
   setCurrentInReplyTo,
-  setQuestionAnswer,
 } from './db/session-state.js';
 import {
   formatMessages,
@@ -498,19 +497,21 @@ export async function processQuery(
         // Accumulated context must not engage a warm query by itself.
         if (!newMessages.some((m) => m.trigger === 1)) return;
 
-        // A blocked `ask_user_question` owns the next message. Diverting it is
-        // the whole reason that tool can escalate at all: pushing it here
-        // instead would hand the model an answer while it is still waiting
-        // inside the tool that asked for it, and the tool would then time out
-        // having never seen it. Same message, two doors, and only one of them
-        // reaches a model that can act on it.
+        // A blocked tool owns the next message, so hold the push for this
+        // tick. That is the whole of what this loop knows about the escalated
+        // question: which message qualifies, and the claim itself, belong to
+        // the tool — see `askOrchestrator` in mcp-tools/interactive.ts.
         //
-        // "Consumed as the answer" is the intended reading of ANY message that
-        // arrives while a question is open — the asker is blocked, so nothing
-        // else can be acted on until it is unblocked. The full text is handed
-        // over, so a model that receives something which is plainly not an
-        // answer can see that for itself.
-        if (divertAnswerToWaitingTool(newMessages)) return;
+        // Pushing here instead would hand the model an answer while it is
+        // still waiting inside the tool that asked for it, and the tool would
+        // then time out having never seen it. Same message, two doors, and
+        // only one of them reaches a model that can act on it.
+        //
+        // Nothing is consumed by holding. The rows stay pending; the tool
+        // claims at most one, and the next tick pushes whatever is left. If
+        // the waiting tool dies, its flag expires within seconds and this
+        // resumes on its own.
+        if (isToolAwaitingInbound()) return;
 
         const newIds = newMessages.map((m) => m.id);
         markProcessing(newIds);
@@ -798,41 +799,6 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  * reach its own orchestrator and nothing else, and only the session routing
  * carries that guarantee.
  */
-/**
- * Hand the oldest pending message to an `ask_user_question` that is blocked
- * waiting for it, instead of pushing it into the live query.
- *
- * Returns true when it took one, which tells the caller to stop — the rest of
- * the batch stays pending and is picked up on the next tick, by which time the
- * question is closed and they flow to the model normally.
- *
- * Only ONE message is taken. A question has one answer, and the orchestrator's
- * later messages are ordinary follow-ups that belong to the model.
- *
- * Marked completed rather than left pending: the model will never see this row
- * as a message, so leaving it would replay it into the next batch as a bare
- * "Delete it" with no question in front of it.
- */
-export function divertAnswerToWaitingTool(pending: MessageInRow[]): boolean {
-  const questionId = getOpenQuestion();
-  if (!questionId) return false;
-
-  const answer = pending.find((m) => m.kind === 'chat' || m.kind === 'chat-sdk');
-  if (!answer) return false;
-
-  let text = '';
-  try {
-    text = (JSON.parse(answer.content) as { text?: unknown }).text as string;
-  } catch {
-    text = answer.content;
-  }
-  if (typeof text !== 'string' || text.trim() === '') return false;
-
-  setQuestionAnswer(questionId, text.trim());
-  markCompleted([answer.id]);
-  log(`Answered the waiting question ${questionId} with message ${answer.id}`);
-  return true;
-}
 
 function agentLaneRouting(): { channelType: string; platformId: string } | null {
   let routing;
