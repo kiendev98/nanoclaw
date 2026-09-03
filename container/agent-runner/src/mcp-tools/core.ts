@@ -173,9 +173,28 @@ function resolveRouting(
       // would thread every future run into the thread its first run opened —
       // the daily digest filed under day one.
       //
-      // A worker is on the agent lane and is short-lived, so its binding
-      // means "the conversation I started here" for its whole life. The
-      // inbound fallback stays scoped to the wider set, unchanged.
+      // KNOWN LIMIT, and do not read this as a guarantee it does not give.
+      // An earlier draft justified the scoping with "a worker is short-lived".
+      // That is FALSE: the per-task continuation wipe was deliberately deleted
+      // (poll-loop.ts), so a worker resumes across tasks, and `spawn_worker`
+      // reuses one worker per (origin session, repo).
+      //
+      // So a second task given to the SAME worker for the SAME repo posts into
+      // the first task's thread, because the binding is first-wins and nothing
+      // clears it. Reachable from any orchestrator session that is long-lived
+      // — a DM or the CLI channel, where `session_mode` stays `shared`. It is
+      // NOT reachable on a threaded group channel like `#ai-anya`, where
+      // router.ts forces `per-thread` regardless of the wiring's column, so
+      // each PR thread is its own origin session and gets its own worker.
+      //
+      // This is not a regression: without the binding the fallback picks the
+      // newest inbound, which after the first task has replies is that same
+      // wrong thread. The binding makes the existing wrong answer
+      // deterministic rather than introducing it. A real fix needs the binding
+      // to have a LIFETIME — cleared when a worker starts a new task — which
+      // is a design change, not a scoping tweak.
+      //
+      // The inbound fallback stays scoped to the wider set, unchanged.
       const boundThread = isAgentLane(session) ? dest.threadId : null;
       threadId = boundThread ?? latestInboundThread(dest.channelType!, dest.platformId!);
     }

@@ -1051,3 +1051,27 @@ sent by a worker that has crashed.
   mid-turn-acknowledgment advice in `destinations.ts` — sound for a human
   audience — reached a session whose correspondent is an agent. Anything added
   there needs the lane branch, or it is advice to two audiences at once.
+
+## Known limit: a reused worker keeps its first task's thread
+
+`spawn_worker` reuses one worker per `(origin session, repo)`, and PR #19
+deleted the per-task continuation wipe so a worker **resumes across tasks**. A
+worker is therefore not short-lived, and any reasoning that assumes it is —
+including an earlier draft of §3.7's own justification — is wrong.
+
+The binding is first-wins and nothing clears it. So a second task given to the
+same worker for the same repo posts into the **first task's thread**.
+
+| Where the orchestrator lives | Reachable? |
+|---|---|
+| A threaded group channel (`#ai-anya`) | **No.** `router.ts` forces `per-thread` when the thread policy is on in a group, whatever the wiring's `session_mode` column says — so each thread is its own origin session and gets its own worker |
+| A DM, or the CLI channel | **Yes.** `is_group = 0` short-circuits that override, `session_mode` stays `shared`, and one session lasts forever |
+
+**It is not a regression.** Without the binding the fallback takes the newest
+inbound on that channel, which after the first task has replies is the same
+wrong thread. The binding makes an existing wrong answer deterministic rather
+than introducing it.
+
+**The real fix is a lifetime, not a scope.** The binding has to be cleared when
+a worker starts a new task — a new write path against a first-wins invariant,
+which is a design change rather than a tweak to the predicate.
