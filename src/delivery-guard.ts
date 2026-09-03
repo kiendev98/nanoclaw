@@ -23,9 +23,9 @@ export interface DeliveryGuardSpec {
   precheck?: (content: Record<string, unknown>, session: Session) => boolean | Promise<boolean>;
   /**
    * Create the hold (the domain's requestApproval call — card text lives with
-   * the domain). Omit for an action whose decide fn never returns hold —
-   * runGuarded logs and denies if a hold somehow reaches it anyway, rather
-   * than silently dropping the request.
+   * the domain). Omit for an action whose decide fn never returns hold
+   * (e.g. workers.spawn) — runGuarded logs and denies if a hold somehow
+   * reaches it anyway, rather than silently dropping the request.
    */
   requestHold?: (content: Record<string, unknown>, session: Session) => Promise<void>;
   /** Tell the requester about a deny. */

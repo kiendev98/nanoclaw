@@ -23,7 +23,6 @@ import './approvals/index.js';
 import './interactive/index.js';
 import './permissions/index.js';
 import './agent-to-agent/index.js';
-import './scheduling/index.js';
 import './self-mod/index.js';
 import './slack-room-membership/index.js';
 import './canvas-actions/index.js';

@@ -5,19 +5,20 @@
  *
  * Uses synthetic fixture tools for the merge/passthrough semantics (module
  * state is process-wide, so each fixture gets a unique name), plus one
- * end-to-end fixture extension of the real `run_task` tool proving the
+ * end-to-end fixture extension of the real `spawn_worker` tool proving the
  * mechanism covers the motivating case: an installed module adding params
  * that must land in the payload the host reads from outbound.db.
  *
- * `run_task` never blocks — it writes its outbound row and returns — so these
- * cases simply read the row it wrote. What the payload carries is the whole
- * point.
+ * `spawn_worker` blocks on the host's answer, which never comes here, so
+ * these cases pin the wait to a millisecond and read the row it wrote before
+ * degrading. What the payload carries is the whole point; how long it waited
+ * is another file's subject.
  */
 import { describe, it, expect, afterAll, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages, writeMessageOut } from '../db/messages-out.js';
-import { runTask } from './scheduling.js';
+import { spawnWorker, workerWaitBound } from './workers.js';
 import { extendTool, registerTools, resetToolExtensions } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -25,8 +26,8 @@ let fixtureCount = 0;
 
 /**
  * Register a fresh fixture tool that writes one system-action payload the
- * way real system tools do (run_task, self-mod): base args only — anything
- * an extension adds is invisible to the handler.
+ * way real system tools do (spawn_worker, scheduling, self-mod): base args
+ * only — anything an extension adds is invisible to the handler.
  */
 function fixtureTool(): McpToolDefinition {
   const n = ++fixtureCount;
@@ -205,12 +206,14 @@ describe('extendTool — passthrough keys land in the written payload', () => {
   });
 });
 
-describe('extendTool — fixture extension of run_task (end to end)', () => {
+describe('extendTool — fixture extension of spawn_worker (end to end)', () => {
   beforeEach(() => {
     initTestSessionDb();
+    workerWaitBound.ms = 1;
   });
 
   afterEach(() => {
+    workerWaitBound.ms = 60_000;
     closeSessionDb();
   });
 
@@ -219,36 +222,37 @@ describe('extendTool — fixture extension of run_task (end to end)', () => {
   // state is process-wide. Without this, that same process-wide state follows
   // the run into other files and throws a collision there.
   afterAll(() => {
-    resetToolExtensions('run_task');
+    resetToolExtensions('spawn_worker');
   });
 
-  it('extends the real run_task schema/description and passes params into its payload', async () => {
+  it('extends the real spawn_worker schema/description and passes params into its payload', async () => {
     // What an installed feature module would run at import time instead of
-    // editing scheduling.ts.
-    extendTool('run_task', {
+    // editing workers.ts.
+    extendTool('spawn_worker', {
       properties: {
-        purpose: { type: 'string', description: 'One short public line saying what this run is for.' },
+        purpose: { type: 'string', description: 'One short public line saying what this worker is for.' },
       },
       passthroughKeys: ['purpose'],
       descriptionSuffix: 'The purpose line is shown publicly.',
     });
 
-    const props = schemaProps(runTask);
-    expect(Object.keys(props).sort()).toEqual(['instruction', 'notify', 'purpose', 'repo']);
-    expect(runTask.tool.description?.endsWith('The purpose line is shown publicly.')).toBe(true);
+    const props = schemaProps(spawnWorker);
+    expect(Object.keys(props).sort()).toEqual(['name', 'purpose', 'repo', 'task']);
+    expect(spawnWorker.tool.description?.endsWith('The purpose line is shown publicly.')).toBe(true);
 
-    await runTask.handler({ repo: 'saber', instruction: 'Do the thing', purpose: 'Deep research' });
+    await spawnWorker.handler({ repo: 'saber', task: 'audit the gates', purpose: 'Deep research' });
 
     const payload = lastPayload();
-    expect(payload.action).toBe('run_task');
+    expect(payload.action).toBe('spawn_worker');
     expect(payload.repo).toBe('saber');
+    expect(payload.task).toBe('audit the gates');
     expect(payload.purpose).toBe('Deep research');
   });
 
   it('omits extension keys from the payload when the caller does not pass them', async () => {
-    // run_task is already extended by the previous test (module state is
+    // spawn_worker is already extended by the previous test (module state is
     // process-wide); a call without the param must stay byte-identical to base.
-    await runTask.handler({ repo: 'saber', instruction: 'Do the thing' });
+    await spawnWorker.handler({ repo: 'saber', task: 'audit the gates' });
 
     const payload = lastPayload();
     expect(payload.repo).toBe('saber');

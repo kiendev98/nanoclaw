@@ -27,14 +27,16 @@ export interface AgentGroup {
   /**
    * The session this group was created FOR — set only on a repo-scoped worker.
    *
-   * Unread now: the delivery action that created workers and consulted this
-   * column is gone, and migration 027 deleted every group it had set. The
-   * column stays because dropping it would falsify migration 026 — a
-   * released migration's identity is permanent.
+   * `workspace_path` says which repository a worker stands in;
+   * this says whose work it is doing. Together they are the REUSE key:
+   * `workspace_path` is derived from (repo, origin session), so
+   * `(origin_session_id, workspace_path)` IS the (repo, thread) pair. A second
+   * `spawn_worker` in the same thread finds the first worker instead
+   * of minting a rival on a branch that cannot see its work.
    *
-   * NULL / absent means "not a worker", which is every group now. Optional for
-   * the same reason `workspace_path` is: absence and NULL mean the same thing,
-   * and `createAgentGroup` normalizes it to NULL.
+   * NULL / absent means "not a worker", which is every group that predates the
+   * column. Optional for the same reason `workspace_path` is: absence and NULL
+   * mean the same thing, and `createAgentGroup` normalizes it to NULL.
    */
   origin_session_id?: string | null;
 }
@@ -191,38 +193,6 @@ export interface Session {
   container_status: 'running' | 'idle' | 'stopped';
   last_active: string | null;
   created_at: string;
-  /**
-   * Host directory this session's agent runs in, or null for the group folder.
-   *
-   * Set only by a task that named a repository. It is a stored value rather
-   * than a derived one because `composeSessionSpec` turns THIS column into the
-   * spawn's cwd — re-deriving at spawn time would create the right directory
-   * and still start in the old one whenever the derivation changed.
-   */
-  workspace_path?: string | null;
-  /** Messaging group of the Slack thread this session owns, if it opened one. */
-  bound_messaging_group_id?: string | null;
-  /**
-   * Root message id of that thread, exactly as the adapter returned it.
-   *
-   * THESE THREE ARE OPTIONAL, AND A ROW NEVER OMITS THEM. Every read is
-   * `SELECT *`, so the database always supplies all three as null. They are
-   * declared optional purely so the many `Session` literals that predate them
-   * — most of them upstream test fixtures — do not each have to carry three
-   * explicit nulls, which is fork divergence bought for nothing. Treat
-   * `undefined` and `null` identically; no consumer distinguishes them.
-   */
-  bound_root_message_id?: string | null;
-  /**
-   * Who is waiting for this task session's next run to finish, as a JSON
-   * `PendingRunRequest`, or null when nobody is.
-   *
-   * It lives on the session rather than on the occurrence because the host
-   * learns a run has finished from its `task_log` row, which names the series
-   * and not the occurrence that produced it. One waiter per series at a time,
-   * which is what a queue of runs means anyway.
-   */
-  pending_run_request?: string | null;
 }
 
 // ── Session DB entities ──

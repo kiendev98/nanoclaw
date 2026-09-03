@@ -1,11 +1,12 @@
 /**
- * `ncl worktrees` — the manual lifecycle for task-scoped workspace worktrees.
+ * `ncl worktrees` — the manual lifecycle for repo-scoped worker worktrees.
  *
- * `ncl tasks create --repo` gets a git worktree under `WORKTREES_DIR`, and
- * nothing has ever deleted one automatically. An earlier reaper was removed
- * on purpose (282b8f6d): a directory delete on a timer is a daemon that can
- * delete a day of work. This resource is that decision's other half — the
- * human-run replacement, and the ONLY thing in NanoClaw that removes a
+ * A worker created by `spawn_worker` gets a git worktree under
+ * `WORKTREES_DIR`, and nothing has ever deleted one automatically. An earlier
+ * reaper was removed on purpose (282b8f6d): a worker's agent group row is the
+ * record that it existed, and a daemon that deletes directories is a daemon
+ * that can delete a day of work. This resource is that decision's other half —
+ * the human-run replacement, and the ONLY thing in NanoClaw that removes a
  * worktree.
  *
  * Two rules make it safe to type without reading the source first:
@@ -39,15 +40,7 @@ interface WorktreeReport {
   clean: boolean;
   /** Why it is clean or dirty, in words an operator can act on. */
   reason: string;
-  /**
-   * Name of the agent group that owns it, or null when none does.
-   *
-   * Keyed on `agent_groups.workspace_path`, which is unread now that the
-   * delivery action that wrote it is gone (see migration 027's header) — so
-   * a worktree made by `ncl tasks create --repo` always reports no owner
-   * here. It stays because dropping the join is a bigger change than this
-   * resource's own cleanup, not because the join still finds anything.
-   */
+  /** Name of the worker agent group that owns it, or null when none does. */
   owner: string | null;
   /** Agent group id of the owner, or null. */
   owner_id: string | null;
@@ -65,7 +58,7 @@ function forceCommand(worktree: string): string {
 }
 
 /**
- * Every worktree on disk, joined to the agent group that owns it, if any.
+ * Every worktree on disk, joined to the worker group that owns it.
  *
  * Driven by the DIRECTORY, not by `agent_groups`: `ncl groups delete` leaves
  * the worktree behind, so a table-driven listing would never mention an
@@ -97,9 +90,7 @@ function formatList(rows: WorktreeReport[]): string {
   for (const row of rows) {
     lines.push(`${row.clean ? 'clean' : 'DIRTY'}  ${row.path}`);
     lines.push(`       repo: ${row.repo}   branch: ${row.branch}`);
-    lines.push(
-      `       owner: ${row.owner ? `${row.owner} (${row.owner_id})` : 'none — no owning agent group row (a task session may still be using it)'}`,
-    );
+    lines.push(`       owner: ${row.owner ? `${row.owner} (${row.owner_id})` : 'none — the agent group is gone'}`);
     lines.push(`       ${row.reason}`);
     if (!row.clean) lines.push(`       keep it, or remove it yourself: ${forceCommand(row.path)}`);
     lines.push('');
@@ -181,8 +172,8 @@ registerResource({
   // required by ResourceDef and names where the truth lives.
   table: '(filesystem)',
   description:
-    `Git worktree of a task-scoped workspace, under ${WORKTREES_DIR}. Created by ` +
-    '`ncl tasks create --repo` and removed only here, by hand — nothing deletes one automatically. ' +
+    `Git worktree of a repo-scoped worker, under ${WORKTREES_DIR}. Created by ` +
+    '`spawn_worker` and removed only here, by hand — nothing deletes one automatically. ' +
     'OPERATOR-ONLY: not runnable from inside a container.',
   idColumn: 'path',
   columns: [
@@ -191,11 +182,7 @@ registerResource({
     { name: 'branch', type: 'string', description: 'Branch it has checked out.' },
     { name: 'clean', type: 'boolean', description: 'True when removing it would destroy nothing.' },
     { name: 'reason', type: 'string', description: 'Why it is clean or dirty.' },
-    {
-      name: 'owner',
-      type: 'string',
-      description: 'Worker agent group that owns it, or null when there is no owning agent group row.',
-    },
+    { name: 'owner', type: 'string', description: 'Worker agent group that owns it, or null when the group is gone.' },
     { name: 'owner_id', type: 'string', description: 'Agent group id of the owner, or null.' },
   ],
   operations: {},
@@ -206,10 +193,8 @@ registerResource({
       description:
         'List every worker worktree on disk: path, repository, branch, the worker agent group that owns it, ' +
         'and whether removing it would destroy work.\n\n' +
-        'A worktree with no owner has no owning agent group row — either none ever existed (every worktree ' +
-        '`ncl tasks create --repo` makes) or one did and was deleted — and a task session may still be using ' +
-        'it. It is judged by exactly the same cleanliness rules either way, because having no owner does not ' +
-        'make its commits disposable. ' +
+        'A worktree with no owner is an orphan — its agent group was deleted — and it is judged by exactly the ' +
+        'same cleanliness rules, because losing its owner does not make its commits disposable. ' +
         'A DIRTY entry names what it holds (uncommitted changes, untracked files, or commits that exist ' +
         'nowhere else) and prints the git command to remove it anyway.',
       args: [],

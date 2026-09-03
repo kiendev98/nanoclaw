@@ -13,7 +13,7 @@
  *
  * This module USED to extend a base `create_agent` MCP tool with the flow's
  * `purpose` / `allow_guests` / `room` params. That tool is gone: an agent
- * inside a container has no tool that mints a new agent group at all, and
+ * inside a container now creates only repo workers (`spawn_worker`), and
  * `extendTool` throws on a tool that is not registered. The host-side
  * `create_agent` delivery action survives untouched — it is what
  * `slack-agent-flow` registers over and what the CLI and setup paths drive —
@@ -43,7 +43,7 @@ export const createRoom: McpToolDefinition = {
   tool: {
     name: 'create_room',
     description:
-      'Open ONE shared Slack room (group conversation) with the user and several agents at once — the team primitive. Name ALL of them in one room, never one room per agent. May require admin approval. Fire-and-forget: the call returns immediately; you will get a system note when the room is live, telling you how to post the intro there.',
+      "Open ONE shared Slack room (group conversation) with the user and several agents at once — the team primitive. Name ALL of them in one room, never one room per agent. May require admin approval. Fire-and-forget: the call returns immediately; you will get a system note when the room is live, telling you how to post the intro there.",
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -127,3 +127,4 @@ export const addToRoom: McpToolDefinition = {
 };
 
 registerTools([createRoom, addToRoom]);
+

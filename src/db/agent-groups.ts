@@ -28,6 +28,26 @@ export async function getAllAgentGroups(): Promise<AgentGroup[]> {
   return getDb().all<AgentGroup>('SELECT * FROM agent_groups ORDER BY name');
 }
 
+/**
+ * The worker a given (repo, thread) pair already has, if any.
+ *
+ * `workspacePath` is a pure function of the resolved repository and the origin
+ * session (see `workerWorkspace` in the agent-to-agent module), so the two
+ * arguments together are the (repo, thread) key — not two independent filters.
+ * Matching on both rather than on `origin_session_id` alone is what lets ONE
+ * thread hold one worker PER repository.
+ */
+export async function findWorkerForOrigin(
+  originSessionId: string,
+  workspacePath: string,
+): Promise<AgentGroup | undefined> {
+  return getDb().get<AgentGroup>(
+    'SELECT * FROM agent_groups WHERE origin_session_id = ? AND workspace_path = ?',
+    originSessionId,
+    workspacePath,
+  );
+}
+
 export async function updateAgentGroup(
   id: string,
   updates: Partial<Pick<AgentGroup, 'name' | 'agent_provider' | 'workspace_path' | 'origin_session_id'>>,

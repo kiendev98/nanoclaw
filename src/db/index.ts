@@ -21,6 +21,7 @@ export type { MigrationMode, MigrationRunOptions } from './migrations/index.js';
 export {
   createAgentGroup,
   deleteAgentGroupCascade,
+  findWorkerForOrigin,
   getAgentGroup,
   getAgentGroupByFolder,
   getAllAgentGroups,

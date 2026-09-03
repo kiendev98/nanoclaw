@@ -42,7 +42,7 @@ import {
 } from './db/coordination.js';
 import { getHostInstanceId } from './host-instance.js';
 import { getDb, hasTable } from './db/connection.js';
-import { getSession, isTaskThread, TASKS_SYSTEM_THREAD_ID } from './db/sessions.js';
+import { getSession } from './db/sessions.js';
 import { getSessionDriver, isSessionEventsDriver } from './drivers/index.js';
 import type { SupervisedHandle, SupervisedSnapshot } from './drivers/session-events.js';
 import { GROUP_FOLDER_LABEL, labelValueLegal, specInvalid } from './drivers/types.js';
@@ -302,7 +302,7 @@ async function spawnContainer(session: Session): Promise<void> {
   // Materialize container.json from DB — writes fresh file and returns
   // the config object, threaded through provider resolution, buildMounts,
   // and buildContainerArgs so we don't re-read.
-  const containerConfig = await materializeContainerJson(agentGroup.id, session.workspace_path);
+  const containerConfig = await materializeContainerJson(agentGroup.id);
 
   const providerName = resolveProviderName(session.agent_provider, containerConfig.provider);
   await initGroupFilesystem(agentGroup, { provider: providerName });
@@ -970,12 +970,6 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     TZ: containerConfig.timezone ?? TIMEZONE,
     ...mailboxEnvironment,
   };
-  // Where this session's agent stands. The SESSION column wins because it
-  // names the worktree of one task series, while the group column is a
-  // property of the agent as a whole; a task that named a repository must not
-  // inherit whatever directory its group happens to carry. Both fall through
-  // to undefined, which is what leaves an ordinary group's spawn unchanged.
-  const workspacePath = session.workspace_path ?? agentGroup.workspace_path ?? undefined;
   // The repository this agent stands in, when it stands in one, reaches the
   // driver as `ContainerSpec.cwd` and the runner as `container.json`'s
   // `workspacePath`. cwd is the only thing that decides which project's
@@ -985,10 +979,10 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
   //
   // NOT a substitute for NANOCLAW_AGENT_DIR, which stays the group folder in
   // every case — memory and footer telemetry must not follow cwd into a repo.
-  {
-    // A repo-scoped session does not resume its previous conversation, and
-    // `workspace_path` is the only thing that distinguishes one — an ordinary
-    // group never sets this and keeps resuming exactly as before.
+  if (agentGroup.workspace_path) {
+    // A worker does not resume its previous conversation, and `workspace_path`
+    // is the only thing that distinguishes one — an ordinary group never sets
+    // this and keeps resuming exactly as before.
     //
     // Two different lifetimes were sharing one key. The worktree holds
     // uncommitted work that cannot be rebuilt, so it is durable and shared
@@ -1008,51 +1002,10 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     // `categorizeMessage` treats anything not starting with `/` as prose —
     // silently degrading every slash-command task.
     //
-    // The signal rides THIS spawn's own env, not only `container.json`'s
-    // `workspacePath` field. `container.json` is ONE file per agent GROUP,
-    // rewritten at every spawn (`materializeContainerJson`) — two sessions of
-    // one group spawning concurrently already race on every field in that
-    // file, and this is the field that decides which repository the SDK
-    // reasons from, so racing it means committing a write to the wrong one. A
-    // per-spawn env var can't race the same way: it is set once, in this
-    // spec, scoped to this session's own process. `resolveCwd` in the runner
-    // now prefers `NANOCLAW_WORKSPACE_PATH` over the file for exactly that
-    // reason; the file field stays for compatibility (older runners,
-    // `container.json` inspection) but no longer decides cwd.
-    //
-    // SET UNCONDITIONALLY, empty string included. Leaving it unset for a
-    // session with no workspace would reopen the same bug through two other
-    // doors: the local driver copies the host's whole `process.env` into the
-    // child, so a stray ambient value would be inherited; and with nothing in
-    // the env the runner falls back to `container.json` — the shared,
-    // per-GROUP file another session may have just stamped with ITS worktree.
-    // An empty value is the host stating "this session has no workspace",
-    // which is a different fact from the host saying nothing at all.
-    env.NANOCLAW_WORKSPACE_PATH = workspacePath ?? '';
+    // The signal itself rides `container.json`, which carries `workspacePath`
+    // straight from the DB — no environment variable, and no derived flag whose
+    // origin the next reader would have to guess.
   }
-
-  // TASK IDENTITY IS SPAWN-SCOPED AND IMMUTABLE — which is exactly why it must
-  // not be read back out of `session_routing`.
-  //
-  // The runner used to recover its series id by parsing `routing.thread_id` for
-  // the `system:tasks:` prefix. That field is the session's OUTBOUND route, and
-  // it is mutable: the moment a task session binds the thread it opened,
-  // `writeSessionRouting` replaces it with the real channel thread so replies
-  // land in that thread. Both facts wanted one field, and the mutable one wins,
-  // so a bound task session stopped being able to tell it was a task at all —
-  // `getTaskSeriesId()` returned null, the PreCompact hook flipped its guidance
-  // from the task contract to the chat contract, and a respawn framed the whole
-  // system prompt as a chat session.
-  //
-  // A session's task identity never changes for the life of a spawn, so the env
-  // is the honest carrier. Set unconditionally, empty for a non-task session,
-  // for the same reason as the workspace path above: absent must mean "an older
-  // host said nothing", never "this is not a task".
-  env.NANOCLAW_TASK_SERIES_ID =
-    isTaskThread(session.thread_id) && session.thread_id
-      ? session.thread_id.slice(`${TASKS_SYSTEM_THREAD_ID}:`.length)
-      : '';
-
   // The contributed lane (ContainerSpec.contributedEnv): registry-sourced env,
   // exempt from the credential-NAME check and still refused credential VALUES.
   // The model provider's contribution fills first, the gateway's second — a
@@ -1094,7 +1047,7 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     // the driver falls back to the group folder. An empty string here would
     // resolve cwd to the host's own checkout, which is the 11,618-token
     // CLAUDE.md leak of 5a592b62.
-    cwd: workspacePath,
+    cwd: agentGroup.workspace_path ?? undefined,
   };
 
   // The folder label (D9) rides the spec so an admission-side check can pin

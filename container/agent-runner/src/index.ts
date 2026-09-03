@@ -72,28 +72,10 @@ function log(msg: string): void {
  * on the shared checkout's `main` instead of the worker's own branch, so the
  * isolation the worktree exists to provide was not real.
  *
- * `NANOCLAW_WORKSPACE_PATH` (this spawn's own env) wins over
- * `container.json`'s `workspacePath` field for the same reason the host now
- * sets both: the file is ONE per agent GROUP, rewritten at every spawn, so two
- * sessions of one group starting concurrently can read each other's value out
- * of it and commit to the wrong repository. The env var is scoped to this
- * process alone and cannot be raced that way. The file field is kept as a
- * fallback for compatibility, not because it is still trusted for this.
- *
- * PRESENT-BUT-EMPTY IS AN ANSWER, not a miss. A current host sets this on
- * every spawn, so an empty value means "this session has no workspace" and
- * must land on AGENT_DIR. Falling through to `container.json` there would put
- * an ordinary session into whichever worktree another session of the same
- * group last stamped into that shared file — the exact race this variable
- * exists to end. Only an ABSENT variable means an old host that never set it,
- * which is the one case the file still answers.
- *
  * AGENT_DIR stays the agent's STATE directory — memory and footer telemetry
  * must not follow cwd into a repository.
  */
 function resolveCwd(workspacePath: string | undefined): string {
-  const fromEnv = process.env.NANOCLAW_WORKSPACE_PATH;
-  if (fromEnv !== undefined) return fromEnv || AGENT_DIR;
   return workspacePath || AGENT_DIR;
 }
 
