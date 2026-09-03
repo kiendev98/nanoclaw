@@ -1,12 +1,16 @@
 /**
- * Delivery claims the thread it opens, and keeps talking in it.
+ * Delivery claims the thread it opens — and does not redirect into it.
  *
- * The two write-path halves of the session/thread binding — the storage lives
- * in `db/session-thread-binding.test.ts` and the inbound lookup in
+ * One of the three write-path halves of the session/thread binding. Storage
+ * lives in `db/session-thread-binding.test.ts` and the inbound lookup in
  * `session-thread-routing.test.ts`. Here: a top-level post binds the thread
- * the channel created for it (hook 1), and a later message with no thread of
- * its own is delivered INTO that thread rather than starting a second one
- * (hook 3).
+ * the channel created for it, so a human's reply can find the session that
+ * spoke.
+ *
+ * There is deliberately no outbound counterpart. An earlier revision also
+ * delivered a later thread-less message INTO the bound thread, which buried
+ * every proactive post and question card a `shared` session ever made inside
+ * the first thread it opened — see the tests below.
  *
  * Only a root post may bind. A reply carries its own message id, which names
  * no thread — measured live, a reply into the thread rooted at `…925.613579`
@@ -150,8 +154,14 @@ describe('a top-level post claims the thread it opens', () => {
   });
 });
 
-describe('later messages go into the thread, not beside it', () => {
-  it('delivers a second thread-less message into the bound thread', async () => {
+describe('a later thread-less message does NOT get pulled into the bound thread', () => {
+  it('posts a second thread-less message at top level', async () => {
+    // An earlier revision redirected it into the binding, which read as
+    // "keep talking where you were talking". It is wrong for the sessions
+    // that actually hit it: a `shared` session's `thread_id` is always null,
+    // so EVERY later question card and proactive post inherited the first
+    // thread it ever opened — permanently, since the binding is first-wins
+    // with nothing that clears it.
     const session = await homeSession();
     insertOutbound(session.id, 'out-1');
     const threads: (string | null)[] = [];
@@ -161,26 +171,13 @@ describe('later messages go into the thread, not beside it', () => {
     insertOutbound(session.id, 'out-2');
     await deliverSessionMessages(session);
 
-    // First opened the thread; second landed inside it.
-    expect(threads).toEqual([null, `${AWAY_PLATFORM}:${ROOT}`]);
-  });
-
-  it('uses the binding written earlier in the SAME drain', async () => {
-    // A drain loads its session once and then delivers several messages, so
-    // the binding is read from the row rather than from that in-memory copy —
-    // which is stale exactly when both messages ride the same batch.
-    const session = await homeSession();
-    insertOutbound(session.id, 'out-1');
-    insertOutbound(session.id, 'out-2');
-    const threads: (string | null)[] = [];
-    recordingAdapter(threads);
-
-    await deliverSessionMessages(session);
-
-    expect(threads).toEqual([null, `${AWAY_PLATFORM}:${ROOT}`]);
+    expect(threads).toEqual([null, null]);
   });
 
   it('leaves an explicitly addressed thread alone', async () => {
+    // The container resolves a reply's thread from the last inbound on that
+    // channel, and that route is untouched here — this asserts delivery does
+    // not second-guess an address the agent already chose.
     const session = await homeSession();
     insertOutbound(session.id, 'out-1');
     const threads: (string | null)[] = [];
@@ -194,7 +191,10 @@ describe('later messages go into the thread, not beside it', () => {
     expect(threads[1]).toBe(elsewhere);
   });
 
-  it('keeps the first thread rather than re-pointing to a later post', async () => {
+  it('keeps the first binding rather than re-pointing to a later post', async () => {
+    // First-wins matters more now that a second top-level post is possible:
+    // the thread people are already replying in must not lose its session to
+    // whatever the agent posted most recently.
     const session = await homeSession();
     insertOutbound(session.id, 'out-1');
     recordingAdapter([]);

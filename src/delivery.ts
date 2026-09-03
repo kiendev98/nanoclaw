@@ -5,8 +5,6 @@
  */
 import {
   bindSessionToThread,
-  composeThreadId,
-  findSessionThreadBinding,
   getRunningSessions,
   getActiveSessions,
   createPendingQuestion,
@@ -498,25 +496,24 @@ async function deliverMessage(
       ? readOutboxFiles(session.agent_group_id, session.id, msg.id, content.files as string[])
       : undefined;
 
-  // HOOK 3 — keep talking in the thread this session already opened here.
+  // There is deliberately NO outbound counterpart to the binding below.
   //
-  // Only a message that names no thread is redirected: an addressed one is
-  // already going where the agent meant it to go. Read from the DB rather
-  // than from `session`, which a drain loads once — the message that CREATES
-  // the binding is often earlier in this very batch.
+  // An earlier revision redirected every thread-less send into the session's
+  // bound thread. That is wrong, and it is wrong for ordinary chat sessions
+  // rather than for workers: a `shared`-mode session's `thread_id` is always
+  // null (session-manager.ts), every MCP tool copies that null onto its
+  // outbound, and the binding is first-wins with nothing that clears it. So
+  // the first thread such a session ever opened captured every later question
+  // card and proactive post for the life of the session — a daily digest
+  // threading under day one, a question surfacing in a week-old thread nobody
+  // is watching.
   //
-  // Failure is non-fatal. The binding is a convenience on top of a delivery
-  // that is otherwise correct, so a lookup error costs a top-level post, not
-  // the message.
-  let deliverThreadId = msg.threadId;
-  if (deliverThreadId === null && deliverMg) {
-    try {
-      const boundRoot = await findSessionThreadBinding(session.id, deliverMg.id);
-      if (boundRoot) deliverThreadId = composeThreadId(deliverMg.platformId, boundRoot);
-    } catch (err) {
-      log.warn('Bound-thread lookup failed, delivering at top level', { id: msg.id, sessionId: session.id, err });
-    }
-  }
+  // Nothing is lost by leaving it out. A reply to a human's thread reply
+  // already resolves through `getLatestInboundRoute` in the container, with no
+  // binding involved. The only case the redirect uniquely covered was the
+  // proactive send with no preceding inbound — which is exactly the case where
+  // threading it into an old conversation is the wrong answer.
+  const deliverThreadId = msg.threadId;
 
   const platformMsgId = await deliveryAdapter.deliver(
     msg.channelType,
@@ -528,11 +525,13 @@ async function deliverMessage(
     deliverInstance,
   );
 
-  // HOOK 1 — this post OPENED a thread, so claim it.
+  // This post OPENED a thread, so claim it — the inbound half is in
+  // `resolveSession`, which reads the binding back to route a human's reply
+  // into the session that spoke.
   //
   // `deliverThreadId === null` is precisely the condition: the message named
-  // no thread and none was bound, so the channel had nowhere to put it but
-  // top level, and its own id is now that thread's root.
+  // no thread, so the channel had nowhere to put it but top level, and its own
+  // id is now that thread's root.
   //
   // ONLY A ROOT POST BINDS. A reply carries its own message id, which names
   // no thread — measured on a live install, a reply delivered into the thread
@@ -540,8 +539,10 @@ async function deliverMessage(
   // every delivery would store a key no inbound thread can ever match, and it
   // would fail silently.
   //
-  // Non-fatal for the same reason as hook 3, and placed after a SUCCESSFUL
-  // send so nothing is claimed on behalf of a message the channel refused.
+  // Non-fatal: the binding is a convenience on top of a delivery that is
+  // otherwise correct, so a failure here costs a future inbound its session,
+  // not this message. Placed after a SUCCESSFUL send, so nothing is claimed on
+  // behalf of a message the channel refused.
   if (deliverThreadId === null && platformMsgId && deliverMg) {
     try {
       const bound = await bindSessionToThread(session.id, deliverMg.id, platformMsgId);
