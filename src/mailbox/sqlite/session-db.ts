@@ -284,6 +284,12 @@ export function migrateDestinationsTable(db: Database.Database): void {
   const cols = new Set(
     (db.prepare("PRAGMA table_info('destinations')").all() as Array<{ name: string }>).map((c) => c.name),
   );
+  // An ABSENT table reads as zero columns, which is indistinguishable here
+  // from a table missing the column — and `ALTER TABLE` on a table that does
+  // not exist throws, which would fail every session open for that DB rather
+  // than just skipping a migration. `migrateDeliveredTable` is guarded at its
+  // call site for the same reason; guarding here covers every caller instead.
+  if (cols.size === 0) return;
   if (!cols.has('thread_id')) {
     db.prepare('ALTER TABLE destinations ADD COLUMN thread_id TEXT').run();
   }

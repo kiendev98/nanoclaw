@@ -9,7 +9,13 @@ import fs from 'fs';
 import path from 'path';
 import { describe, it, expect, afterEach } from 'vitest';
 
-import { ensureSchema, getInboundSourceSessionId, migrateMessagesInTable, syncProcessingAcks } from './session-db.js';
+import {
+  ensureSchema,
+  getInboundSourceSessionId,
+  migrateDestinationsTable,
+  migrateMessagesInTable,
+  syncProcessingAcks,
+} from './session-db.js';
 
 const TEST_DIR = '/tmp/nanoclaw-session-db-test';
 const DB_PATH = path.join(TEST_DIR, 'inbound.db');
@@ -152,5 +158,45 @@ describe('syncProcessingAcks — script-skip counter', () => {
     syncProcessingAcks(inDb, outDb);
 
     expect(status(inDb, 't1')).toBe('completed');
+  });
+});
+
+describe('migrateDestinationsTable', () => {
+  function freshDb(): Database.Database {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    return new Database(DB_PATH);
+  }
+
+  it('adds thread_id to a legacy destinations table and is idempotent', () => {
+    const db = freshDb();
+    db.exec(`
+      CREATE TABLE destinations (
+        name         TEXT PRIMARY KEY,
+        display_name TEXT,
+        type         TEXT NOT NULL,
+        channel_type TEXT,
+        platform_id  TEXT,
+        agent_group_id TEXT
+      );
+    `);
+
+    migrateDestinationsTable(db);
+    migrateDestinationsTable(db); // idempotent
+
+    const cols = (db.prepare("PRAGMA table_info('destinations')").all() as Array<{ name: string }>).map((c) => c.name);
+    expect(cols).toContain('thread_id');
+    db.close();
+  });
+
+  it('is a no-op when the table does not exist', () => {
+    // An absent table reads as zero columns, which is indistinguishable from a
+    // table missing the column — so an unguarded ALTER TABLE throws here and
+    // takes out every session open for that DB, not just this migration.
+    const db = freshDb();
+
+    expect(() => migrateDestinationsTable(db)).not.toThrow();
+
+    db.close();
   });
 });
