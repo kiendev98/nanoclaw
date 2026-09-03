@@ -31,6 +31,7 @@ import {
   updateSession,
   deleteSession,
   createPendingQuestion,
+  getOpenQuestionForAgentGroup,
   getPendingQuestion,
   deletePendingQuestion,
   getContainerConfig,
@@ -523,6 +524,88 @@ describe('pending questions', () => {
     });
     await deletePendingQuestion('q-1');
     expect(await getPendingQuestion('q-1')).toBeUndefined();
+  });
+
+  /**
+   * `getOpenQuestionForAgentGroup` is what `answer_worker` uses to find the
+   * question a worker is blocked on. It is asked by GROUP, because an
+   * orchestrator names its worker by destination and a destination resolves to
+   * a group — so every filter has to hold across whatever sessions that group
+   * happens to have.
+   */
+  describe('the open question for an agent group', () => {
+    /** The escalated lane: no human anywhere, `channel_type` is the marker. */
+    async function escalated(id: string, sessionId = 'sess-1'): Promise<void> {
+      await createPendingQuestion({
+        question_id: id,
+        session_id: sessionId,
+        message_out_id: `out-${id}`,
+        platform_id: 'ag-orchestrator',
+        channel_type: 'agent',
+        thread_id: null,
+        title: 'Rework?',
+        options: [{ label: 'Yes', selectedLabel: 'Yes', value: 'yes' }],
+        created_at: now(),
+      });
+    }
+
+    it('finds the escalated question a worker is blocked on', async () => {
+      await escalated('q-agent');
+      expect((await getOpenQuestionForAgentGroup('ag-1'))?.question_id).toBe('q-agent');
+    });
+
+    it('never returns a question that belongs to a human', async () => {
+      // THE CROSS-LANE BUG. `pending_questions` holds both lanes, and this
+      // query had no filter on which one wrote the row. So an agent holding a
+      // destination for a companion agent could answer that agent's SLACK
+      // card: the asking tool unblocked as though the button had been
+      // clicked, and the person who then clicked found the row gone and their
+      // click silently unclaimed.
+      await createPendingQuestion({
+        question_id: 'q-human',
+        session_id: 'sess-1',
+        message_out_id: 'out-human',
+        platform_id: 'slack:C1',
+        channel_type: 'slack',
+        thread_id: null,
+        title: 'Delete the table?',
+        options: [{ label: 'Yes', selectedLabel: 'Yes', value: 'yes' }],
+        created_at: now(),
+      });
+
+      expect(await getOpenQuestionForAgentGroup('ag-1')).toBeUndefined();
+    });
+
+    it('prefers the escalated row when both lanes have one open', async () => {
+      // Written second, so "newest wins" alone would return the human's.
+      await escalated('q-agent');
+      await createPendingQuestion({
+        question_id: 'q-human',
+        session_id: 'sess-1',
+        message_out_id: 'out-human',
+        platform_id: 'slack:C1',
+        channel_type: 'slack',
+        thread_id: null,
+        title: 'Delete the table?',
+        options: [{ label: 'Yes', selectedLabel: 'Yes', value: 'yes' }],
+        created_at: new Date(Date.now() + 1000).toISOString(),
+      });
+
+      expect((await getOpenQuestionForAgentGroup('ag-1'))?.question_id).toBe('q-agent');
+    });
+
+    it('ignores a question whose session has closed', async () => {
+      // Answering into a dead session writes a response nothing ever reads.
+      await escalated('q-agent');
+      await updateSession('sess-1', { status: 'closed' });
+
+      expect(await getOpenQuestionForAgentGroup('ag-1')).toBeUndefined();
+    });
+
+    it("does not reach another group's question", async () => {
+      await escalated('q-agent');
+      expect(await getOpenQuestionForAgentGroup('ag-other')).toBeUndefined();
+    });
   });
 });
 

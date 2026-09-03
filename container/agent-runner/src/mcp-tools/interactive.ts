@@ -211,7 +211,14 @@ async function awaitAnswer(questionId: string, timeout: number): Promise<string 
  * property worth copying from Claude Code's subagents. Its parent is blocked
  * inside the tool call and cannot send anything, so no ambiguity is possible;
  * here the orchestrator is free and can send other things, so the answer needs
- * its own row kind instead. `answer_worker` writes it and nothing else does.
+ * its own row kind instead.
+ *
+ * `answer_worker` is the only door on THIS lane. The row itself has a second
+ * producer — a human's button click, through modules/interactive — and that is
+ * the point rather than an exception: both lanes end in the same
+ * `findQuestionResponse` wait precisely because the two rows are identical.
+ * An earlier version of this sentence claimed nothing else wrote one, which
+ * would have made the shared wait below look like an accident.
  */
 async function askOrchestrator(
   questionId: string,

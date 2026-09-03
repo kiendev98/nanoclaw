@@ -166,26 +166,23 @@ export async function findSessionBoundToThread(
   );
 }
 
-/**
- * OUTBOUND: the root of the thread this session opened in this channel.
+/*
+ * THERE IS DELIBERATELY NO OUTBOUND READER HERE.
  *
- * Read fresh from the row rather than from a `Session` the caller is holding.
- * A drain loads its session once and then delivers several messages; the
- * message that CREATES the binding is often in that same batch, so an
- * in-memory copy is stale exactly when this matters.
+ * `findSessionThreadBinding(sessionId, messagingGroupId)` used to live at this
+ * spot, returning the root of the thread a session had opened so a later send
+ * could be threaded into it. It had no production caller — only tests and a
+ * migration docstring naming it — and its one plausible caller is the very
+ * thing delivery.ts:500 removed on purpose: redirecting a thread-less outbound
+ * into the bound thread captured every later question card and proactive post
+ * for the life of a `shared` session, because such a session's `thread_id` is
+ * always null and the binding is first-wins with nothing that clears it.
+ *
+ * An exported, tested, barrel-re-exported function is an invitation, and this
+ * one invited exactly the bug that was just paid for. Deleted rather than left
+ * unused. If a genuine outbound case appears, read the comment in delivery.ts
+ * first and then write the narrower thing that case needs.
  */
-export async function findSessionThreadBinding(
-  sessionId: string,
-  messagingGroupId: string,
-): Promise<string | undefined> {
-  const row = await getDb().get<{ bound_root_message_id: string | null }>(
-    `SELECT bound_root_message_id FROM sessions
-      WHERE id = ? AND bound_messaging_group_id = ?`,
-    sessionId,
-    messagingGroupId,
-  );
-  return row?.bound_root_message_id ?? undefined;
-}
 
 /** Per-task session thread id for a scheduled task series. */
 export function taskThreadId(seriesId: string): string {

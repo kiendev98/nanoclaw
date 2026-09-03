@@ -49,10 +49,16 @@ function now(): string {
 /** A message with no thread of its own — the shape that opens a thread. */
 function insertOutbound(sessionId: string, msgId: string, threadId: string | null = null): void {
   const db = new Database(outboundDbPath(AG, sessionId));
+  // `now()`, not `datetime('now')`. The repo rule bans the SQLite form because
+  // its naive `YYYY-MM-DD HH:MM:SS` shape has no `T` and no `Z`, so every
+  // `new Date(row.timestamp)` in the codebase reads it as LOCAL time — a
+  // silent offset shift, and an hour more of it across a DST boundary. A test
+  // fixture is exactly where that convention rots first, because nothing here
+  // reads the column back today.
   db.prepare(
     `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, thread_id, content)
-     VALUES (?, datetime('now'), 'chat', ?, 'slack', ?, ?)`,
-  ).run(msgId, AWAY_PLATFORM, threadId, JSON.stringify({ text: 'hello' }));
+     VALUES (?, ?, 'chat', ?, 'slack', ?, ?)`,
+  ).run(msgId, now(), AWAY_PLATFORM, threadId, JSON.stringify({ text: 'hello' }));
   db.close();
 }
 

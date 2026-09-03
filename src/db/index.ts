@@ -50,7 +50,6 @@ export {
   findSessionByAgentGroup,
   bindSessionToThread,
   findSessionBoundToThread,
-  findSessionThreadBinding,
   threadRootMessageId,
   composeThreadId,
   getSessionsByAgentGroup,

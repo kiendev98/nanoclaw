@@ -269,6 +269,35 @@ describe('it grants nothing a message would not', () => {
     expect(mockDeletePendingQuestion).not.toHaveBeenCalled();
   });
 
+  it('leaves an EXPIRED question alone when it refuses', async () => {
+    // The ordering bug this pins. Authorization used to run after the lookup
+    // and after the expiry delete, so an unauthorized caller — naming any
+    // agent group it liked, since the payload is re-read from an untrusted
+    // container — could destroy that group's pending question and only then
+    // be turned away. The delete is unrecoverable: the asking tool waits out
+    // its bound and the answer is gone.
+    //
+    // The test above passes on the broken order too, because a fresh row is
+    // never deleted. Age is the whole point of this one.
+    mockGetOpenQuestion.mockResolvedValue(question(600_001));
+    mockHasDestination.mockResolvedValue(false);
+
+    await runAnswerWorker(request());
+
+    expect(mockDeletePendingQuestion).not.toHaveBeenCalled();
+    expect(toolResponse()?.status).toBe('error');
+  });
+
+  it('does not even look the question up until the caller is authorized', async () => {
+    // Stronger than the two above and the reason they hold: nothing about the
+    // named group is read before the guard answers.
+    mockHasDestination.mockResolvedValue(false);
+
+    await runAnswerWorker(request());
+
+    expect(mockGetOpenQuestion).not.toHaveBeenCalled();
+  });
+
   it('routes through the message path when a policy holds this pair', async () => {
     // A hold is the admin's decision about these two agents talking, and an
     // answer is them talking. Taking the fast path would bypass the card.

@@ -14,10 +14,14 @@ import type { Migration } from './index.js';
  * knew nothing about — with an empty transcript, while the session that
  * actually opened the thread was never told.
  *
- * These two columns are that missing note. One writer
- * (`bindSessionToThread`, at delivery) and two readers:
- * `findSessionBoundToThread` on the inbound path, `findSessionThreadBinding`
- * on the outbound one.
+ * These two columns are that missing note. ONE writer
+ * (`bindSessionToThread`, at delivery) and ONE reader
+ * (`findSessionBoundToThread`, on the inbound path).
+ *
+ * There is no outbound reader, and its absence is a decision rather than an
+ * omission — see the note where it used to be in db/sessions.ts. This
+ * docstring named one for a while after it was deleted, which is worse than
+ * saying nothing: it described a symmetry the code had deliberately given up.
  *
  * ONE BINDING PER SESSION, deliberately. A pair of columns cannot hold two, so
  * a session that opens a top-level post in a SECOND channel leaves that thread

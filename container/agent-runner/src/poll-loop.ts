@@ -825,7 +825,6 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  * reach its own orchestrator and nothing else, and only the session routing
  * carries that guarantee.
  */
-
 function agentLaneRouting(): { channelType: string; platformId: string } | null {
   let routing;
   try {

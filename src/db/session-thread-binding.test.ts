@@ -18,7 +18,6 @@ import {
   createMessagingGroup,
   createSession,
   findSessionBoundToThread,
-  findSessionThreadBinding,
   getSession,
   initSqliteTestDb,
   runMigrations,
@@ -159,7 +158,6 @@ describe('binding a session to the thread it opened', () => {
   it('is invisible to a session that opened nothing', async () => {
     await createSession(session('sess-a'));
     expect(await findSessionBoundToThread(MG, ROOT)).toBeUndefined();
-    expect(await findSessionThreadBinding('sess-a', MG)).toBeUndefined();
   });
 
   it('keeps the FIRST thread and refuses to be re-pointed', async () => {
@@ -179,7 +177,6 @@ describe('binding a session to the thread it opened', () => {
     await bindSessionToThread('sess-a', MG, ROOT);
 
     expect(await findSessionBoundToThread(OTHER_MG, ROOT)).toBeUndefined();
-    expect(await findSessionThreadBinding('sess-a', OTHER_MG)).toBeUndefined();
   });
 
   it('stops matching once the session closes, so the reply gets a live one', async () => {
@@ -190,13 +187,16 @@ describe('binding a session to the thread it opened', () => {
     expect(await findSessionBoundToThread(MG, ROOT)).toBeUndefined();
   });
 
-  it('returns the root for the outbound path, so a reply lands in the thread', async () => {
+  it('stores the root in the form the inbound parser reads back', async () => {
+    // `composeThreadId` and `threadRootMessageId` are inverses, and the stored
+    // root is what has to survive the round trip. This replaces a test of the
+    // deleted outbound reader; the property it was really pinning is this one.
     await createSession(session('sess-a'));
     await bindSessionToThread('sess-a', MG, ROOT);
 
-    const root = await findSessionThreadBinding('sess-a', MG);
-    expect(root).toBe(ROOT);
-    expect(composeThreadId('slack:C0ACWUFB44F', root!)).toBe(`slack:C0ACWUFB44F:${ROOT}`);
+    const stored = (await getSession('sess-a'))?.bound_root_message_id;
+    expect(stored).toBe(ROOT);
+    expect(composeThreadId('slack:C0ACWUFB44F', stored!)).toBe(`slack:C0ACWUFB44F:${ROOT}`);
   });
 
   it('gives two sessions in one channel their own threads', async () => {
