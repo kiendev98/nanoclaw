@@ -74,3 +74,62 @@ describe('send_message MCP tool — in_reply_to plumbing', () => {
     expect(out[0].in_reply_to).toBeNull();
   });
 });
+
+describe('send_message MCP tool — explicit thread', () => {
+  const CHANNEL = 'slack:C0BU6RSGAGK';
+  const THREAD = `${CHANNEL}:1788370925.613579`;
+
+  beforeEach(() => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES ('ai-anya', 'AI Anya', 'channel', 'slack', ?, NULL)`,
+      )
+      .run(CHANNEL);
+  });
+
+  it('sends into the named thread instead of opening a new one', async () => {
+    await sendMessage.handler({ to: 'ai-anya', text: 'hello', thread: THREAD });
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].thread_id).toBe(THREAD);
+  });
+
+  it('opens a new thread when the argument is omitted', async () => {
+    // No routing row matches this destination, so the session has no thread
+    // here — null is what makes the bridge post at top level.
+    await sendMessage.handler({ to: 'ai-anya', text: 'hello' });
+
+    const out = getUndeliveredMessages();
+    expect(out[0].thread_id).toBeNull();
+  });
+
+  it('refuses a thread that belongs to a different channel', async () => {
+    // The destination map is the ACL. Without this check, `thread` would be a
+    // way to post into any channel by naming one you do hold.
+    const result = await sendMessage.handler({
+      to: 'ai-anya',
+      text: 'hello',
+      thread: 'slack:C0OTHER:1788370925.613579',
+    });
+
+    expect(result.isError).toBe(true);
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('refuses a thread on an agent destination, which has none', async () => {
+    const result = await sendMessage.handler({ to: 'peer', text: 'hello', thread: THREAD });
+
+    expect(result.isError).toBe(true);
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('treats a blank thread as omitted rather than as a channel mismatch', async () => {
+    await sendMessage.handler({ to: 'ai-anya', text: 'hello', thread: '   ' });
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].thread_id).toBeNull();
+  });
+});

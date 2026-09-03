@@ -49,10 +49,22 @@ function destinationList(): string {
  */
 function resolveRouting(
   to: string,
+  thread?: string,
 ): { channel_type: string; platform_id: string; thread_id: string | null; resolvedName: string } | { error: string } {
   const dest = findByName(to);
   if (!dest) return { error: `Unknown destination "${to}". Known: ${destinationList()}` };
   if (dest.type === 'channel') {
+    // An explicit thread must lie INSIDE the destination it is sent to. The
+    // destination map is the ACL — a row grants a channel — and a thread id is
+    // `<platform_id>:<root>`, so this prefix test is what stops a thread
+    // argument from reaching a channel no row grants. Without it, `thread`
+    // would be a way to post anywhere by naming a destination you do hold.
+    if (thread !== undefined) {
+      if (!thread.startsWith(`${dest.platformId!}:`)) {
+        return { error: `Thread "${thread}" is not in "${to}". A thread id starts with that destination's channel.` };
+      }
+      return { channel_type: dest.channelType!, platform_id: dest.platformId!, thread_id: thread, resolvedName: to };
+    }
     // If the destination is the same channel the session is bound to,
     // preserve the thread_id so replies land in the correct thread.
     const session = getSessionRouting();
@@ -64,6 +76,9 @@ function resolveRouting(
       thread_id: threadId,
       resolvedName: to,
     };
+  }
+  if (thread !== undefined) {
+    return { error: `"${to}" is another agent, not a channel, so it has no threads.` };
   }
   return { channel_type: 'agent', platform_id: dest.agentGroupId!, thread_id: null, resolvedName: to };
 }
@@ -80,6 +95,11 @@ export const sendMessage: McpToolDefinition = {
           description: 'Destination name (e.g., "family", "worker-1").',
         },
         text: { type: 'string', description: 'Message content' },
+        thread: {
+          type: 'string',
+          description:
+            'Reply inside an EXISTING thread, as its full id (e.g. "slack:C0BU6RSGAGK:1788370925.613579") — copy one you have seen, never build it. Omit it for the normal behaviour: your own thread when the destination is the channel you are in, otherwise a new thread. The thread must be in the destination named by `to`.',
+        },
       },
       required: ['to', 'text'],
     },
@@ -89,8 +109,9 @@ export const sendMessage: McpToolDefinition = {
     const text = args.text as string;
     if (!to) return err(`to is required. Options: ${destinationList()}`);
     if (!text) return err('text is required');
+    const thread = typeof args.thread === 'string' && args.thread.trim() ? args.thread.trim() : undefined;
 
-    const routing = resolveRouting(to);
+    const routing = resolveRouting(to, thread);
     if ('error' in routing) return err(routing.error);
 
     const id = generateId();
