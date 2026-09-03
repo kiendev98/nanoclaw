@@ -460,15 +460,6 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     // `deliverToBoundSession`'s own `wiredHere` check is the mirror of this
     // and does not cover it: that one stops the OWNER being served twice,
     // this one stops a stranger being served at all.
-    if (boundHere && boundHere.agent_group_id !== agent.agent_group_id && !isMention) {
-      log.debug('Skipping a thread owned by another agent group', {
-        agentGroupId: agent.agent_group_id,
-        owner: boundHere.agent_group_id,
-        threadId: event.threadId,
-      });
-      continue;
-    }
-
     // Effective thread id for THIS wiring: the event-derived address is
     // policy-stripped when the wiring (or its channel declaration) opts out
     // of threads. event.replyTo is operator intent from the CLI admin
@@ -483,6 +474,22 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       supportsThreads,
     );
     const effectiveThreadId = threadsEnabled ? event.threadId : null;
+
+    // AFTER the thread policy, not before it. A wiring with threads disabled
+    // sees the channel as ONE flat conversation — `effectiveThreadId` is null
+    // and thread identity never reaches session resolution — so "another
+    // agent owns this thread" describes nothing there, and skipping on it
+    // would silently drop the message for an agent that is meant to read the
+    // whole channel. The live `#ai-anya` wiring is `shared`, so this ordering
+    // is the deployed case, not a corner.
+    if (threadsEnabled && boundHere && boundHere.agent_group_id !== agent.agent_group_id && !isMention) {
+      log.debug('Skipping a thread owned by another agent group', {
+        agentGroupId: agent.agent_group_id,
+        owner: boundHere.agent_group_id,
+        threadId: event.threadId,
+      });
+      continue;
+    }
 
     const engages = await evaluateEngage(agent, messageText, isMention, mg, effectiveThreadId);
 

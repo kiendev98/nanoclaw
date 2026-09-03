@@ -102,6 +102,7 @@ async function activate(): Promise<void> {
 async function seedChat(
   engageMode: MessagingGroupAgent['engage_mode'] = 'mention',
   ignoredMessagePolicy: MessagingGroupAgent['ignored_message_policy'] = 'drop',
+  threads: 0 | 1 = 1,
 ): Promise<void> {
   await createAgentGroup({
     id: 'ag-wired',
@@ -130,7 +131,7 @@ async function seedChat(
     ignored_message_policy: ignoredMessagePolicy,
     session_mode: 'per-thread',
     priority: 0,
-    threads: 1,
+    threads,
     created_at: now(),
   });
 }
@@ -564,6 +565,22 @@ describe('a thread another agent opened is not a wired agent’s conversation', 
     await inbound('m1', BOUND_THREAD, 'a follow-up in my own thread');
 
     expect(inboundRows('ag-wired', WORKER_SESSION)).toHaveLength(1);
+  });
+
+  it('does not skip a wiring that has threads turned OFF', async () => {
+    // The guard must run AFTER the thread policy. A wiring with threads
+    // disabled reads the channel as ONE flat conversation — thread identity
+    // never reaches session resolution — so "another agent owns this thread"
+    // describes nothing, and skipping on it would silently drop a message
+    // from an agent that is meant to read the whole channel. The live
+    // `#ai-anya` wiring is `shared`, so this is the deployed shape.
+    await activate();
+    await seedChat('mention-sticky', 'accumulate', 0);
+    await seedBoundWorker();
+
+    await inbound('m1', BOUND_THREAD, 'rework the migration');
+
+    expect(sessionDirsFor('ag-wired')).toHaveLength(1);
   });
 
   it('does not touch top-level messages, which belong to nobody', async () => {
