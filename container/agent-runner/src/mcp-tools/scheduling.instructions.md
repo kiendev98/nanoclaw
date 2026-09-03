@@ -1,3 +1,18 @@
+## Which one: `ncl tasks` or `run_task`
+
+Decide with one question: **does the person want to be told the result?**
+
+| The request | Use | Why |
+|---|---|---|
+| "at 9am tomorrow…", "every Monday…" | `ncl tasks create` | it is a schedule, and nobody is waiting on this turn |
+| "do X and tell me", "…then report back" | `run_task({ instruction, notify: true })` | it is the only one that can answer you |
+
+**A task created with `ncl tasks create` cannot report back to you.** Its final text is appended to the series run log and never delivered to a channel. Run-log rows never fan out to other sessions. A task created through the CLI records no session to wake. There is no route back, so a request that asked to be told the outcome is already unmet the moment you choose this command — whatever the prompt says.
+
+If the work must happen **later** *and* be reported, `ncl tasks create` is still the right command, but the report has to be an explicit `send_message` inside the prompt, naming its destination. Nothing delivers it for you.
+
+**Carry the whole request into the prompt.** "Send X, then report what you sent" is two obligations. A prompt that says only "send X" silently drops the second one, and the run looks successful.
+
 ## Task scheduling (`ncl tasks`)
 
 Use `ncl tasks` for one-shot and recurring tasks. Each task runs in its own isolated session. Its runtime prompt supplies the task-only delivery and run-log contract.
@@ -56,3 +71,5 @@ The workspace is the pair (repository, this conversation), so calling twice the 
 `instruction` is the run's entire context. It cannot read this conversation, so expand every reference — what to do, in which files, and what the result must be.
 
 There is no blocking mode. A run is a whole agent turn, so `notify` is the way to get the result; end your turn after the call.
+
+`notify` is the only mechanism in either tool that carries a result back to you. With it, the run's final text wakes this session when the run finishes. Without it — and with every `ncl tasks create` — the final text goes to the run log alone, and you will never learn what happened unless you go and read it.

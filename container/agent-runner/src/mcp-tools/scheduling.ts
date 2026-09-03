@@ -57,11 +57,12 @@ export const runTask: McpToolDefinition = {
   tool: {
     name: 'run_task',
     description:
-      "Run an instruction in a SEPARATE session, alongside this conversation rather than inside it. With repo it stands in a git worktree of that repository, so it loads that repository's CLAUDE.md, skills and settings; without repo it runs in your own workspace. " +
+      "Delegate work to a SEPARATE session, running alongside this conversation rather than inside it. With repo it stands in a git worktree of that repository, so it loads that repository's CLAUDE.md, commands, skills and settings — the only way to work in a repository other than the one you are standing in. Without repo it runs in your own workspace. " +
       'CHOOSING BETWEEN THIS AND THE Task TOOL: compare the repository you need against the one you are standing in. ' +
       'Same repository, and you want the answer in this turn — use Task. It shares your working directory and costs nothing. ' +
       'Different repository — use this with repo. Task CANNOT change directory, so pointing it at another repository reads YOUR files while reporting on that one, and the answer looks correct. ' +
       'Same repository but long-running — use this without repo, so the work proceeds in its own session instead of holding up this turn. ' +
+      'A SLASH COMMAND IS A VALID INSTRUCTION, e.g. "/blueprint FMTA-343" — it runs as a real command in the run\'s own session with THAT repository\'s commands and skills loaded, which is the only way to invoke a command that lives in another repository. Reach for this whenever the request names a command plus a ticket or an issue. A command carrying no subject of its own ("/implement") must be followed by the brief. ' +
       'ONE CALL DOES EVERYTHING: the workspace is created or reused AND the instruction is queued — do not follow this with anything else. ' +
       'CALLING IT TWICE THE SAME WAY reuses the same workspace and branch, so follow-up work sees the earlier work. ' +
       'THE RESULT IS ASYNCHRONOUS: with notify it arrives later as a message that wakes you, so end your turn after the call. ' +
