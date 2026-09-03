@@ -144,8 +144,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     const routing = extractRouting(messages);
 
-    // A WORKER RESUMES, like every other session. `/clear` below is the only
-    // thing that drops a continuation.
+    // A WORKER RESUMES, like every other session. Nothing here drops a
+    // continuation per task. The three things that ever drop one — `/clear`
+    // below, the rotation check before the loop, and stale-session recovery in
+    // the catch — are all shared with every other session.
     //
     // A worker used to start every TASK with a clean transcript, on the
     // argument that its durable state is the worktree and the transcript is
@@ -157,11 +159,20 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // review had been skipped.
     //
     // The wipe existed to bound context across tasks, and that bound now comes
-    // from somewhere better. Autocompact is real and observed: a worker in
-    // that same run compacted 133,315 tokens mid-task without being asked. A
-    // per-task wipe is a blunter version of what the SDK already does
-    // continuously, and it pays the whole cost of forgetting up front rather
-    // than only when the window demands it.
+    // from wherever every other session already gets it. Autocompact is real
+    // and observed: a worker in that same run compacted 133,315 tokens
+    // mid-task without being asked. A per-task wipe is a blunter version of
+    // what the SDK already does continuously, and it pays the whole cost of
+    // forgetting up front rather than only when the window demands it.
+    //
+    // BE EXACT ABOUT WHO PROVIDES THAT BOUND. Autocompact is configured in the
+    // Claude provider, and `maybeRotateContinuation` is optional on the
+    // provider interface — so a provider implementing neither bounds a
+    // worker's transcript by nothing. That is not a regression introduced
+    // here: the wipe only ever fired for a worker, so an ordinary group on
+    // such a provider was already unbounded across tasks. A worker is now
+    // equal to it, and the missing bound belongs in that provider rather than
+    // in a branch only workers took.
     //
     // Deleting it also removed the exception it needed. A timed-out escalated
     // question used to require a flag — `markLateAnswerExpected` and a scan of

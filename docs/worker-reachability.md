@@ -389,6 +389,15 @@ by exception. What bounds a resuming worker's context is autocompact, which is
 lossier than a wipe in a different way: older turns become a summary rather than
 nothing at all, which is strictly more than the wipe preserved.
 
+**Be exact about who provides that bound.** Autocompact belongs to the Claude
+provider, and `maybeRotateContinuation` — the cold-resume guard — is optional on
+the provider interface. A provider implementing neither bounds a worker's
+transcript by nothing. That is not a regression the removal introduced: the wipe
+only ever fired for a worker, so an ordinary group on such a provider was
+already unbounded across tasks. The removal makes a worker equal to every other
+session on its provider, which is where the missing bound belongs — not in a
+branch only workers took.
+
 The `NOTES.md` handoff went with the wipe. It was injected into every worker's
 standing document to carry the one thing a wipe destroyed and the worktree did
 not hold — what was tried, rejected, and why. With the transcript kept, it asked
