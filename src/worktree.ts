@@ -128,13 +128,96 @@ export function resolveRepo(name: string, roots: readonly string[]): string {
     if (outcome.rejection && !rejection) rejection = outcome.rejection;
   }
 
+  // Both of these mean "you named the wrong thing", which is the one case a
+  // caller can act on — so they carry the names that would have worked.
   if (rejection) {
-    throw new Error(`Cannot resolve repo "${requested}": ${rejection.reason}. Allowed roots: ${roots.join(', ')}`);
+    throw new Error(`Cannot resolve repo "${requested}": ${rejection.reason}. ${availableRepos(roots)}`);
   }
   throw new Error(
     `Cannot resolve repo "${requested}": no git repository by that name under any allowed root. ` +
-      `Allowed roots: ${roots.join(', ')}`,
+      `${availableRepos(roots)}`,
   );
+}
+
+/**
+ * How many repository names a refusal will list.
+ *
+ * A ceiling rather than a page: the list exists so a caller can retry with a
+ * real name, and a caller that needs to read past forty names is not choosing
+ * from a list, it is searching — which `ncl` is for.
+ */
+const SUGGESTION_LIMIT = 40;
+
+/**
+ * How deep under a root a repository is looked for when LISTING.
+ *
+ * Two, because that is the shape the tool documents: `saber` and `wego/saber`.
+ * `resolveRepo` itself accepts any depth, so a repository nested deeper stays
+ * resolvable by name and simply will not appear in a refusal — the asymmetry
+ * is deliberate, since walking an unbounded tree to write an error message
+ * would make the failure path slower than the success path.
+ */
+const SUGGESTION_DEPTH = 2;
+
+/**
+ * The repository names that WOULD resolve, for a refusal to offer.
+ *
+ * A refusal that names only the roots leaves a caller no move but to guess
+ * again, and an agent that guesses a repository name twice has burned two
+ * turns to learn one fact. Naming what exists turns a dead end into a retry.
+ *
+ * Never throws: this runs while an error is already being built, and a second
+ * failure here would replace a precise refusal with a stack trace. An
+ * unreadable root contributes nothing and is skipped.
+ */
+export function listResolvableRepos(roots: readonly string[]): string[] {
+  const names = new Set<string>();
+
+  const walk = (dir: string, prefix: string, depth: number): void => {
+    if (depth > SUGGESTION_DEPTH || names.size >= SUGGESTION_LIMIT) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (names.size >= SUGGESTION_LIMIT) return;
+      // `isDirectory()` is false for a symlinked checkout, which is a normal
+      // way to lay one out — so follow the link and ask what it points at.
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+      if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+      const child = path.join(dir, entry.name);
+      const name = prefix ? `${prefix}/${entry.name}` : entry.name;
+      let isDir = false;
+      try {
+        isDir = fs.statSync(child).isDirectory();
+      } catch {
+        continue; // a broken symlink names nothing
+      }
+      if (!isDir) continue;
+      if (isGitRepositoryRoot(child)) {
+        // A repository does not contain the repositories we would offer, so
+        // stop here rather than descending into submodules and vendored trees.
+        names.add(name);
+        continue;
+      }
+      walk(child, name, depth + 1);
+    }
+  };
+
+  for (const root of roots) walk(root, '', 1);
+  return [...names].sort();
+}
+
+/** The tail of a refusal: the roots, and what actually resolves under them. */
+function availableRepos(roots: readonly string[]): string {
+  const rootList = `Allowed roots: ${roots.join(', ')}`;
+  const names = listResolvableRepos(roots);
+  if (names.length === 0) return `${rootList}. No git repository was found under any of them.`;
+  const shown = names.join(', ');
+  const more = names.length >= SUGGESTION_LIMIT ? ', … (list truncated)' : '';
+  return `${rootList}. Repositories you can name: ${shown}${more}`;
 }
 
 function resolveUnderRoot(requested: string, root: string): { path?: string; rejection: Rejection } {

@@ -159,7 +159,16 @@ export const spawnWorker: McpToolDefinition = {
         const parsed = JSON.parse(response.content) as WorkerResponse;
         log(`spawn_worker response: ${requestId} → ${parsed.status}`);
         if (parsed.status === 'error') {
-          return err(parsed.result?.error || `Could not create a worker for "${repo}".`);
+          // Say plainly that this is retryable. A refusal names what WOULD
+          // have worked (`resolveRepo` lists the resolvable repositories), so
+          // the useful next move is another call with a corrected argument —
+          // not an apology to the human, and not a silent abandonment of the
+          // delegation, which is what a bare error message tends to produce.
+          return err(
+            `${parsed.result?.error || `Could not create a worker for "${repo}".`} ` +
+              `Nothing was created, so this is safe to retry: correct the argument the message names and ` +
+              `call spawn_worker again. Ask the human only if the message gives you nothing to correct.`,
+          );
         }
         return ok(parsed.result?.message || `Worker "${name}" is ready in "${repo}".`);
       }
