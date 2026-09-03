@@ -19,7 +19,7 @@
  */
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
-import { getSession } from '../../db/sessions.js';
+import { composeThreadId, getSession } from '../../db/sessions.js';
 import type { Destination } from '../../mailbox/index.js';
 import { log } from '../../log.js';
 import { withMailboxSession } from '../../session-manager.js';
@@ -38,13 +38,15 @@ export async function writeDestinations(agentGroupId: string, sessionId: string)
     if (row.target_type === 'channel') {
       const mg = await getMessagingGroup(row.target_id);
       if (!mg) continue;
-      // COMPOSED, not stored. `bound_root_message_id` is the platform's own
-      // root id; a thread address is `<platform_id>:<root>`, which is the form
-      // every inbound row and every adapter uses. Composing it here rather
-      // than storing a second copy keeps one source of truth — and the
-      // composition is only ever used to SEND, never to match an inbound
-      // thread, which is the direction `threadRootMessageId` warns about.
-      const threadId = boundMg && boundRoot && mg.id === boundMg ? `${mg.platform_id}:${boundRoot}` : null;
+      // COMPOSED, not stored, and through the ONE function that owns the
+      // format (`composeThreadId`) rather than a second copy of the rule.
+      // `bound_root_message_id` is the platform's own root id; a thread
+      // address is `<platform_id>:<root>`, the form every inbound row and
+      // every adapter uses. This composition is only ever used to SEND, never
+      // to match an inbound thread — the direction `threadRootMessageId`
+      // warns about, and the reason the risk here is a visible top-level post
+      // rather than a silent miss.
+      const threadId = boundMg && boundRoot && mg.id === boundMg ? composeThreadId(mg.platform_id, boundRoot) : null;
       resolved.push({
         name: row.local_name,
         displayName: mg.name ?? row.local_name,

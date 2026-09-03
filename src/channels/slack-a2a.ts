@@ -85,13 +85,17 @@ function roomFromPlatformId(platformId: string): string {
 }
 
 /**
- * Build the A2A room policy. The hop counter is per bot identity and per room
- * — keyed on the guard's instanceKey, since each bridge instance is one bot
- * identity, and a bot's own outbound never arrives here (the SDK drops `isMe`
- * upstream). With two bots the effective conversation length is therefore
- * roughly 2×maxHops messages. Any human message in a room resets that room's
- * counter for the identity that heard it; every co-hosted identity hears the
- * same human message over its own connection, so the budgets reset together.
+ * Build the A2A room policy. The hop counter is per bot identity and per
+ * CONVERSATION — keyed on the guard's instanceKey, since each bridge instance
+ * is one bot identity, and a bot's own outbound never arrives here (the SDK
+ * drops `isMe` upstream). With two bots the effective conversation length is
+ * therefore roughly 2×maxHops messages.
+ *
+ * A conversation is one thread, or — for top-level posts, which Slack names
+ * after themselves — the room's shared `root` bucket. Any human message in a
+ * room resets EVERY conversation in it for the identity that heard it; every
+ * co-hosted identity hears the same human message over its own connection, so
+ * the budgets reset together.
  *
  * `getConfig` is injectable for tests; production reads .env with a short TTL
  * cache.
@@ -134,10 +138,15 @@ export function createA2aRoomPolicy(getConfig: () => A2aConfig = readA2aConfig):
       const key = isRoot ? `${ctx.instanceKey}:${room}:root` : `${ctx.instanceKey}:${room}:${ctx.threadId}`;
       const count = hops.get(key) ?? 0;
       if (count >= maxHops) {
+        // The thread is in the log because the budget is per thread: without
+        // it an operator can see that something was throttled but not which
+        // conversation, which is the diagnosis this key was narrowed to make
+        // possible in the first place.
         log.info('slack-a2a: hop limit reached — dropping bot messages until a human speaks', {
           room,
           botId: ctx.botId,
           maxHops,
+          conversation: isRoot ? 'root' : ctx.threadId,
         });
         return { action: 'drop', reason: 'hop limit reached' };
       }
@@ -147,9 +156,18 @@ export function createA2aRoomPolicy(getConfig: () => A2aConfig = readA2aConfig):
         // verbatim (see extractAndUpsertUser), so the users row becomes
         // `slack:bot:<bot_id>` — distinguishable from human `slack:U…` ids.
         senderId: `slack:bot:${ctx.botId}`,
-        // The guard fires this only after downstream accepted the message —
-        // a throw in the host's onInbound must not consume budget for a
-        // message that never reached a session.
+        // The guard fires this only after `onInbound` resolves. BE EXACT
+        // ABOUT WHAT THAT PROVES: the host's `onInbound` (src/index.ts) calls
+        // `routeInbound(...).catch(...)`, so it is fire-and-forget with a
+        // swallowing catch and effectively never rejects. In practice budget
+        // is therefore consumed on ADMISSION, not on a message having reached
+        // a session.
+        //
+        // The hook is still the right shape — a consumer that does propagate
+        // gets the accounting it expects, and the guard should not have to
+        // know which one it has — but nothing here should be read as proof
+        // that a failed route refunds its hop. Fail-safe is the intent: a
+        // thread nobody serves must not churn without limit.
         onAccepted: () => {
           hops.set(key, count + 1);
           // Bounded even in a room no human ever speaks in. Entries are only
