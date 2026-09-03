@@ -355,12 +355,33 @@ instruction sent during the same turn is silently relabelled as the answer.
 
 **The expiry is load-bearing.** A `system` row is skipped by kind in the poll
 loop, so a late answer with no tool waiting would be silently discarded. Bounding
-the host's pending row by the same 600 s the tool waits makes a late
-`answer_worker` degrade to an ordinary message instead — and the tool can say so
-in its result.
+the host's pending row on the tool's own deadline makes a late `answer_worker`
+degrade to an ordinary message instead — and the tool can say so in its result.
 
-`markLateAnswerExpected` keeps the transcript for exactly one batch, so the late
-answer lands with its question still above it.
+**The deadline travels; it is not a second copy of the constant.** This was two
+600 s constants, one per runtime, held together by a comment asking them to move
+together. A comment cannot hold that, and two separate things broke it:
+`ask_user_question` takes a caller-supplied `timeout`, so the pair could diverge
+per call with nothing wrong in either file; and even at equal values the clocks
+start at different moments, because the host stamps `created_at` when DELIVERY
+processes the outbound row, a poll after the tool began waiting. Both gaps end
+identically — the fast path writes a `question_response` for a tool that has
+stopped listening, and it is dropped by kind.
+
+So the tool sends its own `expiresAt` in the envelope that already carries
+`title` and `options`, and the host stores it (`expires_at`, migration 029). It
+is computed BEFORE the write, so the stored instant is slightly earlier than the
+one the tool truly waits until — the safe direction, because expiring early
+delivers the answer as prose while the tool still listens, and expiring late
+destroys it. A row written by an older container carries no deadline and falls
+back to the historical bound.
+
+**The late-answer flag names its question, and reading it does not consume it.**
+It used to hold "yes" and clear on the next batch, whichever batch that was — so
+an unrelated message took the exemption and the real answer arrived to a
+transcript that had just been wiped, which is the exact failure the flag exists
+to prevent. Only the message carrying that answer clears it now, which the host
+can mark because it knows which question it is degrading.
 
 ## 2.6 Channel sessions are untouched
 
@@ -598,15 +619,22 @@ holds. The grant therefore re-projects into every live session of the worker.
 - **`performAgentRoute` renders `content.text` only.** Any structured field must
   ride alongside prose, never instead of it — that is why the escalated
   envelope carries both.
-- **The question TTL is duplicated on purpose, in two places that must agree.**
-  `ESCALATED_TIMEOUT_S` in the container's `interactive.ts` and
-  `QUESTION_TTL_MS` in `answer-worker.ts`. Past the tool's bound nothing is
-  polling, so a `question_response` written then is skipped by kind and lost;
-  bounding the host on the same clock is what turns that loss into a plain
-  message. Move them together.
-- **The bound-session pass is delivery-only and additive.** It counts toward
-  `engagedCount` so a delivered message is not audited as dropped, and it skips
-  any agent group the wired loop already served. It deliberately does not run
+- **The question deadline is sent, not duplicated.** It was two constants that
+  had to agree — `ESCALATED_TIMEOUT_S` and `QUESTION_TTL_MS` — and a caller-set
+  `timeout` plus a delivery-poll of clock skew both broke the agreement without
+  making either file wrong. The container now sends `expiresAt` and the host
+  stores it. `LEGACY_QUESTION_TTL_MS` remains only for rows written before that.
+- **The bound-session pass is delivery-only, and additive at AGENT-GROUP
+  granularity.** It counts toward `engagedCount` so a delivered message is not
+  audited as dropped, and it skips every agent group this chat's wiring names —
+  not merely the ones the loop delivered to. That distinction is the whole
+  property: the bind hook claims any session whose root post lands, wired or
+  not, so an ordinary `mention` agent gets bound the first time it answers at
+  top level, and a pass that re-decided engagement for it would silently turn
+  `mention` into `mention-sticky` and hand a `sender_scope`-refused sender the
+  reach two gates had just denied. Taking the skip set from the WIRING rather
+  than from the loop's outcomes is what makes "additive" true rather than
+  aspirational. It deliberately does not run
   `backfillNewSession` (the session is long alive) or `fanInboundMessage` (a
   bound worker is a guest in the thread, not a member of the chat's session
   family). It DOES run the command gate, so a bound thread is not the one
