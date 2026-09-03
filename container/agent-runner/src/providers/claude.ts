@@ -335,6 +335,26 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
 }
 
 /**
+ * Is this tool on the denylist?
+ *
+ * The list holds exact names AND one trailing-`*` prefix (`mcp__claude_ai_*`),
+ * because a family of account connectors cannot be enumerated — the set
+ * depends on which connectors the human has authorised, and changes without
+ * a deploy. `Array.includes` compared the pattern literally, so the wildcard
+ * entry matched nothing and this hook silently covered every entry EXCEPT the
+ * one that needed a pattern.
+ *
+ * It was harmless in practice only because `TOOL_ALLOWLIST` already excludes
+ * those MCP namespaces, so nothing reached the hook. That is one layer doing
+ * the work of two, which is exactly what a defense-in-depth check is not.
+ */
+export function isDisallowedTool(toolName: string): boolean {
+  return SDK_DISALLOWED_TOOLS.some((entry) =>
+    entry.endsWith('*') ? toolName.startsWith(entry.slice(0, -1)) : entry === toolName,
+  );
+}
+
+/**
  * PreToolUse hook: record the current tool + its declared timeout so the host
  * sweep can widen its stuck tolerance while Bash is running a long-declared
  * script. Defense-in-depth: if SDK_DISALLOWED_TOOLS slips through somehow,
@@ -343,7 +363,7 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
 const preToolUseHook: HookCallback = async (input) => {
   const i = input as { tool_name?: string; tool_input?: Record<string, unknown> };
   const toolName = i.tool_name ?? '';
-  if (SDK_DISALLOWED_TOOLS.includes(toolName)) {
+  if (isDisallowedTool(toolName)) {
     return {
       decision: 'block',
       stopReason: `Tool '${toolName}' is not available in this environment — use the nanoclaw equivalent.`,

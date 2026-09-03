@@ -1297,11 +1297,26 @@ export async function autoAppendTaskLog(text: string): Promise<void> {
 async function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): Promise<void> {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
-  // Resolve thread_id per-destination from the most recent inbound message
-  // that came from this same channel+platform. In agent-shared sessions,
-  // different destinations have different thread contexts — using a single
-  // routing.threadId would stamp one channel's thread onto another.
-  const destRouting = resolveDestinationThread(channelType, platformId);
+
+  // THE BATCH'S OWN CHANNEL ANSWERS ITSELF; every other destination is looked
+  // up. Per-destination resolution exists because an agent-shared session
+  // holds several channels at once and a single `routing.threadId` would
+  // stamp one channel's thread onto another — that reason is unchanged and is
+  // why the lookup stays for the `else`.
+  //
+  // But `getLatestInboundRoute` answers "the newest row on this channel",
+  // which is only the same thing as "the conversation I am replying to" when
+  // the session serves ONE thread per channel. A `shared` wiring serves the
+  // whole messaging group, so several live threads land in one session, and
+  // the newest row can be a different thread than the batch — or a message
+  // that arrived after this batch was claimed and the agent never read.
+  // Replying there posts a considered answer into a stranger's conversation.
+  //
+  // `routing` is the first non-echo row of the batch the agent actually read,
+  // so for that channel it is both correct and stable under interleaving.
+  const isBatchChannel =
+    routing.channelType !== null && channelType === routing.channelType && platformId === routing.platformId;
+  const destRouting = isBatchChannel ? null : resolveDestinationThread(channelType, platformId);
   // Channel destinations only. An agent-to-agent message is machine input,
   // and a telemetry line appended to it is noise the receiving agent has to
   // reason about.
@@ -1316,7 +1331,7 @@ async function sendToDestination(dest: DestinationEntry, body: string, routing: 
     kind: 'chat',
     platform_id: platformId,
     channel_type: channelType,
-    thread_id: destRouting?.threadId ?? null,
+    thread_id: isBatchChannel ? routing.threadId : (destRouting?.threadId ?? null),
     content: JSON.stringify({ text: body, ...(footer ? { footer } : {}) }),
   });
 }

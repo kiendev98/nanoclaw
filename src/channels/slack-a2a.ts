@@ -100,7 +100,19 @@ export function createA2aRoomPolicy(getConfig: () => A2aConfig = readA2aConfig):
       if (!rooms.has(room)) {
         return { action: 'drop', reason: 'room not in SLACK_A2A_ROOMS' };
       }
-      const key = `${ctx.instanceKey}:${room}`;
+      // PER THREAD, NOT PER ROOM. The budget bounds one runaway exchange, and
+      // a room is not an exchange: `#ai-anya` carries a live thread per pull
+      // request, so a room-wide key let one PR's review spend the budget for
+      // every other PR — and the symptom lands on an innocent thread, which
+      // is the hardest place to look.
+      //
+      // A dropped message still consumes budget, and that is deliberate: the
+      // counter bounds BOT CHATTER in a thread, not just bot conversation.
+      // `onAccepted` fires once the host's `onInbound` resolves, and the host
+      // resolves whether or not an agent engaged — so counting it keeps the
+      // guard fail-safe rather than letting a thread nobody serves churn
+      // without limit.
+      const key = `${ctx.instanceKey}:${room}:${ctx.threadId ?? 'root'}`;
       const count = hops.get(key) ?? 0;
       if (count >= maxHops) {
         log.info('slack-a2a: hop limit reached — dropping bot messages until a human speaks', {
@@ -123,8 +135,15 @@ export function createA2aRoomPolicy(getConfig: () => A2aConfig = readA2aConfig):
       };
     },
     onHumanInbound(ctx) {
-      // Human message — reset this identity's hop counter for the room.
-      hops.delete(`${ctx.instanceKey}:${roomFromPlatformId(ctx.platformId)}`);
+      // A human speaking clears every thread's budget in that room, not just
+      // the thread they spoke in. The key got narrower; this deliberately did
+      // not, because the signal is "a person is here and watching" — and
+      // narrowing the reset alongside the key would strand a thread that had
+      // already run out, with the human's own message unable to free it.
+      const prefix = `${ctx.instanceKey}:${roomFromPlatformId(ctx.platformId)}:`;
+      for (const key of hops.keys()) {
+        if (key.startsWith(prefix)) hops.delete(key);
+      }
     },
   };
 }
