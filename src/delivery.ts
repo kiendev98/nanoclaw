@@ -4,6 +4,9 @@
  * host-owned inbound state; other implementations preserve that ownership.
  */
 import {
+  bindSessionToThread,
+  composeThreadId,
+  findSessionThreadBinding,
   getRunningSessions,
   getActiveSessions,
   createPendingQuestion,
@@ -399,6 +402,7 @@ async function deliverMessage(
   // (instead of marking it delivered when nothing was actually delivered,
   // which was the pre-refactor bug).
   let deliverInstance: string | undefined;
+  let deliverMg: { id: string; platformId: string } | undefined;
   if (msg.channelType && msg.platformId) {
     // Resolve the messaging group ORIGIN-SESSION-FIRST: when the message
     // targets the session's own chat address, the origin row wins even if
@@ -445,6 +449,10 @@ async function deliverMessage(
       }
     }
     deliverInstance = mg.instance;
+    // Carried out of this block for the thread-binding hooks below, which
+    // need the messaging group's identity — `msg.platformId` alone cannot
+    // stand in for it, since sibling instances share a platform address.
+    deliverMg = { id: mg.id, platformId: mg.platform_id };
   }
 
   // Track pending questions for ask_user_question flow.
@@ -490,15 +498,64 @@ async function deliverMessage(
       ? readOutboxFiles(session.agent_group_id, session.id, msg.id, content.files as string[])
       : undefined;
 
+  // HOOK 3 — keep talking in the thread this session already opened here.
+  //
+  // Only a message that names no thread is redirected: an addressed one is
+  // already going where the agent meant it to go. Read from the DB rather
+  // than from `session`, which a drain loads once — the message that CREATES
+  // the binding is often earlier in this very batch.
+  //
+  // Failure is non-fatal. The binding is a convenience on top of a delivery
+  // that is otherwise correct, so a lookup error costs a top-level post, not
+  // the message.
+  let deliverThreadId = msg.threadId;
+  if (deliverThreadId === null && deliverMg) {
+    try {
+      const boundRoot = await findSessionThreadBinding(session.id, deliverMg.id);
+      if (boundRoot) deliverThreadId = composeThreadId(deliverMg.platformId, boundRoot);
+    } catch (err) {
+      log.warn('Bound-thread lookup failed, delivering at top level', { id: msg.id, sessionId: session.id, err });
+    }
+  }
+
   const platformMsgId = await deliveryAdapter.deliver(
     msg.channelType,
     msg.platformId,
-    msg.threadId,
+    deliverThreadId,
     msg.kind,
     msg.content,
     files,
     deliverInstance,
   );
+
+  // HOOK 1 — this post OPENED a thread, so claim it.
+  //
+  // `deliverThreadId === null` is precisely the condition: the message named
+  // no thread and none was bound, so the channel had nowhere to put it but
+  // top level, and its own id is now that thread's root.
+  //
+  // ONLY A ROOT POST BINDS. A reply carries its own message id, which names
+  // no thread — measured on a live install, a reply delivered into the thread
+  // rooted at `…925.613579` came back as `1788370933.675069`. Binding on
+  // every delivery would store a key no inbound thread can ever match, and it
+  // would fail silently.
+  //
+  // Non-fatal for the same reason as hook 3, and placed after a SUCCESSFUL
+  // send so nothing is claimed on behalf of a message the channel refused.
+  if (deliverThreadId === null && platformMsgId && deliverMg) {
+    try {
+      const bound = await bindSessionToThread(session.id, deliverMg.id, platformMsgId);
+      if (bound) {
+        log.info('Session bound to the thread it opened', {
+          sessionId: session.id,
+          messagingGroupId: deliverMg.id,
+          rootMessageId: platformMsgId,
+        });
+      }
+    } catch (err) {
+      log.warn('Could not bind the opened thread', { id: msg.id, sessionId: session.id, err });
+    }
+  }
   log.info('Message delivered', {
     id: msg.id,
     channelType: msg.channelType,
