@@ -185,6 +185,26 @@ export const SDK_DISALLOWED_TOOLS = [
   'ExitWorktree',
   'DesignSync',
   'ReportFindings',
+  // Every claude.ai account connector, denied wholesale.
+  //
+  // Under the local driver the spawned `claude` reads the OS keychain and
+  // authenticates as the HUMAN, so it loads that person's account connectors
+  // on top of the servers nanoclaw injects. Two costs, and the first is the
+  // reason this entry exists: a Slack call made through `claude_ai_Slack` is
+  // attributed to the human, not to the bot, so the bot can act as them in a
+  // channel with nothing in the audit trail to say otherwise. The second is
+  // context — one real worker turn carried 28,646 tokens of connector schema,
+  // against 4,724 for nanoclaw's own tools.
+  //
+  // A denylist rather than `strictMcpConfig`, deliberately. Strict mode drops
+  // every configuration the SDK did not receive directly, which would also
+  // take `code-review-graph` and the anya plugin — both wanted, and both
+  // user-scope rather than account connectors. This entry names exactly the
+  // family that carries the human's identity.
+  //
+  // Nanobot only: this list is the agent-runner's, so an ordinary Claude Code
+  // session on this machine keeps every connector.
+  'mcp__claude_ai_*',
 ];
 
 // Tool allowlist for NanoClaw agent containers. MCP-tool entries are derived

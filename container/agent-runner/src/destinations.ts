@@ -11,6 +11,8 @@
  * so even if this table is stale the host's enforcement is authoritative.
  */
 import { getAgentMailbox } from './mailbox/index.js';
+import { getSessionRouting } from './db/session-routing.js';
+import { isAgentLane } from './session-lane.js';
 import type { Destination } from './mailbox/types.js';
 
 export interface DestinationEntry {
@@ -64,7 +66,13 @@ export function buildSystemPromptAddendum(assistantName?: string, mode: SessionM
   const sections: string[] = [];
 
   if (assistantName) {
-    sections.push(['# You are ' + assistantName, '', `Your name is **${assistantName}**. Use it when the channel asks who you are, when introducing yourself, and when signing any message that explicitly calls for a signature.`].join('\n'));
+    sections.push(
+      [
+        '# You are ' + assistantName,
+        '',
+        `Your name is **${assistantName}**. Use it when the channel asks who you are, when introducing yourself, and when signing any message that explicitly calls for a signature.`,
+      ].join('\n'),
+    );
   }
 
   sections.push(buildDestinationsSection(mode));
@@ -107,6 +115,38 @@ function buildDestinationsSection(mode: SessionMode): string {
       '',
       `Your final output is not sent to the user. End with a concise work-log summary. It is recorded automatically in \`tasks/${mode.taskId}.md\`. Read that file when you need context from earlier runs. Use \`ncl tasks append-log --msg "…"\` only for optional mid-run notes.`,
     );
+    return lines.join('\n');
+  }
+
+  // A WORKER GETS DIFFERENT ADVICE, and the advice below is why.
+  //
+  // The `send_message` line further down recommends a mid-turn acknowledgment
+  // — sound for a channel session, where a human is watching and waiting. A
+  // worker's correspondent is the agent that spawned it, which is not waiting,
+  // and whose lane already delivers the worker's text once at stream close. A
+  // real worker read that line, applied it to `parent`, and sent three reports
+  // for one task.
+  //
+  // Read from the ROUTING rather than from `mode`, because the lane is a fact
+  // about the session and `SessionMode` has no worker case to add one to.
+  if (isAgentLane(getSessionRouting())) {
+    lines.push(
+      'You are a worker: the agent that spawned you is your only correspondent, and it reads everything you write. Do NOT address it — `send_message` refuses it. Just write your answer.',
+    );
+    lines.push('');
+    lines.push(
+      'Only your LAST turn is delivered. Your plain text is held and replaced each turn, and the final one is sent when your work ends. Write it as the only thing your orchestrator will read, because it is — and do not re-summarise your progress every turn, because those drafts are overwritten, not sent.',
+    );
+    lines.push('');
+    lines.push(
+      'To reach it BEFORE you finish, call `report_progress({ text })`. It arrives at once, does not block, does not end your turn, and is marked as progress so it is neither mistaken for your answer nor relayed to a human. Use it for something worth knowing early — a plan you settled on, a surprise, a long wait you are entering. To ASK it something, call `ask_user_question`, which blocks until it answers.',
+    );
+    if (all.some((destination) => destination.type === 'channel')) {
+      lines.push('');
+      lines.push(
+        `Your channel destination(s) are a work counterparty, not your principal: post there with \`send_message({ to, text })\` and read the replies in your own thread. Decisions still go to the agent that spawned you — a reviewer who asks for a rework has raised a question, not answered one.`,
+      );
+    }
     return lines.join('\n');
   }
 

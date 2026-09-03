@@ -13,7 +13,7 @@ import { findByName, getAllDestinations } from '../destinations.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
 import { getCurrentInReplyTo } from '../db/session-state.js';
 import { getSessionRouting } from '../db/session-routing.js';
-import { sessionOwnsAChannel } from '../session-lane.js';
+import { isAgentLane, sessionOwnsAChannel } from '../session-lane.js';
 import { getAgentMailbox } from '../mailbox/index.js';
 import { AGENT_DIR, OUTBOX_DIR } from '../roots.js';
 import { registerTools } from './server.js';
@@ -26,6 +26,17 @@ function log(msg: string): void {
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
+
+/**
+ * Marks a `report_progress` note so the orchestrator can tell it from the
+ * answer, and knows not to relay it.
+ *
+ * Carried in the TEXT rather than as a field on the content JSON, because the
+ * orchestrator reads this through the ordinary formatter — `<message from=…>`
+ * renders `content.text` and drops everything else, so a field would be
+ * invisible at exactly the moment it has to be read.
+ */
+export const PROGRESS_PREFIX = '[progress — not the final answer, no need to relay]';
 
 function ok(text: string) {
   return { content: [{ type: 'text' as const, text }] };
@@ -96,8 +107,38 @@ function resolveRouting(
 ): { channel_type: string; platform_id: string; thread_id: string | null; resolvedName: string } | { error: string } {
   const dest = findByName(to);
   if (!dest) return { error: `Unknown destination "${to}". Known: ${destinationList()}` };
+  const session = getSessionRouting();
+  // A WORKER MAY NOT ADDRESS ITS OWN ORCHESTRATOR, and the row it would
+  // address is deliberately left in place.
+  //
+  // `provision-agent.ts` grants every worker a `parent` destination, but not
+  // so the worker can type it: the runner's automatic report is routed to the
+  // orchestrator BY CODE, and that route passes the `a2a.send` guard, which
+  // denies any pair with no destination row. The NAME is a side effect of
+  // destinations being both the permission and the address.
+  //
+  // That side effect had a cost. A worker reports by simply writing its
+  // answer — held in `pendingLaneReport`, superseded each turn, delivered ONCE
+  // when the stream closes — and `send_message` bypasses all of it, delivering
+  // immediately and as many times as it is called. A real run sent three
+  // reports for one task, which is the running commentary the once-at-close
+  // flush exists to prevent.
+  //
+  // Scoped to `isAgentLane`, NOT to "is an agent destination". A `create_agent`
+  // companion has no lane — `workerOrchestratorGroup` returns null unless BOTH
+  // `workspace_path` and `origin_session_id` are set, and `create_agent` leaves
+  // both NULL — so `parent` is its ONLY way to reach its creator. Refusing
+  // there would cut a companion off from the agent that made it.
+  if (dest.type === 'agent' && isAgentLane(session) && dest.agentGroupId === session.platform_id) {
+    return {
+      error:
+        `"${to}" is the agent that spawned you, and your replies already reach it. ` +
+        `Write your answer as ordinary text — the runner delivers it when your turn ends. ` +
+        `To say something mid-task use report_progress({text}); to ASK it something use ` +
+        `ask_user_question, which blocks until it answers.`,
+    };
+  }
   if (dest.type === 'channel') {
-    const session = getSessionRouting();
     const isOwnChannel = session.channel_type === dest.channelType && session.platform_id === dest.platformId;
     let threadId: string | null = null;
     if (isOwnChannel) {
@@ -287,4 +328,72 @@ export const addReaction: McpToolDefinition = {
   },
 };
 
-registerTools([sendMessage, sendFile, editMessage, addReaction]);
+/**
+ * The cheap door to the orchestrator, opened because closing the wrong one is
+ * only half a fix.
+ *
+ * A worker had exactly two ways to reach the agent that spawned it, and
+ * neither fits "tell it something and keep working":
+ *
+ *   report   — automatic, and only at stream close. Cannot be used mid-task.
+ *   ask      — `ask_user_question`, which BLOCKS for 600 s.
+ *
+ * So a worker with something to say mid-task and no question to ask had no
+ * tool shaped for it, and reached for `send_message({to:"parent"})` — which
+ * delivered immediately, as many times as it was called, defeating the
+ * once-at-close flush. Refusing that name without providing this tool would
+ * leave the same need with no outlet at all.
+ *
+ * Deliberately NOT a second report. The text is prefixed, so the orchestrator
+ * can tell a progress note from the answer — which is the property
+ * `pendingLaneReport` was introduced to protect, and the one an unmarked
+ * mid-turn message destroys. The prefix also tells the orchestrator not to
+ * relay it, so the human still sees one report per worker.
+ */
+export const reportProgress: McpToolDefinition = {
+  tool: {
+    name: 'report_progress',
+    description:
+      'Tell the agent that spawned you what you are doing, mid-task, without blocking and without ending your turn. ' +
+      'Use it sparingly, for something it would want to know before you finish — a plan you have settled on, a ' +
+      'surprise you hit, a long wait you are entering. It is NOT your answer: your answer is the ordinary text you ' +
+      'write at the end of your turn, which reaches it automatically. Worker sessions only.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        text: {
+          type: 'string',
+          description: 'What you are doing or what you found. One or two sentences.',
+        },
+      },
+      required: ['text'],
+    },
+  },
+  async handler(args) {
+    const text = ((args.text as string) || '').trim();
+    if (!text) return err('text is required');
+
+    const session = getSessionRouting();
+    if (!isAgentLane(session)) {
+      return err(
+        'report_progress is for a worker reporting to the agent that spawned it. This session has a ' +
+          `conversation of its own — use send_message({to, text}) instead. Destinations: ${destinationList()}`,
+      );
+    }
+
+    const seq = await writeMessageOut({
+      id: generateId(),
+      in_reply_to: getCurrentInReplyTo(),
+      kind: 'chat',
+      platform_id: session.platform_id!,
+      channel_type: session.channel_type!,
+      thread_id: null,
+      content: JSON.stringify({ text: `${PROGRESS_PREFIX} ${text}` }),
+    });
+
+    log(`report_progress: #${seq} → orchestrator`);
+    return ok(`Progress reported (id: ${seq}). Keep working — this was not your answer.`);
+  },
+};
+
+registerTools([sendMessage, sendFile, editMessage, addReaction, reportProgress]);
