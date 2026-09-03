@@ -305,6 +305,28 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   // 1b. No wirings — either silent drop (plain chatter / denied channel) or
   //     escalate to owner for channel-registration approval.
   if (agentCount === 0) {
+    // A BINDING IS REACH THIS COUNT CANNOT SEE. `agentCount` counts
+    // `messaging_group_agents` rows, and a bound session deliberately has
+    // none — that absence is what makes a lent channel die with the session
+    // instead of leaving a wiring row behind. So a worker lent a channel no
+    // other agent uses would have its replies dropped here, ~160 lines before
+    // the fan-out that would have delivered them, with the post it was
+    // replying to having gone out perfectly well.
+    //
+    // The lookup runs first and the sender is resolved only once it hits, so
+    // the short-circuit this block exists for still costs one indexed read on
+    // an ordinary unwired channel — no auto-create, no sender resolution, no
+    // log spam, exactly as before.
+    const bound = await findBoundSessionFor(mg, event);
+    if (bound) {
+      const boundUserId = senderResolver ? await senderResolver(event) : null;
+      // `served` is empty on purpose: no wired agent ran, so none was served.
+      if (await deliverToBoundSession(mg, event, boundUserId, bound, new Set())) return;
+    }
+
+    // A thread reply is engaged by its binding, not by a mention — but with no
+    // binding this is an ordinary unwired channel again, and the mention rule
+    // decides as it always did.
     if (!isMention) return;
     if (mg.denied_at) {
       log.debug('Message dropped — channel was denied by owner', {
@@ -465,7 +487,8 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   //    that is deliberately NOT wired — a repo worker granted one channel for
   //    one job. It posts, a thread forms around its post, and a human replies
   //    in that thread expecting the thing they are replying to to hear them.
-  if (await deliverToBoundSession(mg, event, userId, served)) engagedCount++;
+  const boundHere = await findBoundSessionFor(mg, event);
+  if (boundHere && (await deliverToBoundSession(mg, event, userId, boundHere, served))) engagedCount++;
 
   if (engagedCount + accumulatedCount === 0) {
     await recordDroppedMessage({
@@ -481,8 +504,12 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
 }
 
 /**
- * Deliver into the session that opened this thread, when the wired fan-out
- * did not already reach its agent group.
+ * The session that opened this thread, if one did — the first half of the
+ * second routing pass.
+ *
+ * The pair below exists because a thread can belong to an agent group this
+ * chat's wiring does not mention, and `getMessagingGroupAgents` answers only
+ * "who is wired here".
  *
  * ADDITIVE, NEVER A REPLACEMENT. Every wired agent resolves exactly as it did
  * before this existed and is served first; this only ever appends a delivery
@@ -508,27 +535,45 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
  * chat and a binding must never hand one of them the other's session. Here the
  * binding is not a filter applied to a group we already picked — it is what
  * NAMES the group, so it is the authority rather than a check against one.
+ */
+async function findBoundSessionFor(mg: MessagingGroup, event: InboundEvent): Promise<Session | undefined> {
+  // A top-level post is nobody's thread reply. `threadRootMessageId` parses
+  // the root out of the inbound id rather than rebuilding the composed form,
+  // because a rebuilt guess that stops matching fails by silently finding
+  // nothing — see its own note in db/sessions.ts.
+  if (!event.threadId) return undefined;
+
+  // AN OWNER'S REFUSAL OUTRANKS A BINDING. `denied_at` is a person saying this
+  // channel may not be used, and a session that opened a thread there before
+  // the refusal must not be the way back in. Checked here rather than at the
+  // call sites so it cannot be forgotten by whichever one is added next.
+  if (mg.denied_at) return undefined;
+
+  return findSessionBoundToThread(mg.id, threadRootMessageId(event.threadId));
+}
+
+/**
+ * Deliver into a session already known to be bound to this thread.
+ *
+ * Split from the lookup because the two call sites need it at different
+ * moments: the unwired branch has to ask BEFORE it decides the channel is
+ * uninteresting, and it resolves the sender only once a binding is found.
  *
  * @param served Agent groups the wired loop already delivered to, engaged or
  *   accumulated. A group in this set is skipped: it has the message, and a
- *   second write would collide on the namespaced `messages_in.id`.
- * @returns Whether a delivery happened, so the caller does not record a
- *   message this took as dropped.
+ *   second write would collide on the namespaced `messages_in.id`. The unwired
+ *   caller passes an empty set, because no wired agent ran there at all.
+ * @returns Whether a delivery happened, so the caller neither records the
+ *   message as dropped nor escalates the channel for registration.
  */
 async function deliverToBoundSession(
   mg: MessagingGroup,
   event: InboundEvent,
   userId: string | null,
+  bound: Session,
   served: Set<string>,
 ): Promise<boolean> {
-  // A top-level post is nobody's thread reply. `threadRootMessageId` parses
-  // the root out of the inbound id rather than rebuilding the composed form,
-  // because a rebuilt guess that stops matching fails by silently finding
-  // nothing — see its own note in db/sessions.ts.
-  if (!event.threadId) return false;
-
-  const bound = await findSessionBoundToThread(mg.id, threadRootMessageId(event.threadId));
-  if (!bound || served.has(bound.agent_group_id)) return false;
+  if (served.has(bound.agent_group_id)) return false;
 
   const agentGroup = await getAgentGroup(bound.agent_group_id);
   if (!agentGroup) return false;

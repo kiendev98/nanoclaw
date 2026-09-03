@@ -47,6 +47,7 @@ import {
   createSession,
   bindSessionToThread,
 } from './db/index.js';
+import { setMessagingGroupDeniedAt } from './db/messaging-groups.js';
 import { getUnregisteredSenders } from './db/dropped-messages.js';
 import { initChannelAdapters, registerChannelAdapter, teardownChannelAdapters } from './channels/channel-registry.js';
 import { inboundDbPath } from './mailbox/sqlite/paths.js';
@@ -129,6 +130,29 @@ async function seedChat(engageMode: MessagingGroupAgent['engage_mode'] = 'mentio
     threads: 1,
     created_at: now(),
   });
+}
+
+/**
+ * The same chat with NOTHING wired to it, and optionally refused by the owner.
+ *
+ * This is the shape that used to lose the reply: `agentCount` counts
+ * `messaging_group_agents` rows and a binding writes none, so the router
+ * short-circuited ~160 lines before the pass that would have delivered.
+ */
+async function seedUnwiredChat(deniedAt: string | null = null): Promise<void> {
+  await createMessagingGroup({
+    id: 'mg-1',
+    channel_type: 'testchat',
+    platform_id: 'testchat:C1',
+    instance: 'testchat',
+    name: 'ai-anya',
+    is_group: 1,
+    unknown_sender_policy: 'public',
+    created_at: now(),
+  });
+  // Stamped separately because the insert above does not carry the column —
+  // a refusal is an admin action on an existing row, never part of creating one.
+  if (deniedAt) await setMessagingGroupDeniedAt('mg-1', deniedAt);
 }
 
 /**
@@ -252,6 +276,72 @@ describe('a reply in a bound thread reaches the session that opened it', () => {
     await inbound('m1', BOUND_THREAD, 'rework the migration');
 
     expect(await getUnregisteredSenders()).toHaveLength(0);
+  });
+});
+
+describe('a channel with nothing else wired to it', () => {
+  it('still delivers to the bound session', async () => {
+    // The motivating regression. `agentCount === 0` returns before the fan-out,
+    // and a binding writes no wiring row for that count to see — so lending a
+    // worker a channel no other agent uses lost every reply, while the post it
+    // was replying to had gone out perfectly well.
+    await seedUnwiredChat();
+    await seedBoundWorker();
+    await activate();
+
+    await inbound('m-unwired', BOUND_THREAD, 'rework the migration');
+
+    const rows = inboundRows('ag-worker', WORKER_SESSION);
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0].content).text).toBe('rework the migration');
+  });
+
+  it('does not record that reply as an unwired-channel drop', async () => {
+    // A delivered message must not also be audited as lost, or the operator
+    // is told the channel needs wiring it does not need.
+    await seedUnwiredChat();
+    await seedBoundWorker();
+    await activate();
+
+    await inbound('m-unwired-2', BOUND_THREAD, 'rework the migration', true);
+
+    expect(await getUnregisteredSenders()).toHaveLength(0);
+  });
+
+  it('refuses when the owner denied the channel', async () => {
+    // `denied_at` is a person saying this channel may not be used. A session
+    // that opened a thread there before the refusal must not be the way back
+    // in — the binding does not outrank the human.
+    await seedUnwiredChat(now());
+    await seedBoundWorker();
+    await activate();
+
+    await inbound('m-denied', BOUND_THREAD, 'rework the migration', true);
+
+    expect(inboundRows('ag-worker', WORKER_SESSION)).toHaveLength(0);
+  });
+
+  it('still drops an ordinary message when nothing is bound', async () => {
+    // The short-circuit this branch exists for is unchanged: an unwired
+    // channel with no binding behaves exactly as it did before.
+    await seedUnwiredChat();
+    await activate();
+
+    await inbound('m-plain', OTHER_THREAD, 'hello?', true);
+
+    expect(sessionDirsFor('ag-worker')).toHaveLength(0);
+    expect(await getUnregisteredSenders()).toHaveLength(1);
+  });
+
+  it('ignores a reply in another thread of that same unwired channel', async () => {
+    // Thread-scoped, on this path too: the grant is one thread, not the chat.
+    await seedUnwiredChat();
+    await seedBoundWorker();
+    await activate();
+
+    await inbound('m-other', OTHER_THREAD, 'unrelated', true);
+
+    expect(inboundRows('ag-worker', WORKER_SESSION)).toHaveLength(0);
   });
 });
 

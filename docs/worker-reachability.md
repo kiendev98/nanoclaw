@@ -545,13 +545,33 @@ reachable.**
   needs a second worker, which a second orchestrator thread already gives you.
 - **The worker cannot post outside its grant.** Gate 2 still refuses.
 - **Anya's messages elsewhere in ai-anya never reach the worker.**
-- **The channel must have at least one agent wired to it.** `routeInbound`
-  returns early when the messaging group has no wired agents at all, before the
-  bound-session pass runs — so lending a worker a channel nobody else is wired
-  to silently does not work. Harmless for pr-babysit, where the orchestrator is
-  wired to ai-anya. Fixing it means moving the bound lookup above that early
-  return, which tangles with the channel-registration escalation that lives
-  there; it was left alone deliberately.
+- **A denied channel stays denied.** `denied_at` is a person saying this
+  channel may not be used, and a session that opened a thread there before the
+  refusal is not a way back in. The binding does not outrank the human.
+
+## The channel needs no wiring of its own
+
+`routeInbound` short-circuits on `agentCount === 0` about 160 lines before the
+bound-session pass, and `agentCount` counts `messaging_group_agents` rows — of
+which a binding writes none. That absence is deliberate: it is what makes a
+lent channel die with the session instead of leaving a wiring row for an
+operator to find later. But it also meant the count could not see the one
+consumer that existed, so a worker lent a channel no other agent used had every
+reply dropped, while the post it was replying to went out perfectly well.
+Outbound worked and inbound did not, which is the hardest shape to diagnose.
+
+The lookup now runs inside that branch, before it decides the channel is
+uninteresting. Three things keep it honest:
+
+- **The cheap short-circuit survives.** The binding lookup is one indexed read
+  and almost always misses; the sender is resolved only once it hits. An
+  ordinary unwired channel still costs what it did — no auto-create, no sender
+  resolution, no log spam.
+- **A delivery ends the branch.** It returns instead of recording
+  `no_agent_wired` and escalating for channel registration, so an operator is
+  never asked to wire a channel that already has its consumer.
+- **`denied_at` is checked in the lookup itself**, not at the call sites, so
+  the next caller added cannot forget it.
 
 ## Two details the design did not anticipate
 
