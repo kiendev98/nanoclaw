@@ -65,12 +65,16 @@ describe('spawn_worker — arg validation', () => {
   it('declares repo and task required, and takes no other way to say the same thing', async () => {
     // A `command` parameter would be a second way to express what `task`
     // already carries. The schema is the contract that keeps it to one.
+    //
+    // `channels` is not a second way to say anything: it lends the worker a
+    // conversation it would otherwise not have, and it is optional because the
+    // ordinary worker reports to its orchestrator and speaks to nobody else.
     const schema = spawnWorker.tool.inputSchema as {
       properties: Record<string, unknown>;
       required: string[];
     };
     expect(schema.required.sort()).toEqual(['repo', 'task']);
-    expect(Object.keys(schema.properties).sort()).toEqual(['name', 'repo', 'task']);
+    expect(Object.keys(schema.properties).sort()).toEqual(['channels', 'name', 'repo', 'task']);
   });
 });
 

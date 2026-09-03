@@ -13,6 +13,7 @@ import { findByName, getAllDestinations } from '../destinations.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
 import { getCurrentInReplyTo } from '../db/session-state.js';
 import { getSessionRouting } from '../db/session-routing.js';
+import { getAgentMailbox } from '../mailbox/index.js';
 import { AGENT_DIR, OUTBOX_DIR } from '../roots.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -40,12 +41,67 @@ function destinationList(): string {
 }
 
 /**
+ * Does this session have a channel of its own, or only an agent lane?
+ *
+ * `writeSessionRouting` (src/session-manager.ts) is the single discriminator:
+ * a session belonging to a chat routes to that channel and thread, and a
+ * session belonging to none routes down the agent lane as
+ * `channel_type: 'agent'`. So this is not a test for "am I a worker" — it is
+ * the test for "is any of this conversation mine to thread into".
+ */
+function sessionOwnsAChannel(routing: { channel_type: string | null }): boolean {
+  return routing.channel_type !== null && routing.channel_type !== 'agent';
+}
+
+/**
+ * The thread of the last message this session received from that channel.
+ *
+ * The same mailbox operation `sendToDestination` uses in poll-loop.ts, and
+ * deliberately so: the `<message to="...">` path has always threaded replies
+ * correctly and this one has not, which made the two doors disagree about
+ * where the same reply belongs.
+ *
+ * Failure is null rather than a throw. A missing thread posts at top level,
+ * which a human sees at once; a throw would lose the message entirely.
+ */
+function latestInboundThread(channelType: string, platformId: string): string | null {
+  try {
+    return getAgentMailbox().operations.getLatestInboundRoute(channelType, platformId)?.threadId ?? null;
+  } catch (error) {
+    log(`latestInboundThread error: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
+/**
  * Resolve a destination name to routing fields.
  *
- * Look up the explicitly named destination. If it resolves to
- * the same channel the session is bound to, the session's thread_id is
- * preserved so replies land in the correct thread. Otherwise thread_id
- * is null (a cross-destination send starts a new conversation).
+ * Three answers for a channel destination, and the third is the one worth
+ * explaining:
+ *
+ * 1. The destination IS the session's own channel — keep the session's
+ *    thread, so a reply lands in the conversation it belongs to.
+ * 2. A different channel, and the session has one of its own — null, because
+ *    a cross-destination send starts a new conversation.
+ * 3. A different channel, and the session has NO channel of its own — reuse
+ *    the thread of the last message that channel sent us.
+ *
+ * WITHOUT (3) A GRANTED CHANNEL FRAGMENTS. An agent-lane session compares as
+ * `channel_type: 'agent'` against every channel, so case 1 can never match and
+ * case 2 sent every single reply top-level — a new thread per message, in a
+ * conversation the agent itself opened. The thread binding cannot repair that
+ * either: it is first-wins, so the first thread binds and every orphan after
+ * it stays unbound.
+ *
+ * IT IS SCOPED TO SESSIONS WITH NO CHANNEL FOR A REASON, and widening it
+ * would resurrect a bug that was already shipped and reverted. delivery.ts
+ * once redirected every thread-less outbound into the session's bound thread
+ * — "hook 3" — and it was removed: a `shared`-mode session's `thread_id` is
+ * always null, every MCP tool copies that null onto its outbound, and the
+ * binding is first-wins with nothing that clears it. So the first thread such
+ * a session ever opened captured every later question card and proactive post
+ * for the life of the session. A session that owns a channel therefore keeps
+ * today's behaviour exactly, and that failure cannot return through this door.
  */
 function resolveRouting(
   to: string,
@@ -53,11 +109,14 @@ function resolveRouting(
   const dest = findByName(to);
   if (!dest) return { error: `Unknown destination "${to}". Known: ${destinationList()}` };
   if (dest.type === 'channel') {
-    // If the destination is the same channel the session is bound to,
-    // preserve the thread_id so replies land in the correct thread.
     const session = getSessionRouting();
-    const threadId =
-      session.channel_type === dest.channelType && session.platform_id === dest.platformId ? session.thread_id : null;
+    const isOwnChannel = session.channel_type === dest.channelType && session.platform_id === dest.platformId;
+    let threadId: string | null = null;
+    if (isOwnChannel) {
+      threadId = session.thread_id;
+    } else if (!sessionOwnsAChannel(session)) {
+      threadId = latestInboundThread(dest.channelType!, dest.platformId!);
+    }
     return {
       channel_type: dest.channelType!,
       platform_id: dest.platformId!,

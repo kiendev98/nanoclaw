@@ -5,15 +5,16 @@ document covers the three parts of that: a session recognising its own thread, a
 worker asking a question when no human can hear it, and a worker holding a
 conversation in a channel it does not own.
 
-**Status is marked per section and is not uniform.** Section 1 is on `main`.
-Sections 2 and 3 are designed and reviewed but NOT built — treat every diagram
-there as a specification, not a description.
+**All three sections are now built.** Section 1 is on `main`; sections 2 and 3
+were specified here first and then implemented against this document, so every
+diagram below describes working code. What is still open is listed under
+**Known limits** at the end, not marked inline.
 
 | Section | Status |
 |---|---|
 | 1 — Thread binding, escalated questions (v1), retryable spawn | **SHIPPED** |
-| 2 — `answer_worker` and the typed answer | **DESIGNED, NOT BUILT** |
-| 3 — Worker on a channel (pr-babysit) | **DESIGNED, NOT BUILT** |
+| 2 — `answer_worker` and the typed answer | **SHIPPED** |
+| 3 — Worker on a channel (pr-babysit) | **SHIPPED** |
 
 Diagram convention: `░` marks a blocked tool call, `╳` marks a container going
 idle, and time runs downward.
@@ -179,7 +180,7 @@ on to gate itself.
 
 ---
 
-# 2. `answer_worker` — DESIGNED, NOT BUILT
+# 2. `answer_worker`
 
 ## The problem
 
@@ -371,9 +372,9 @@ answer lands with its question still above it.
      │◄─ "done" ──────────┤
 ```
 
-## What section 2 deletes
+## What section 2 deleted
 
-It is a net deletion. Removed:
+It was a net deletion. Removed:
 
 - `markAwaitingInbound` / `clearAwaitingInbound` / `isToolAwaitingInbound`
 - the poll-loop hold that consumes them
@@ -386,13 +387,14 @@ Added: one tool, the `question` field on the escalated envelope, and
 
 ---
 
-# 3. Worker on a channel — DESIGNED, NOT BUILT
+# 3. Worker on a channel
 
 Motivating case: `saber-pr-babysit`, which drives a review loop by talking to a
 human reviewer in Slack. A worker running that workflow needs to post and to
 hear the reply.
 
-Today it cannot, and is stopped at the first of three gates:
+It used to be stopped at the first of three gates, and each one had to be
+opened deliberately rather than removed:
 
 | gate | where | what it says |
 |---|---|---|
@@ -400,8 +402,10 @@ Today it cannot, and is stopped at the first of three gates:
 | 2 | host, `delivery.ts` | `unauthorized channel destination: <worker> cannot send to slack/…` |
 | 3 | router, `session-manager.ts` | `bound.agent_group_id === agentGroupId` |
 
-`provision-agent.ts` grants a worker exactly two destinations, both
-`target_type: 'agent'` — `<localName>` and `parent`.
+`provision-agent.ts` still grants a worker exactly two destinations of its own,
+both `target_type: 'agent'` — `<localName>` and `parent`. A channel row is only
+ever added by an explicit `channels` argument on the spawn, copied from the
+caller.
 
 ## The shape
 
@@ -541,58 +545,59 @@ reachable.**
   needs a second worker, which a second orchestrator thread already gives you.
 - **The worker cannot post outside its grant.** Gate 2 still refuses.
 - **Anya's messages elsewhere in ai-anya never reach the worker.**
+- **The channel must have at least one agent wired to it.** `routeInbound`
+  returns early when the messaging group has no wired agents at all, before the
+  bound-session pass runs — so lending a worker a channel nobody else is wired
+  to silently does not work. Harmless for pr-babysit, where the orchestrator is
+  wired to ai-anya. Fixing it means moving the bound lookup above that early
+  return, which tangles with the channel-registration escalation that lives
+  there; it was left alone deliberately.
+
+## Two details the design did not anticipate
+
+**The grant belongs on the precheck's reuse path, not the body's.** A reused
+worker is answered inside `validateSpawnWorker`, which responds `reused` and
+returns `false` — so the guard-allow body never runs. The reuse branch in
+`spawnWorker` only catches a worker created concurrently between the two
+lookups. Granting only there compiles, passes a create-path test, and silently
+lends nothing on the path that actually fires.
+
+**A running worker needs the map re-projected.** `spawnContainer` writes the
+destination map on every wake, so a worker created with a grant reads it at
+startup. One that is ALREADY RUNNING holds the map from its last wake, and its
+container answers "unknown destination" for a channel the central DB says it
+holds. The grant therefore re-projects into every live session of the worker.
 
 ---
 
-# Handoff — building sections 2 and 3
-
-Build 2 before 3. Section 2 is a net deletion that simplifies the code section 3
-extends, and 3.5 depends on `answer_worker` existing.
-
-## Section 2, in order
-
-1. **Envelope.** `ask_user_question`'s escalated write adds
-   `question: { id }` alongside `text`. Kind stays `chat`.
-2. **Host.** In `delivery.ts`'s agent-lane branch, read `content.question` and
-   call `createPendingQuestion` with an expiry of the tool's bound.
-3. **Tool.** `answer_worker({ worker, answer })` in the container writes a
-   system action; the host resolves the target's open question and writes a
-   `question_response` row carrying its `questionId`. With no open question,
-   deliver as `chat` and say so in the tool result.
-4. **Wait.** Replace the claim loop in `askOrchestrator` with
-   `findQuestionResponse(questionId)` — the same call `askHuman` makes.
-5. **Delete** everything in "What section 2 deletes".
-
-Tests: exact match, expiry degrading to chat, a concurrent `send_message` not
-being consumed, the nested case in 2.3, and the transcript surviving 2.5.
-
-## Section 3, in order
-
-1. **Grant.** `channels: string[]` on `spawn_worker`; host checks the
-   orchestrator holds each name as a `channel` destination and copies the row.
-   Refuse on any miss — do not partially grant.
-2. **Router.** After the wired fan-out, look up a session bound to
-   (messaging group, thread root) and deliver to it if its agent group was not
-   already served. Additive.
-3. **Routing fallback.** In `resolveRouting`, when the session has no channel of
-   its own, fall back to `getLatestInboundRoute(dest)`.
-
-Tests: attenuation refusal, thread-scoped delivery, no leakage to other threads
-in the same channel, the orchestrator still not engaged, and a chat session's
-`resolveRouting` behaviour unchanged.
-
-## Traps
+# Traps, for whoever changes this next
 
 - **`delivery.ts`'s `channel_type === 'agent'` early return** is where the
-  original bug lived and where step 2 of section 2 must sit. It returns before
-  the channel send, the thread binding, and `createPendingQuestion`.
+  original bug lived and where `recordEscalatedQuestion` now sits. It returns
+  before the channel send, the thread binding, and `createPendingQuestion`.
 - **`performAgentRoute` renders `content.text` only.** Any structured field must
-  ride alongside prose, never instead of it.
+  ride alongside prose, never instead of it — that is why the escalated
+  envelope carries both.
+- **The question TTL is duplicated on purpose, in two places that must agree.**
+  `ESCALATED_TIMEOUT_S` in the container's `interactive.ts` and
+  `QUESTION_TTL_MS` in `answer-worker.ts`. Past the tool's bound nothing is
+  polling, so a `question_response` written then is skipped by kind and lost;
+  bounding the host on the same clock is what turns that loss into a plain
+  message. Move them together.
+- **The bound-session pass is delivery-only and additive.** It counts toward
+  `engagedCount` so a delivered message is not audited as dropped, and it skips
+  any agent group the wired loop already served. It deliberately does not run
+  `backfillNewSession` (the session is long alive) or `fanInboundMessage` (a
+  bound worker is a guest in the thread, not a member of the chat's session
+  family). It DOES run the command gate, so a bound thread is not the one
+  inbound door where an admin command arrives unclassified.
+- **`resolveRouting`'s fallback is scoped to a session with no channel of its
+  own.** Widening it would resurrect the removed outbound redirect described in
+  §1.2 — a `shared`-mode session's `thread_id` is always null and the binding is
+  first-wins, so the first thread it ever opened would capture everything after.
 - **`bun:sqlite` needs `$name` in both SQL and JS keys.** It does not strip the
   prefix the way `better-sqlite3` does on the host.
 - **Container tests import from `bun:test`**, and `vitest.config.ts` excludes
-  that tree.
-- **Migrations past the portability boundary** must be async, non-`sqliteOnly`,
-  and free of `BANNED_PORTABLE_SQL`. Section 2 needs no migration; section 3
-  needs none either, since destinations and bindings already exist.
-- **Do not reintroduce an outbound thread redirect.** See §1.2.
+  that tree. Run them from `container/agent-runner`.
+- **Neither section needed a migration.** The question TTL is derived from
+  `created_at`; destinations and thread bindings already existed.

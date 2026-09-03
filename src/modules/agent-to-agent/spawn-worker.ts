@@ -38,7 +38,7 @@
  */
 import { PROJECT_ROOTS } from '../../config.js';
 import { findWorkerForOrigin, getAgentGroup, updateAgentGroup } from '../../db/agent-groups.js';
-import { getSession } from '../../db/sessions.js';
+import { getSession, getSessionsByAgentGroup } from '../../db/sessions.js';
 import { getSessionDriver } from '../../drivers/index.js';
 import { requestWake } from '../../request-wake.js';
 import { GuardDenyError } from '../../guard/index.js';
@@ -48,8 +48,15 @@ import type { AgentGroup, Session } from '../../types.js';
 import { createWorktree, resolveRepo } from '../../worktree.js';
 import { routeAgentMessage } from './agent-route.js';
 import { callerStoppedWaiting, notifyAgent } from './blocking-request.js';
-import { getDestinationByTarget } from './db/agent-destinations.js';
+import {
+  createDestination,
+  getDestinationByName,
+  getDestinationByTarget,
+  getDestinations,
+  normalizeName,
+} from './db/agent-destinations.js';
 import { provisionAgentGroup } from './provision-agent.js';
+import { writeDestinations } from './write-destinations.js';
 import { workerBranch, workerWorkspace } from './worker-identity.js';
 
 /** How the request ended, as the container tool reads it. */
@@ -60,6 +67,8 @@ interface WorkerRequest {
   repo: string;
   task: string;
   name: string;
+  /** Channel destinations the caller is lending the worker, by ITS OWN names. */
+  channels: string[];
   waitUntil: number | null;
 }
 
@@ -71,8 +80,95 @@ function parseRequest(content: Record<string, unknown>): WorkerRequest {
     repo: str('repo'),
     task: str('task'),
     name: str('name'),
+    channels: Array.isArray(content.channels)
+      ? content.channels.filter((c): c is string => typeof c === 'string' && c.trim() !== '').map((c) => c.trim())
+      : [],
     waitUntil: typeof content.waitUntil === 'number' ? content.waitUntil : null,
   };
+}
+
+/**
+ * The caller's channel destinations, by the names it knows them as.
+ *
+ * Used only to write a refusal a caller can act on. A worker request names a
+ * channel the same way `send_message` does, so an unknown name is the ordinary
+ * typo and the useful answer lists what WOULD have worked — the same shape as
+ * `resolveRepo`'s refusal, and for the same reason: the caller is an agent
+ * that cannot list its own grants any other way.
+ */
+async function channelNames(agentGroupId: string): Promise<string[]> {
+  return (await getDestinations(agentGroupId)).filter((d) => d.target_type === 'channel').map((d) => d.local_name);
+}
+
+/**
+ * ATTENUATED DELEGATION: you cannot lend what you do not hold.
+ *
+ * One lookup per requested name is the entire security model for a worker on
+ * a channel, and it is the right one. A worker runs code from ANOTHER
+ * repository — its own CLAUDE.md, its own skills, its own settings — so its
+ * instructions must never be able to widen its own reach. Every channel it can
+ * post to is one the orchestrator could already post to, copied across
+ * deliberately at spawn time.
+ *
+ * ALL OR NOTHING. A partial grant would hand back a worker that looks
+ * provisioned and then fails at its first post, which for a review workflow
+ * means the human never hears anything and nobody can see why.
+ *
+ * @returns undefined when every name checks out, or the agent-facing refusal.
+ */
+async function refuseUngrantableChannels(sourceGroupId: string, channels: string[]): Promise<string | undefined> {
+  for (const name of channels) {
+    const dest = await getDestinationByName(sourceGroupId, normalizeName(name));
+    if (!dest || dest.target_type !== 'channel') {
+      const known = await channelNames(sourceGroupId);
+      return (
+        `you have no channel destination named "${name}", and you cannot give a worker access you do not ` +
+        `have yourself. Channels you can lend: ${known.length ? known.join(', ') : '(none)'}.`
+      );
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Copy the caller's channel rows onto the worker.
+ *
+ * Idempotent per name, because the reuse path runs this too: a second
+ * `spawn_worker` for the same (repo, thread) may name a channel the first did
+ * not, and the worker should gain it rather than silently keep the old set.
+ *
+ * The projection at the end is what a reused worker needs and a new one does
+ * not. `spawnContainer` writes the destination map on every wake, so a worker
+ * created here reads its grants when it starts; one that is ALREADY RUNNING
+ * holds a map from its last wake, and without this its container answers
+ * "unknown destination" for a channel the central DB says it holds.
+ */
+async function grantChannels(sourceGroupId: string, workerGroupId: string, channels: string[]): Promise<string[]> {
+  const now = new Date().toISOString();
+  const added: string[] = [];
+  for (const name of channels) {
+    const local = normalizeName(name);
+    const source = await getDestinationByName(sourceGroupId, local);
+    // Re-read rather than trusting the precheck: this runs after the worktree
+    // checkout, and a destination revoked in between must not be granted.
+    if (!source || source.target_type !== 'channel') continue;
+    if (await getDestinationByName(workerGroupId, local)) continue;
+    await createDestination({
+      agent_group_id: workerGroupId,
+      local_name: local,
+      target_type: 'channel',
+      target_id: source.target_id,
+      created_at: now,
+    });
+    added.push(local);
+  }
+  if (added.length > 0) {
+    for (const session of await getSessionsByAgentGroup(workerGroupId)) {
+      await writeDestinations(workerGroupId, session.id);
+    }
+    log.info('Channel destinations lent to worker', { worker: workerGroupId, from: sourceGroupId, channels: added });
+  }
+  return added;
 }
 
 /**
@@ -275,6 +371,19 @@ export async function validateSpawnWorker(content: Record<string, unknown>, sess
     return false;
   }
 
+  // Refused here, before the worktree checkout and before any central-DB
+  // write, because a refusal after provisioning would leave a worker standing
+  // in a repository with a brief it cannot carry out.
+  const ungrantable = await refuseUngrantableChannels(sourceGroup.id, req.channels);
+  if (ungrantable) {
+    await respond(session, req, 'error', `spawn_worker failed: ${ungrantable}`);
+    log.warn('spawn_worker refused: channel not held by the requester', {
+      sourceGroup: sourceGroup.id,
+      channels: req.channels,
+    });
+    return false;
+  }
+
   // ONE LEVEL OF DELEGATION. A worker may not spawn a worker.
   //
   // The bound on an escalated question makes depth 2 structurally unanswerable
@@ -339,6 +448,11 @@ export async function validateSpawnWorker(content: Record<string, unknown>, sess
         });
         return false;
       }
+      // Lent BEFORE the brief, so the worker's very first turn already holds
+      // the channel its task tells it to use. This is the reuse path that
+      // actually fires — the branch in `spawnWorker` below only catches a
+      // worker created concurrently between that lookup and this one.
+      await grantChannels(session.agent_group_id, existing.id, req.channels);
       const delivery = await deliverBrief(session, existing.id, req.task);
       await respond(session, req, 'reused', briefedText(localName, req.repo, true, delivery));
       log.info('spawn_worker reused an existing worker', {
@@ -394,6 +508,7 @@ export async function spawnWorker(content: Record<string, unknown>, session: Ses
   const existing = await existingWorkerFor(repoPath, session.id);
   const reuseName = existing && (await reusableWorkerName(sourceGroup.id, existing));
   if (existing && reuseName) {
+    await grantChannels(sourceGroup.id, existing.id, req.channels);
     const delivery = await deliverBrief(session, existing.id, req.task);
     await respond(session, req, 'reused', briefedText(reuseName, req.repo, true, delivery));
     log.info('spawn_worker reused an existing worker', {
@@ -438,6 +553,7 @@ export async function spawnWorker(content: Record<string, unknown>, session: Ses
     return;
   }
 
+  await grantChannels(sourceGroup.id, outcome.agentGroupId, req.channels);
   const delivery = await deliverBrief(session, outcome.agentGroupId, req.task);
   await respond(session, req, 'created', briefedText(outcome.localName, req.repo, false, delivery));
   log.info('Worker created and briefed', {

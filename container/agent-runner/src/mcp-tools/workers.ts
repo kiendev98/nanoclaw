@@ -24,6 +24,13 @@
  * bound is the worktree checkout itself: on timeout the tool reports that
  * creation is still running, and the host wakes the caller when it finishes.
  *
+ * `channels` LENDS the worker a conversation. A worker has no channel of its
+ * own, which is right for the ordinary case — it reports to its orchestrator
+ * and the orchestrator speaks to the human. It is wrong for a workflow the
+ * worker must DRIVE, such as a review loop with a human reviewer. Lending is
+ * attenuated on the host: the caller must already hold each named channel, so
+ * a worker's own instructions can never widen its reach.
+ *
  * `answer_worker` closes the other half of the loop. A worker has no channel,
  * so `ask_user_question` sends its question up this same lane and BLOCKS. The
  * problem that makes a second verb necessary is that no existing door carries
@@ -131,6 +138,12 @@ export const spawnWorker: McpToolDefinition = {
           description:
             'Optional name for the worker, which also becomes your destination name for it. Defaults to a name derived from the repository.',
         },
+        channels: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Optional channels to LEND the worker, named exactly as you know them. Only for a task the worker must hold a conversation for — a code review it drives with a human reviewer, say. You can only lend a channel you can already post to yourself, and naming one you do not hold fails the whole call. Leave it out otherwise: a worker reports back to you, and you are the one who speaks to the human.',
+        },
       },
       required: ['repo', 'task'],
     },
@@ -141,6 +154,12 @@ export const spawnWorker: McpToolDefinition = {
     if (!repo) return err('repo is required — the NAME of the repository the worker must stand in.');
     if (!task) return err('task is required — the brief the worker starts from.');
     const name = ((args.name as string) || '').trim() || defaultWorkerName(repo);
+    // Passed through as given. The host resolves each name against the
+    // destinations THIS agent group actually holds and refuses the call
+    // outright on any miss, so nothing is gained by filtering here.
+    const channels = Array.isArray(args.channels)
+      ? (args.channels as unknown[]).filter((c): c is string => typeof c === 'string')
+      : [];
 
     const requestId = generateId();
     // waitUntil is the host's only way to know whether this call is still
@@ -163,6 +182,7 @@ export const spawnWorker: McpToolDefinition = {
         repo,
         task,
         name,
+        channels,
       }),
     });
 

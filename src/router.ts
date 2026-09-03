@@ -5,6 +5,14 @@
  * resolve/pick agent → access gate → resolve/create session → write
  * messages_in → wake container.
  *
+ * Fan-out runs in two passes, and the second one exists because the first
+ * cannot see it. The wired pass asks `messaging_group_agents` who is wired to
+ * this chat; the bound pass asks which session OPENED this thread, which is
+ * how a message reaches an agent that is deliberately not wired here — a repo
+ * worker granted one channel for one job. The second is strictly additive:
+ * every wired agent is served first and identically, so nothing that worked
+ * before this existed behaves differently now. See `deliverToBoundSession`.
+ *
  * Two module hooks (registered by the permissions module):
  *   - `setSenderResolver` runs BEFORE agent resolution so user rows get
  *     upserted even if the message ends up dropped by agent wiring.
@@ -27,7 +35,7 @@ import {
   getMessagingGroupAgents,
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
-import { findSessionForAgent } from './db/sessions.js';
+import { findSessionBoundToThread, findSessionForAgent, threadRootMessageId } from './db/sessions.js';
 import { backfillNewSession, fanInboundMessage } from './modules/cross-session-context/index.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
@@ -370,6 +378,12 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   let engagedCount = 0;
   let accumulatedCount = 0;
   let subscribed = false;
+  // Agent groups this chat's own wiring already handed the message to, either
+  // branch. Read by the bound-session pass below, which must not deliver a
+  // second copy to a group the loop has served — `messageIdForAgent`
+  // namespaces by agent group, so the two writes would collide on
+  // `messages_in.id` rather than merely duplicating.
+  const served = new Set<string>();
 
   for (const agent of agents) {
     const agentGroup = await getAgentGroup(agent.agent_group_id);
@@ -398,6 +412,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     if (engages && accessOk && scopeOk) {
       await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, true);
       engagedCount++;
+      served.add(agent.agent_group_id);
 
       // Mention-sticky: ask the adapter to subscribe the thread so the
       // platform's subscribed-message path carries follow-ups without
@@ -430,6 +445,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       // gate is meant to prevent.
       await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, false);
       accumulatedCount++;
+      served.add(agent.agent_group_id);
     } else {
       log.debug('Message not engaged for agent (drop policy)', {
         agentGroupId: agent.agent_group_id,
@@ -440,6 +456,16 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       });
     }
   }
+
+  // 5. Second pass: a reply inside a thread that some session OPENED, whose
+  //    agent group this chat's wiring does not mention.
+  //
+  //    The wired fan-out above cannot find it. `getMessagingGroupAgents`
+  //    answers "who is wired here", and the case this exists for is an agent
+  //    that is deliberately NOT wired — a repo worker granted one channel for
+  //    one job. It posts, a thread forms around its post, and a human replies
+  //    in that thread expecting the thing they are replying to to hear them.
+  if (await deliverToBoundSession(mg, event, userId, served)) engagedCount++;
 
   if (engagedCount + accumulatedCount === 0) {
     await recordDroppedMessage({
@@ -452,6 +478,135 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       agent_group_id: null,
     });
   }
+}
+
+/**
+ * Deliver into the session that opened this thread, when the wired fan-out
+ * did not already reach its agent group.
+ *
+ * ADDITIVE, NEVER A REPLACEMENT. Every wired agent resolves exactly as it did
+ * before this existed and is served first; this only ever appends a delivery
+ * the old code dropped. That ordering is what makes the feature unable to
+ * regress an existing group — there is no path where a wired agent loses a
+ * message to a binding.
+ *
+ * THREAD-SCOPED, NOT CHANNEL-SCOPED. The binding is (messaging group, root
+ * message id), so the session hears replies in ITS thread and nothing else
+ * said in that channel. Nothing is written to `messaging_group_agents`, so
+ * there is no wiring row for an operator to discover later and no cleanup step
+ * when the work finishes — the reach dies with the session, which is the
+ * property that makes granting a worker a channel safe to do casually.
+ *
+ * THE BINDING IS THE ENGAGEMENT SIGNAL. A bound session has no `engage_mode`
+ * to consult, and it needs none: it opened that thread on purpose, so a reply
+ * in it is addressed to it by construction. Same reasoning as
+ * `mention-sticky`, which stops requiring an @mention once a thread has
+ * engaged once — here the session's own post is the first engagement.
+ *
+ * The agent-group check in `resolveSession` (session-manager.ts) is untouched
+ * and stays as it is. It guards the WIRED path, where two agents share one
+ * chat and a binding must never hand one of them the other's session. Here the
+ * binding is not a filter applied to a group we already picked — it is what
+ * NAMES the group, so it is the authority rather than a check against one.
+ *
+ * @param served Agent groups the wired loop already delivered to, engaged or
+ *   accumulated. A group in this set is skipped: it has the message, and a
+ *   second write would collide on the namespaced `messages_in.id`.
+ * @returns Whether a delivery happened, so the caller does not record a
+ *   message this took as dropped.
+ */
+async function deliverToBoundSession(
+  mg: MessagingGroup,
+  event: InboundEvent,
+  userId: string | null,
+  served: Set<string>,
+): Promise<boolean> {
+  // A top-level post is nobody's thread reply. `threadRootMessageId` parses
+  // the root out of the inbound id rather than rebuilding the composed form,
+  // because a rebuilt guess that stops matching fails by silently finding
+  // nothing — see its own note in db/sessions.ts.
+  if (!event.threadId) return false;
+
+  const bound = await findSessionBoundToThread(mg.id, threadRootMessageId(event.threadId));
+  if (!bound || served.has(bound.agent_group_id)) return false;
+
+  const agentGroup = await getAgentGroup(bound.agent_group_id);
+  if (!agentGroup) return false;
+
+  // A binding grants reach into one thread. It does not grant an untrusted
+  // sender past the access gate, which is a decision about the PERSON rather
+  // than about the conversation — so it is asked here exactly as the wired
+  // loop asks it. `sender_scope` and `engage_mode` are not consulted, because
+  // both are columns on a wiring row that does not exist for this session.
+  if (accessGate && !(await accessGate(event, userId, mg, bound.agent_group_id)).allowed) return false;
+
+  // The reply address the session will answer on. `replyTo` is operator intent
+  // from the CLI admin transport and wins, as it does on the wired path.
+  const deliveryAddr = event.replyTo ?? {
+    channelType: event.channelType,
+    platformId: event.platformId,
+    threadId: event.threadId,
+  };
+
+  // The command gate runs on every other inbound door, so it runs on this one.
+  // Skipping it would make a bound thread the one place an admin command
+  // reaches a session without being classified — a hole that widens with every
+  // channel a worker is granted.
+  if (event.message.kind === 'chat' || event.message.kind === 'chat-sdk') {
+    const gate = await gateCommand(event.message.content, userId, bound.agent_group_id);
+    if (gate.action === 'filter') {
+      log.debug('Filtered command dropped by gate (bound session)', { agentGroupId: bound.agent_group_id });
+      return false;
+    }
+    if (gate.action === 'deny') {
+      await writeOutboundDirect(bound.agent_group_id, bound.id, {
+        id: `deny-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        kind: 'chat',
+        platformId: deliveryAddr.platformId,
+        channelType: deliveryAddr.channelType,
+        threadId: deliveryAddr.threadId,
+        content: JSON.stringify({ text: `Permission denied: ${gate.command} requires admin access.` }),
+      });
+      log.info('Admin command denied by gate (bound session)', {
+        command: gate.command,
+        userId,
+        agentGroupId: bound.agent_group_id,
+      });
+      return false;
+    }
+  }
+
+  // No `backfillNewSession` and no `fanInboundMessage`, and neither is an
+  // omission. Backfill seeds a session at BIRTH and this one is long alive.
+  // The cross-session fan copies a message to sibling sessions of the same
+  // conversation, and this session has none here: its `messaging_group_id`
+  // belongs to whatever spawned it, not to this chat, so it is a guest in the
+  // thread rather than a member of the chat's session family.
+  await writeSessionMessage(bound.agent_group_id, bound.id, {
+    id: messageIdForAgent(event.message.id, bound.agent_group_id),
+    kind: event.message.kind,
+    timestamp: event.message.timestamp,
+    platformId: deliveryAddr.platformId,
+    channelType: deliveryAddr.channelType,
+    threadId: deliveryAddr.threadId,
+    content: event.message.content,
+    trigger: true,
+  });
+
+  // Re-read before waking: `writeSessionMessage` can change container state,
+  // and `requestWake` decides from the row rather than from this copy.
+  const fresh = await getSession(bound.id);
+  if (fresh) await requestWake(fresh, 'inbound-message');
+
+  log.info('Message routed to a bound session', {
+    sessionId: bound.id,
+    agentGroup: bound.agent_group_id,
+    agentGroupName: agentGroup.name,
+    messagingGroupId: mg.id,
+    threadId: event.threadId,
+    userId,
+  });
+  return true;
 }
 
 /**
