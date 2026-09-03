@@ -641,3 +641,47 @@ class BlockingProvider {
     };
   }
 }
+
+/**
+ * A WORKER RESUMES, like every other session — and this is the only test of
+ * it. `freshSessionPerTask` used to drop the stored continuation at the start
+ * of every task, from a branch that lived in this very loop, so a worker's
+ * second task in a thread began with nothing. Nothing else in either tree
+ * asserts that a task resumes: with this file unchanged, re-introducing a
+ * per-task `clearContinuation` turns the recorded value below into
+ * `undefined` and breaks no other test.
+ *
+ * Asserted at the provider seam rather than on the stored row, because the
+ * stored row is rewritten by the query's own `init` event — so a wipe that
+ * ran and was immediately overwritten would still leave a value behind. What
+ * the provider was ASKED to resume is the thing that cannot be faked.
+ */
+describe('poll loop — a task resumes the prior task transcript', () => {
+  it('hands the stored continuation to the provider instead of starting fresh', async () => {
+    setContinuation('mock', 'prior-task-session');
+
+    insertMessage(
+      'm1',
+      { sender: 'Alice', text: 'second task in this thread' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+
+    const resumedWith: (string | undefined)[] = [];
+    const provider = new MockProvider({}, () => '<message to="discord-test">resumed</message>');
+    const inner = provider.query.bind(provider);
+    provider.query = (input) => {
+      resumedWith.push(input.continuation);
+      return inner(input);
+    };
+
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    controller.abort();
+
+    expect(resumedWith[0]).toBe('prior-task-session');
+
+    await loopPromise.catch(() => {});
+  });
+});

@@ -200,14 +200,14 @@ describe('composeSessionSpec', () => {
   });
 
   /**
-   * A worker does not resume its previous conversation, and `workspace_path` is
-   * the only thing that says one is a worker.
+   * `workspace_path` is the only thing that says a group is a worker, and it
+   * reaches the runner as config rather than as an environment variable.
    *
-   * The worktree is durable and holds work that cannot be rebuilt; a transcript
-   * is rebuildable from the files it was reasoning about. Carrying it forward is
-   * what made a thread an unbounded bill — every later task paying for every
-   * earlier one, on every turn. `poll-loop.ts` reads this and clears the stored
-   * continuation.
+   * It used to carry a second meaning — `poll-loop.ts` read it and cleared the
+   * stored continuation, so a worker started every task with a clean
+   * transcript. That is gone; a worker resumes like every other session. The
+   * assertion below is unchanged and still worth keeping: nothing about being
+   * a worker should arrive through the environment.
    */
   it('carries no fresh-session variable — the signal rides container.json', () => {
     // `workspacePath` reaches the runner as config, not as an environment

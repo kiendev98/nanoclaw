@@ -970,42 +970,6 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     TZ: containerConfig.timezone ?? TIMEZONE,
     ...mailboxEnvironment,
   };
-  // The repository this agent stands in, when it stands in one, reaches the
-  // driver as `ContainerSpec.cwd` and the runner as `container.json`'s
-  // `workspacePath`. cwd is the only thing that decides which project's
-  // CLAUDE.md, `.claude/skills/` and `.claude/settings.json` a session loads —
-  // Claude Code walks UP from cwd for all three — so this is what makes a
-  // worker a worker.
-  //
-  // NOT a substitute for NANOCLAW_AGENT_DIR, which stays the group folder in
-  // every case — memory and footer telemetry must not follow cwd into a repo.
-  if (agentGroup.workspace_path) {
-    // A worker does not resume its previous conversation, and `workspace_path`
-    // is the only thing that distinguishes one — an ordinary group never sets
-    // this and keeps resuming exactly as before.
-    //
-    // Two different lifetimes were sharing one key. The worktree holds
-    // uncommitted work that cannot be rebuilt, so it is durable and shared
-    // across every task in a thread. A transcript can always be rebuilt from
-    // the files it was reasoning about, so it is disposable — and keeping it
-    // is what made a thread an unbounded bill: every later task paid for every
-    // earlier one, on every turn, whether or not it was relevant.
-    //
-    // What a fresh session cannot recover is rationale: what was tried and
-    // abandoned, and why. That is not on disk, so `project-doc-compose.ts`
-    // asks each task to leave it in NOTES.md inside the worktree and asks the
-    // next one to read it. Continuity moves into the workspace, where it
-    // survives, instead of into a transcript that only grows.
-    //
-    // It goes in the standing document and NOT in front of the task: prefixing
-    // a brief would push a leading `/` off the start of the message, and
-    // `categorizeMessage` treats anything not starting with `/` as prose —
-    // silently degrading every slash-command task.
-    //
-    // The signal itself rides `container.json`, which carries `workspacePath`
-    // straight from the DB — no environment variable, and no derived flag whose
-    // origin the next reader would have to guess.
-  }
   // The contributed lane (ContainerSpec.contributedEnv): registry-sourced env,
   // exempt from the credential-NAME check and still refused credential VALUES.
   // The model provider's contribution fills first, the gateway's second — a
@@ -1043,6 +1007,16 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     args: ['exec bun run /app/src/index.ts'],
     mounts: mergeMounts(toMountSpecs(mounts, agentGroup.id), gateway.mounts ?? []),
     contributedEnv,
+    // The repository this agent stands in, when it stands in one, reaches the
+    // driver as `ContainerSpec.cwd` and the runner as `container.json`'s
+    // `workspacePath`. cwd is the only thing that decides which project's
+    // CLAUDE.md, `.claude/skills/` and `.claude/settings.json` a session loads —
+    // Claude Code walks UP from cwd for all three — so this is what makes a
+    // worker a worker.
+    //
+    // NOT a substitute for NANOCLAW_AGENT_DIR, which stays the group folder in
+    // every case — memory and footer telemetry must not follow cwd into a repo.
+    //
     // Absent for an ordinary group, so its spawn is byte-for-byte what it was:
     // the driver falls back to the group folder. An empty string here would
     // resolve cwd to the host's own checkout, which is the 11,618-token

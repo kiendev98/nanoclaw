@@ -155,24 +155,18 @@ export async function denyAnswerWorker(
  * outcome and the tool is told which one it got, so the orchestrator can say
  * something true to the human rather than assuming the worker resumed.
  */
-async function deliverAsMessage(
-  session: Session,
-  req: AnswerRequest,
-  why: string,
-  answersQuestionId?: string,
-): Promise<void> {
+async function deliverAsMessage(session: Session, req: AnswerRequest, why: string): Promise<void> {
   try {
     const outcome = await routeAgentMessage(
       {
         id: `answer-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         platform_id: req.worker,
-        // `answersQuestionId` rides along on the timed-out path only, and it
-        // survives routing because `prepareForwardedContent` returns the
-        // content string untouched when it names no files. The worker reads it
-        // to know THIS batch is the answer it stopped waiting for, which is
-        // what lets it clear its late-answer flag instead of having the flag
-        // taken by whatever unrelated message happened to arrive first.
-        content: JSON.stringify(answersQuestionId ? { text: req.answer, answersQuestionId } : { text: req.answer }),
+        // This used to also carry an `answersQuestionId` tag, so the worker
+        // could tell THIS batch was the answer it had stopped waiting for and
+        // keep its transcript for it. The transcript is never dropped now — a
+        // worker resumes like any other session — so nothing reads the tag and
+        // it is not sent.
+        content: JSON.stringify({ text: req.answer }),
         in_reply_to: null,
       },
       session,
@@ -230,7 +224,7 @@ export async function answerWorker(content: Record<string, unknown>, session: Se
     // Drop the stale row so it cannot capture a later, unrelated answer. Safe
     // to do here and not above: the caller is authorized for this group.
     await deletePendingQuestion(pq.question_id);
-    await deliverAsMessage(session, req, 'its question timed out', pq.question_id);
+    await deliverAsMessage(session, req, 'its question timed out');
     return;
   }
 

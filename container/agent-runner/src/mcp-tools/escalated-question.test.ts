@@ -21,8 +21,6 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../mailbox/sqlite/connection.js';
 import {
-  lateAnswerExpectedFor,
-  clearLateAnswerExpected,
   setCurrentInReplyTo,
   clearCurrentInReplyTo,
 } from '../db/session-state.js';
@@ -356,84 +354,5 @@ describe('the question is addressed to the session that briefed this worker', ()
     await askUserQuestion.handler(ARGS);
 
     expect(inReplyToOf(outbound()[0].id)).toBeNull();
-  });
-});
-
-describe('a late answer must not land against an empty transcript', () => {
-  it('asks the next batch to keep the transcript when the question times out', async () => {
-    // `freshSessionPerTask` wipes a worker's transcript at the start of every
-    // batch. The orchestrator's answer arrives as a new batch, so without this
-    // the model reads "Delete it" with no question in front of it — the same
-    // failure the session/thread binding fixes for humans.
-    workerLane();
-
-    await askUserQuestion.handler(ARGS);
-
-    expect(lateAnswerExpectedFor()).toBe(outbound()[0].id);
-  });
-
-  it('names the question, so an unrelated message cannot take the exemption', async () => {
-    // THE BUG THIS REPLACED. The flag used to hold "yes" and clear on the next
-    // batch, whichever batch that was — so an orchestrator's unrelated "also
-    // bump the dep" consumed it, and the real answer then arrived to a
-    // transcript that had just been wiped. Reading it must not clear it.
-    workerLane();
-
-    await askUserQuestion.handler(ARGS);
-    const questionId = outbound()[0].id;
-
-    // Two reads standing in for two unrelated batches.
-    expect(lateAnswerExpectedFor()).toBe(questionId);
-    expect(lateAnswerExpectedFor()).toBe(questionId);
-
-    // Only the arrival of that answer ends it.
-    clearLateAnswerExpected();
-    expect(lateAnswerExpectedFor()).toBeNull();
-  });
-
-  it('does not ask for it when the orchestrator answered', async () => {
-    // Nothing is pending, so the next batch is an unrelated task and the wipe
-    // is the right behaviour.
-    workerLane();
-
-    const pending = askUserQuestion.handler({ ...ARGS, timeout: 5 });
-    await new Promise((r) => setTimeout(r, 10));
-    const questionId = outbound()[0].id;
-    getInboundDb()
-      .prepare(
-        `INSERT INTO messages_in (id, seq, kind, timestamp, status, content, channel_type, platform_id)
-         VALUES ('qr-ok', 7, 'system', $timestamp, 'pending', $content, 'agent', 'ag-orchestrator')`,
-      )
-      .run({
-        $timestamp: new Date().toISOString(),
-        $content: JSON.stringify({ type: 'question_response', questionId, selectedOption: 'Delete it', userId: '' }),
-      });
-    await pending;
-
-    expect(lateAnswerExpectedFor()).toBeNull();
-  });
-
-  it('stops protecting once the answer has been claimed', async () => {
-    // A worker that timed out, got its answer, and later gets an unrelated
-    // task must start clean for that task. The claim is what ends it now,
-    // rather than the mere passage of one batch.
-    workerLane();
-
-    await askUserQuestion.handler(ARGS);
-    expect(lateAnswerExpectedFor()).toBe(outbound()[0].id);
-
-    clearLateAnswerExpected();
-
-    expect(lateAnswerExpectedFor()).toBeNull();
-  });
-
-  it('does not ask for it on a channel lane, where no batch is wiped', async () => {
-    // `freshSessionPerTask` is set from `workspace_path`, which only a worker
-    // carries — so an ordinary session has no transcript at risk.
-    channelLane();
-
-    await askUserQuestion.handler(ARGS);
-
-    expect(lateAnswerExpectedFor()).toBeNull();
   });
 });

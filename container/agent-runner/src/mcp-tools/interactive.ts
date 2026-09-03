@@ -31,16 +31,15 @@
  * wrote the brief already knows the answer.
  *
  * THE TOOL STILL BLOCKS, and that is what keeps this cheap. The turn never
- * ends, so the transcript is never wiped by `freshSessionPerTask` and there is
- * no resume to arrange — the answer simply becomes this call's return value
- * and the model carries on mid-thought. The cost is a bound: nobody is
- * demonstrably waiting at the other end, and the host kills a container whose
- * heartbeat is 30 minutes stale.
+ * ends, so there is no resume to arrange — the answer simply becomes this
+ * call's return value and the model carries on mid-thought. The cost is a
+ * bound: nobody is demonstrably waiting at the other end, and the host kills a
+ * container whose heartbeat is 30 minutes stale.
  */
 import { writeMessageOut } from '../db/messages-out.js';
 import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
 import { getSessionRouting } from '../db/session-routing.js';
-import { markLateAnswerExpected, getCurrentInReplyTo } from '../db/session-state.js';
+import { getCurrentInReplyTo } from '../db/session-state.js';
 import { isAgentLane } from '../session-lane.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -272,16 +271,17 @@ async function askOrchestrator(
     return ok(answer);
   }
 
-  // The answer may still be coming, and it will arrive as a NEW batch, which
-  // `freshSessionPerTask` would otherwise start by wiping this transcript,
-  // leaving the model a bare "use option B" with no question in front of it.
-  // Ask the next batch to keep it.
+  // The answer may still be coming, and it will arrive as a NEW batch — with
+  // this transcript still under it, because a worker resumes like any other
+  // session. This used to need a flag: `freshSessionPerTask` wiped a worker's
+  // transcript per batch, so the late answer would have landed as a bare "use
+  // option B" with no question above it, and `markLateAnswerExpected` existed
+  // solely to spare this one case from the wipe. No wipe, no exception.
   //
   // The host expires its pending row on the deadline THIS call sent it, so a
   // late `answer_worker` finds no open question and degrades to an ordinary
   // message. That degrade is deliberate: a `question_response` written with no
   // tool waiting would be skipped by kind and lost in silence.
-  markLateAnswerExpected(questionId);
   log(`ask_user_question (escalated) timeout: ${questionId}`);
   return err(
     `Your orchestrator did not answer within ${timeout / 1000}s. Do not ask again, a second question would ` +

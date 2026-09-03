@@ -15,8 +15,6 @@ import { renderFooter } from './message-footer.js';
 import {
   clearContinuation,
   clearCurrentInReplyTo,
-  lateAnswerExpectedFor,
-  clearLateAnswerExpected,
   migrateLegacyContinuation,
   setContinuation,
   setCurrentInReplyTo,
@@ -62,12 +60,6 @@ export interface PollLoopConfig {
   systemContext?: {
     instructions?: string;
   };
-  /**
-   * Start every TASK with a clean transcript instead of resuming. True for a
-   * repo worker, which `container.json` identifies by carrying a
-   * `workspacePath`; absent for an ordinary group, which resumes as before.
-   */
-  freshSessionPerTask?: boolean;
   /**
    * Optional stop signal. In production the loop runs until the container
    * dies; tests pass a signal so an abandoned loop actually exits instead of
@@ -152,46 +144,42 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     const routing = extractRouting(messages);
 
-    // A repo worker starts every TASK with a clean transcript — per batch, not
-    // per container start. The distinction is the whole point: the case this
-    // targets is a second task arriving in a thread that already has a worker,
-    // and that path reuses a WARM container. Resetting only at startup would
-    // have left exactly that case resuming, which is the unbounded bill it
-    // exists to stop.
+    // A WORKER RESUMES, like every other session. Nothing here drops a
+    // continuation per task. The three things that ever drop one — `/clear`
+    // below, the rotation check before the loop, and stale-session recovery in
+    // the catch — are all shared with every other session.
     //
-    // Set for groups carrying a `workspace_path`, which reaches the runner
-    // through `container.json` — so an ordinary group never sees it and resumes
-    // as before. Same two lines as the `/clear` branch below.
+    // A worker used to start every TASK with a clean transcript, on the
+    // argument that its durable state is the worktree and the transcript is
+    // rebuildable from those files. Rebuildable is not free: a worker whose
+    // second task arrived in the same thread re-read the notes it had left
+    // itself, re-queried the PR, and re-derived findings it had already
+    // reached — including, in the run that prompted this, a non-obvious
+    // diagnosis of a CI check reporting `pass` while its detail said the
+    // review had been skipped.
     //
-    // A worker's durable state is its worktree, which persists across tasks
-    // either way. Its transcript is rebuildable from those files.
+    // The wipe existed to bound context across tasks, and that bound now comes
+    // from wherever every other session already gets it. Autocompact is real
+    // and observed: a worker in that same run compacted 133,315 tokens
+    // mid-task without being asked. A per-task wipe is a blunter version of
+    // what the SDK already does continuously, and it pays the whole cost of
+    // forgetting up front rather than only when the window demands it.
     //
-    // ONE EXCEPTION: the last turn timed out waiting on an escalated question.
-    // The orchestrator's answer arrives as a new batch, and wiping here would
-    // hand the model a bare "use option B" with no question in front of it.
+    // BE EXACT ABOUT WHO PROVIDES THAT BOUND. Autocompact is configured in the
+    // Claude provider, and `maybeRotateContinuation` is optional on the
+    // provider interface — so a provider implementing neither bounds a
+    // worker's transcript by nothing. That is not a regression introduced
+    // here: the wipe only ever fired for a worker, so an ordinary group on
+    // such a provider was already unbounded across tasks. A worker is now
+    // equal to it, and the missing bound belongs in that provider rather than
+    // in a branch only workers took.
     //
-    // The flag is not consumed by simply being read, and that is the fix to a
-    // real bug rather than caution: it used to clear on the next batch, so any
-    // unrelated message in between took the exemption and the actual answer
-    // was wiped anyway. Now only the batch CARRYING that answer clears it, and
-    // every batch until then keeps its transcript — the cheap side of the
-    // trade. The age bound in session-state.ts stops an unanswered question
-    // preserving transcripts forever.
-    if (continuation && config.freshSessionPerTask) {
-      const awaitedQuestionId = lateAnswerExpectedFor();
-      if (awaitedQuestionId) {
-        if (batchCarriesAnswerTo(messages, awaitedQuestionId)) {
-          clearLateAnswerExpected();
-          log(`Worker task — keeping the transcript: this batch answers ${awaitedQuestionId}`);
-        } else {
-          log('Worker task — keeping the transcript: still waiting on an answer to a timed-out question');
-        }
-      } else {
-        log('Worker task — starting a fresh session rather than resuming');
-        continuation = undefined;
-        clearContinuation(config.providerName);
-      }
-    }
+    // Deleting it also removed the exception it needed. A timed-out escalated
+    // question used to require a flag — `markLateAnswerExpected` and a scan of
+    // the incoming batch for `answersQuestionId` — purely so the wipe would
+    // spare that one case and the late answer would not land on a transcript
+    // with no question above it. Nothing keeps a transcript now, because
+    // nothing removes one.
 
     // Command handling: the host router gates filtered and unauthorized
     // admin commands before they reach the container. The only command
@@ -837,29 +825,6 @@ function agentLaneRouting(): { channelType: string; platformId: string } | null 
   }
   if (!isAgentLane(routing)) return null;
   return { channelType: routing.channel_type as string, platformId: routing.platform_id as string };
-}
-
-/**
- * Does this batch carry the answer to `questionId`?
- *
- * The host tags a late answer it had to degrade to an ordinary message
- * (`answersQuestionId`, modules/agent-to-agent/answer-worker.ts), which is the
- * only thing that distinguishes it from any other message arriving in the same
- * window. Without the tag this was guesswork — "the next batch" — and the
- * guess was wrong whenever anything else arrived first.
- *
- * A message whose content is not JSON, or carries no tag, simply is not it.
- */
-function batchCarriesAnswerTo(messages: MessageInRow[], questionId: string): boolean {
-  return messages.some((m) => {
-    if (m.kind !== 'chat' && m.kind !== 'chat-sdk') return false;
-    try {
-      const parsed = JSON.parse(m.content) as { answersQuestionId?: unknown };
-      return parsed.answersQuestionId === questionId;
-    } catch {
-      return false;
-    }
-  });
 }
 
 /**

@@ -222,7 +222,6 @@ async function main(): Promise<void> {
       providerName,
       cwd: CWD,
       systemContext: { instructions },
-      freshSessionPerTask: Boolean(config.workspacePath),
     });
   } finally {
     await mailbox.stop();
