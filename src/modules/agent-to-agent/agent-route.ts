@@ -23,6 +23,7 @@ import path from 'path';
 
 import { isSafeAttachmentName } from '../../attachment-safety.js';
 import { ensureContainedInboxDir, isPathInside } from '../../inbox-safety.js';
+import { envValue } from '../../env.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getSession } from '../../db/sessions.js';
 import { requestWake } from '../../request-wake.js';
@@ -241,6 +242,81 @@ async function resolveTargetSession(
  */
 export type AgentRouteOutcome = 'delivered' | 'held';
 
+/**
+ * LOOP BREAKER FOR THE AGENT LANE.
+ *
+ * Two agents can sustain each other indefinitely, and neither is
+ * misbehaving when they do. A turn that ends without a `<message>` envelope
+ * is delivered to whoever sent the inbound (`deliverErrorResult`,
+ * container/agent-runner/src/poll-loop.ts) — correct for a human channel,
+ * where an error is a terminus. On the agent lane the recipient WAKES and
+ * takes a turn, so the same delivery is a stimulus. If both agents fail the
+ * same way — a shared quota, a bad model id, an expired credential — each
+ * one's failure wakes the other and the pair runs until the process dies.
+ *
+ * Observed, not theorised: 85 routes between one worker and its
+ * orchestrator, alternating at ~1/second for 93 seconds, every one of them
+ * carrying `You've hit your session limit`. It ended at a host restart.
+ *
+ * THE HAZARD WAS ALREADY KNOWN AT THE OTHER BOUNDARY. `SLACK_A2A_MAX_HOPS`
+ * exists for exactly this shape and has a counter, a budget and a reset. But
+ * it lives in the Slack bridge, and the agent lane is a direct SQLite write
+ * between two session mailboxes — it never touches Slack, so it inherited
+ * none of that. The guard was attached to the transport where the danger was
+ * first noticed rather than to the concept that carries it.
+ *
+ * THE WAKE IS THROTTLED, NOT THE MESSAGE, and that choice is the whole
+ * design. Refusing to route would either throw — pushing a delivered-and-
+ * correct message into the retry path, and losing a brief `spawn_worker`
+ * promised — or need a third outcome every caller must learn. The wake is
+ * the only thing that turns an inbox row into another turn, so suppressing
+ * it breaks the cycle and costs nothing: the row is written, and the peer
+ * reads it on its next natural wake. A throttled lane loses latency, never
+ * content.
+ *
+ * A SLIDING WINDOW RATHER THAN A HOP COUNT, because it needs no reset hook.
+ * Slack's counter resets when a human speaks, which works there because the
+ * bridge sees every human message. This lane sees none, so a hop count would
+ * be a one-way budget that a long-lived pair exhausts legitimately and never
+ * regains. A window self-heals: a pair that goes quiet is unthrottled by the
+ * passage of time alone.
+ *
+ * Keyed per ORDERED pair, so a runaway between two agents cannot throttle a
+ * third, and a worker flooding its orchestrator does not gag the replies.
+ * In memory, like Slack's: a restart clears it, which is acceptable for a
+ * guard whose whole job is to stop a burst that a restart also stops.
+ */
+const A2A_WAKE_WINDOW_MS = 60_000;
+const A2A_MAX_WAKES_PER_WINDOW = Number.parseInt(envValue('NANOCLAW_A2A_MAX_WAKES_PER_MIN') ?? '', 10);
+/** Generous by design: the observed loop ran at ~27 wakes/min in one direction. */
+const A2A_WAKE_BUDGET =
+  Number.isInteger(A2A_MAX_WAKES_PER_WINDOW) && A2A_MAX_WAKES_PER_WINDOW > 0 ? A2A_MAX_WAKES_PER_WINDOW : 20;
+
+/** Wake timestamps per `${from}->${to}`, trimmed to the window on each read. */
+const a2aWakes = new Map<string, number[]>();
+
+/**
+ * Record this wake and say whether the lane still has budget.
+ *
+ * Exported for the test only; nothing else should call it. Trimming on read
+ * rather than on a timer keeps the map bounded by the number of ACTIVE pairs
+ * — an idle pair's entry is dropped the next time it is touched, and a pair
+ * that never routes again holds one array of at most `A2A_WAKE_BUDGET`
+ * numbers until the process ends.
+ */
+export function _a2aWakeAllowed(from: string, to: string, now = Date.now()): boolean {
+  const key = `${from}->${to}`;
+  const recent = (a2aWakes.get(key) ?? []).filter((at) => now - at < A2A_WAKE_WINDOW_MS);
+  recent.push(now);
+  a2aWakes.set(key, recent);
+  return recent.length <= A2A_WAKE_BUDGET;
+}
+
+/** Test seam — the window is real time, so a suite must be able to clear it. */
+export function _resetA2aWakesForTesting(): void {
+  a2aWakes.clear();
+}
+
 export async function routeAgentMessage(
   msg: RoutableAgentMessage,
   session: Session,
@@ -366,7 +442,20 @@ async function performAgentRoute(
   });
 
   const fresh = await getSession(targetSession.id);
-  if (fresh) await requestWake(fresh, 'inbound-message');
+  if (!fresh) return;
+  // The row is already written. Suppressing only the wake is what breaks a
+  // runaway pair without losing the message — see the loop-breaker note above.
+  if (!_a2aWakeAllowed(session.agent_group_id, targetAgentGroupId)) {
+    log.error('Agent lane throttled — message delivered but peer not woken', {
+      from: session.agent_group_id,
+      to: targetAgentGroupId,
+      targetSession: targetSession.id,
+      a2aMsgId,
+      hint: 'two agents are waking each other faster than a conversation; the row is in the inbox and will be read on the next natural wake',
+    });
+    return;
+  }
+  await requestWake(fresh, 'inbound-message');
 }
 
 /**

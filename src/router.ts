@@ -422,9 +422,52 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   // write would collide on `messages_in.id` rather than merely duplicate.
   const wiredHere = new Set(agents.map((a) => a.agent_group_id));
 
+  // WHO OWNS THIS THREAD. Resolved once, before the fan-out, because both
+  // passes need it: the wired loop to keep out of a thread that belongs to
+  // someone else, and the bound pass below to deliver into it. One indexed
+  // read, and `undefined` for every top-level message.
+  const boundHere = await findBoundSessionFor(mg, event);
+
   for (const agent of agents) {
     const agentGroup = await getAgentGroup(agent.agent_group_id);
     if (!agentGroup) continue;
+
+    // A THREAD ANOTHER AGENT OPENED IS NOT THIS WIRING'S CONVERSATION.
+    //
+    // Without this, a wired agent takes over a worker's thread in two steps,
+    // and the second step looks like the feature working. `accumulate` stores
+    // a non-engaging message as silent context, and storing it CREATES a
+    // session for (agent, mg, thread). `mention-sticky` then reads session
+    // existence as proof the thread was activated — so the next unmentioned
+    // message engages an agent that was never addressed and has never spoken
+    // there.
+    //
+    // Observed live before it was guarded: a session on a `#ai-anya` thread
+    // was created by accumulate on a message that mentioned somebody else,
+    // and a later unmentioned message woke that agent, which reasoned
+    // "Neither @-mentions me" and answered anyway.
+    //
+    // The cost is not just noise. The worker owning the thread is running a
+    // protocol built on one thread per PR and one outstanding request; a
+    // second agent answering in it breaks that invariant silently, and the
+    // human cannot tell which of the two is the one they briefed.
+    //
+    // AN EXPLICIT MENTION STILL ENGAGES. Being addressed by name is a human
+    // decision to bring this agent in, and it is the one signal that does not
+    // depend on the accumulate side effect. Only the implicit paths are
+    // closed here.
+    //
+    // `deliverToBoundSession`'s own `wiredHere` check is the mirror of this
+    // and does not cover it: that one stops the OWNER being served twice,
+    // this one stops a stranger being served at all.
+    if (boundHere && boundHere.agent_group_id !== agent.agent_group_id && !isMention) {
+      log.debug('Skipping a thread owned by another agent group', {
+        agentGroupId: agent.agent_group_id,
+        owner: boundHere.agent_group_id,
+        threadId: event.threadId,
+      });
+      continue;
+    }
 
     // Effective thread id for THIS wiring: the event-derived address is
     // policy-stripped when the wiring (or its channel declaration) opts out
@@ -500,7 +543,8 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   //    that is deliberately NOT wired — a repo worker granted one channel for
   //    one job. It posts, a thread forms around its post, and a human replies
   //    in that thread expecting the thing they are replying to to hear them.
-  const boundHere = await findBoundSessionFor(mg, event);
+  // Resolved before the wired loop as well as used here — see the ownership
+  // guard in the wired loop, which needs the same answer one pass earlier.
   if (boundHere && (await deliverToBoundSession(mg, event, userId, boundHere, wiredHere, accessGate))) engagedCount++;
 
   if (engagedCount + accumulatedCount === 0) {
