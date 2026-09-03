@@ -37,6 +37,7 @@
  * separates "still polling" from "already gave up".
  */
 import { PROJECT_ROOTS } from '../../config.js';
+import { getDb, hasTable } from '../../db/connection.js';
 import { findWorkerForOrigin, getAgentGroup, updateAgentGroup } from '../../db/agent-groups.js';
 import { getSession, getSessionsByAgentGroup } from '../../db/sessions.js';
 import { getSessionDriver } from '../../drivers/index.js';
@@ -205,6 +206,77 @@ async function grantChannels(
     log.info('Channel destinations lent to worker', { worker: workerGroupId, from: sourceGroupId, channels: added });
   }
   return { added };
+}
+
+/**
+ * Copy the caller's member rows onto the worker — the INBOUND half of the
+ * delegation `grantChannels` performs outbound.
+ *
+ * WITHOUT THIS A LENT CHANNEL IS ONE-WAY, and nothing says so. Membership is
+ * per (user, agent group), and a worker is a NEW agent group that nobody has
+ * ever been a member of. So `canAccessAgentGroup` answers `not_member` for
+ * every human except an owner or a global admin, and the access gate in
+ * `router-bound-session.ts` drops their reply — AFTER the thread binding
+ * matched and chose the right session. Outbound worked, inbound did not, and
+ * the drop is recorded against a group the human never heard of.
+ *
+ * Observed as a design gap rather than a bug report: the worker posts to the
+ * channel it was lent, a reviewer answers in the thread it opened, and the
+ * reply is held for approval — per worker, forever, because every new
+ * (repo, thread) pair mints another group with another empty member list.
+ *
+ * THE RULE IS THE SAME ONE, IN THE OTHER DIRECTION. `grantChannels` says you
+ * cannot lend reach you do not hold; this says the worker admits exactly who
+ * its principal admits. Everyone copied here could already reach the
+ * orchestrator, which spawns, briefs and kills the worker — so reaching the
+ * worker directly grants nothing that was not already reachable through it.
+ *
+ * SNAPSHOT, NOT A SUBSCRIPTION. A member added to the orchestrator later does
+ * not reach a worker already spawned. The alternative — resolving the gate
+ * through the origin group at delivery time — is truer but edits a decision
+ * on the path serving EVERY bound session, not just workers. The rows are
+ * cheap to re-add and `deleteAgentGroup` already clears them, so the stale
+ * window is bounded by the worker's own life.
+ *
+ * GUARDED, NOT IMPORTED. `agent_group_members` belongs to the permissions
+ * module, which is optional — without it the access gate is allow-all and
+ * there is nothing to mirror. Inlined SQL rather than importing `addMember`
+ * for the same reason `delivery.ts` inlines its destination check: this module
+ * must not depend on that one.
+ *
+ * Idempotent, and runs on the reuse path too: `ON CONFLICT DO NOTHING` makes a
+ * second spawn a no-op, and backfills a worker created before this existed.
+ */
+async function mirrorMembers(sourceGroupId: string, workerGroupId: string): Promise<number> {
+  const db = getDb();
+  if (!(await hasTable(db, 'agent_group_members'))) return 0;
+
+  const members = await db.all<{ user_id: string }>(
+    'SELECT user_id FROM agent_group_members WHERE agent_group_id = ?',
+    sourceGroupId,
+  );
+  const now = new Date().toISOString();
+  let copied = 0;
+  for (const m of members) {
+    // `added_by` names the ORCHESTRATOR rather than a person, because no
+    // person approved this row: it exists because the group it was copied
+    // from admits that user. An audit that reads a human id here would be
+    // reading an approval that never happened.
+    const res = await db.run(
+      `INSERT INTO agent_group_members (user_id, agent_group_id, added_by, added_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT (user_id, agent_group_id) DO NOTHING`,
+      m.user_id,
+      workerGroupId,
+      sourceGroupId,
+      now,
+    );
+    if (res.changes > 0) copied++;
+  }
+  if (copied > 0) {
+    log.info('Members mirrored to worker', { worker: workerGroupId, from: sourceGroupId, copied });
+  }
+  return copied;
 }
 
 /**
@@ -523,6 +595,11 @@ export async function spawnWorker(content: Record<string, unknown>, session: Ses
       });
       return;
     }
+    // Unconditional, and BEFORE the grant: a member list is the worker's
+    // inbound guest list, so it is owed whether or not this call also lends a
+    // channel. Running it on the reuse path backfills a worker spawned before
+    // this existed.
+    await mirrorMembers(sourceGroup.id, existing.id);
     // Lent BEFORE the brief, so the worker's very first turn already holds the
     // channel its task tells it to use.
     const lent = await grantChannels(sourceGroup.id, existing.id, req.channels);
@@ -589,6 +666,8 @@ export async function spawnWorker(content: Record<string, unknown>, session: Ses
     return;
   }
 
+  // See the reuse path: owed unconditionally, and before the grant.
+  await mirrorMembers(sourceGroup.id, outcome.agentGroupId);
   const lent = await grantChannels(sourceGroup.id, outcome.agentGroupId, req.channels);
   if (lent.refusal) {
     await respond(session, req, 'error', `spawn_worker failed: ${lent.refusal}`);
