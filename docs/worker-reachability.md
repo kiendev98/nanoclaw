@@ -611,6 +611,187 @@ holds. The grant therefore re-projects into every live session of the worker.
 
 ---
 
+# 4. One door per intent
+
+Sections 1 to 3 gave a worker three ways to be heard. A live run used a fourth
+that nobody designed, and this section closes it — and opens the one that was
+missing.
+
+## What happened
+
+`saber-pr-babysit`, dispatched to a `wego-ai` worker. In twenty-three minutes
+it sent its orchestrator **three** reports, each by calling
+`send_message({to:"parent"})`. §1.1 says a worker reports once, at stream
+close, and the runner writes it. None of these went that way.
+
+```
+13:14:50  send_message({to:"parent", message:"On it — …"})   ✗ err: text is required
+13:18:32  send_message({to:"parent", text:"Status on #1845…"})  → relayed to Slack
+13:22:35  send_message({to:"parent", text:"Still on #1845…"})   → relayed to Slack
+13:34:04  (529 Overloaded — the lane delivered this one)
+```
+
+Nothing failed. The orchestrator relayed two of them to a human, correctly
+labelled. But the "one report per worker" property was gone, and it was gone by
+a route the design never considered.
+
+## Why the door was open
+
+The `parent` destination is a **permission that was also an address**.
+
+`provision-agent.ts` grants every worker a row naming its orchestrator, and the
+comment there says exactly why: the runner's automatic report is routed by
+code, and that route passes `a2a.send`, *"which denies any pair with no
+destination row. Without this row a worker's answer is denied and dropped."*
+
+The row had to exist. The NAME did not — it is a side effect of upstream's
+model, where `e83ffbc1` ("named destinations + permission enforcement") made
+one table serve both jobs at once. Grant the permission, publish the name.
+
+So this is a seam, not a bug in either half:
+
+| | assumes |
+|---|---|
+| upstream's named destinations | reaching a correspondent means naming it |
+| §1.1's worker lane | reaching your orchestrator is done BY CODE |
+
+A worker sits under both. `send_message` behaved exactly as designed; a worker
+just is not the correspondent that design had in mind.
+
+## Why prose did not hold it
+
+Two documents already said not to do this, and the model read a third that said
+to:
+
+- `workers.instructions.md` — *"Use `send_message` only to reach some OTHER
+  destination."*
+- §3's table — the orchestrator is addressed by "session routing (implicit)".
+- `destinations.ts` — *"The `send_message` MCP tool is the same delivery,
+  available mid-turn — handy for a quick acknowledgment ('on it') before a slow
+  tool call."*
+
+The third is sound advice for a **channel** session, where a human is watching
+and a slow turn reads as silence. It is emitted for every session with
+`mode.kind === 'chat'`, and a worker's inbound messages are `kind: 'chat'`. So
+the worker got advice written for an audience it does not have, and followed
+it.
+
+**A rule stated in three places and enforced in none is a suggestion.**
+
+## The missing door
+
+Closing `to:"parent"` on its own would have been half a fix, because the model
+was reaching for something real. A worker had exactly two ways to speak:
+
+| | when | cost |
+|---|---|---|
+| the lane report | stream close only | cannot be used mid-task |
+| `ask_user_question` | any time | **blocks 600 s** |
+
+Neither is "tell it something and keep working". The nearest tool with that
+shape was the one it was not supposed to use — so it used it. Withdrawing the
+name without adding the missing tool would leave the same pressure against a
+closed door, and the next worker would find some other way through.
+
+## What ships
+
+**`send_message` refuses a destination that resolves to the caller's own
+orchestrator, and the refusal names both replacements.**
+
+Scoped on `isAgentLane(getSessionRouting())`, and that scope is the whole
+correctness argument. `workerOrchestratorGroup` returns null unless BOTH
+`workspace_path` and `origin_session_id` are set, and **`create_agent` leaves
+both NULL** — so a companion agent never routes as `channel_type: 'agent'`,
+never gets a lane, and never gets an automatic report. For a companion,
+`parent` is its ONLY way to reach its creator. A refusal keyed on "is an agent
+destination" rather than on the lane would have cut every companion off from
+the agent that made it.
+
+It matches on the TARGET, not on the name. `provision-agent.ts` mints
+`parent-2`, `parent-3`… on collision, so a name check would miss exactly the
+groups that already had one.
+
+**`report_progress({text})` is the door that opens.** It writes to the lane
+immediately, returns at once, does not end the turn, and does not block. Three
+properties are load-bearing:
+
+- **It is marked.** The text carries `[progress — not the final answer, no need
+  to relay]`. §1.1's whole value is that the orchestrator can tell the answer
+  from a draft; an unmarked mid-turn message destroys that, which is what
+  happened above. The marker also tells the orchestrator not to relay it, so a
+  human still sees one report per worker.
+- **The marker rides in the TEXT, not as a JSON field.** The orchestrator reads
+  this through the ordinary formatter, and `<message from=…>` renders
+  `content.text` and drops everything else — a field would be invisible at
+  exactly the moment it must be read. (This is the same failure §1.3 records
+  for the escalated question card, which arrived as an empty message for the
+  same reason.)
+- **It does not supersede.** Two notes are two messages. Superseding is right
+  for the report, where only the outcome matters; a progress note that is
+  overwritten by the next one is not a progress note.
+
+**The contradicting guidance is scoped.** `buildDestinationsSection` now
+branches on the lane and gives a worker its own three paragraphs — write your
+answer, only the last turn is delivered, `report_progress` to speak early — and
+returns before the mid-turn-acknowledgment advice that is written for a human
+audience.
+
+## The shape, after
+
+```
+   ai-anya          ORCHESTRATOR                      WORKER
+     │                    │                              │
+     │                    │◄──── runner lane flush ──────┤  the ANSWER, once, at close
+     │                    │◄──── report_progress ────────┤  early note, marked, non-blocking
+     │                    │◄──── ask_user_question ──────┤  BLOCKS 600s, answer is the return value
+     │                    ├───── answer_worker ─────────►│  kind=system, unblocks
+     │                    ├───── send_message ──────────►│  kind=chat, new work
+     │                    ├───── spawn_worker ──────────►│  kind=chat, provision + brief
+     │◄───────────────────┼───── send_message ───────────┤  counterparty, kind=slack
+```
+
+Every worker→orchestrator arrow is now a different tool with a different
+guarantee, and `send_message` no longer appears among them.
+
+## What was considered and not done
+
+**Merging `answer_worker` into `send_message`.** Rejected in §2 and re-raised
+here. The two callers of `routeAgentMessage` already write a byte-identical
+`kind: 'chat'` row; a third would not add intent, it would remove the one row
+kind that carries it, and §2.4's silent mis-answer returns as the normal case.
+
+**Renaming `answer_worker` to `send_worker_message`.** The name would promise
+general messaging while the tool answers questions, inviting the same class of
+mistake this section fixes — a name that suggests a use the design does not
+intend.
+
+**Removing the automatic report so the worker decides everything.** It is a
+real trade and it was declined for one reason: `321cce4b` flushes from
+`finally` *"so an errored run still reports how far it got"*. The 529 above
+reached the orchestrator only through that lane. A discretionary report is not
+sent by a worker that has crashed.
+
+**A blanket refusal of agent destinations.** Would have broken every
+`create_agent` companion, as above.
+
+## Still open
+
+- **`report_progress` is unproven under load.** The refusal is what today's run
+  demanded; whether a worker reaches for the new tool at the right moment, or
+  narrates with it, is a question only real traffic answers. The description
+  says "sparingly" and names the three cases; that is a prompt, not a limit.
+- **An orchestrator that fails to relay is still silent.** The same run's 529
+  reached the orchestrator and stopped there — no relay, no timeout, no notice.
+  §1.1 guarantees the report reaches the orchestrator and `workers.instructions.md`
+  calls it *"the only path to the human"*, but nothing observes whether it
+  actually spoke. That gap is untouched here.
+- **The `parent` row is still a permission wearing an address.** This section
+  withdraws the name at the one place it did harm. The general problem —
+  upstream's table serving both jobs — is unchanged, and the next feature that
+  needs a permission without a name will meet it again.
+
+---
+
 # Traps, for whoever changes this next
 
 - **`delivery.ts`'s `channel_type === 'agent'` early return** is where the
@@ -649,3 +830,25 @@ holds. The grant therefore re-projects into every live session of the worker.
   that tree. Run them from `container/agent-runner`.
 - **Neither section needed a migration.** The question TTL is derived from
   `created_at`; destinations and thread bindings already existed.
+- **The orchestrator refusal is scoped on the LANE, never on "is an agent
+  destination".** `create_agent` leaves `workspace_path` and
+  `origin_session_id` NULL, so a companion has no lane, no automatic report,
+  and `parent` as its only door. Widening the check to every agent destination
+  cuts every companion off from the agent that made it — silently, since a
+  refused `send_message` just returns an error the companion cannot act on.
+- **It matches the TARGET, not the name `parent`.** `provision-agent.ts` mints
+  `parent-2`, `parent-3`… on collision, so a name check misses exactly the
+  groups that already had one.
+- **`report_progress`'s marker lives in the message TEXT.** The orchestrator
+  reads it through the ordinary formatter, which renders `content.text` and
+  drops every other field — the same mechanism that made §1.3's question card
+  arrive as an empty message. A field on the content JSON is invisible at the
+  moment it has to be read.
+- **Do not make `report_progress` supersede.** Superseding is right for the
+  answer, where only the outcome matters. A progress note overwritten by the
+  next one is not a progress note.
+- **Guidance emitted for `mode.kind === 'chat'` reaches workers too**, because a
+  worker's inbound messages are `kind: 'chat'`. That is how the
+  mid-turn-acknowledgment advice in `destinations.ts` — sound for a human
+  audience — reached a session whose correspondent is an agent. Anything added
+  there needs the lane branch, or it is advice to two audiences at once.
