@@ -72,6 +72,13 @@ function readA2aConfig(): A2aConfig {
 
 /** The guard reports the adapter's channel id (`slack:C0…`); the allowlist
  * holds raw Slack channel ids. */
+/**
+ * Cap on tracked thread budgets. A room whose bots chatter and whose humans
+ * never speak would otherwise grow one entry per thread forever, since the
+ * only eviction is a human's arrival.
+ */
+const MAX_TRACKED_THREADS = 500;
+
 function roomFromPlatformId(platformId: string): string {
   const idx = platformId.indexOf(':');
   return idx === -1 ? platformId : platformId.slice(idx + 1);
@@ -90,7 +97,10 @@ function roomFromPlatformId(platformId: string): string {
  * cache.
  */
 export function createA2aRoomPolicy(getConfig: () => A2aConfig = readA2aConfig): SlackBotInboundPolicy {
-  /** Consecutive accepted bot hops, keyed `<instanceKey>:<room>`. */
+  /**
+   * Consecutive accepted bot hops, keyed `<instanceKey>:<room>:<thread>` —
+   * with every top-level post sharing the literal `root` bucket.
+   */
   const hops = new Map<string, number>();
 
   return {
@@ -112,7 +122,16 @@ export function createA2aRoomPolicy(getConfig: () => A2aConfig = readA2aConfig):
       // resolves whether or not an agent engaged — so counting it keeps the
       // guard fail-safe rather than letting a thread nobody serves churn
       // without limit.
-      const key = `${ctx.instanceKey}:${room}:${ctx.threadId ?? 'root'}`;
+      // ROOT POSTS SHARE ONE BUCKET. Slack reports a top-level message's
+      // thread id as its OWN timestamp, so keying purely on the thread minted
+      // a fresh bucket for every root post and handed each one a full unspent
+      // budget — strictly worse than the room-wide key this replaced, because
+      // two bots talking at top level would never hit the limit at all.
+      //
+      // A real thread still gets its own budget, which is the point: one PR's
+      // review must not spend the allowance of every other PR in the room.
+      const isRoot = ctx.threadId === null || ctx.threadId.endsWith(`:${ctx.message.id}`);
+      const key = isRoot ? `${ctx.instanceKey}:${room}:root` : `${ctx.instanceKey}:${room}:${ctx.threadId}`;
       const count = hops.get(key) ?? 0;
       if (count >= maxHops) {
         log.info('slack-a2a: hop limit reached — dropping bot messages until a human speaks', {
@@ -131,7 +150,19 @@ export function createA2aRoomPolicy(getConfig: () => A2aConfig = readA2aConfig):
         // The guard fires this only after downstream accepted the message —
         // a throw in the host's onInbound must not consume budget for a
         // message that never reached a session.
-        onAccepted: () => hops.set(key, count + 1),
+        onAccepted: () => {
+          hops.set(key, count + 1);
+          // Bounded even in a room no human ever speaks in. Entries are only
+          // ever added here, and the reset is a human's arrival — which may
+          // never come. Map preserves insertion order, so the oldest thread's
+          // budget is the one dropped, and dropping it is safe: a forgotten
+          // bucket only ever grants budget back.
+          while (hops.size > MAX_TRACKED_THREADS) {
+            const oldest = hops.keys().next();
+            if (oldest.done) break;
+            hops.delete(oldest.value);
+          }
+        },
       };
     },
     onHumanInbound(ctx) {

@@ -19,7 +19,7 @@ import {
   setContinuation,
   setCurrentInReplyTo,
 } from './db/session-state.js';
-import { isAgentLane, sessionOwnsAChannel } from './session-lane.js';
+import { isAgentLane } from './session-lane.js';
 import {
   formatMessages,
   extractRouting,
@@ -1311,12 +1311,20 @@ async function sendToDestination(dest: DestinationEntry, body: string, routing: 
   // uses — the two doors must not disagree about where a reply belongs, and
   // this one had no way to know about a thread nobody had replied in yet.
   //
-  // Guarded by `sessionOwnsAChannel` exactly as `resolveRouting` is, and for
-  // the reason recorded there: a chat session that once posted proactively
-  // into another channel is bound to that first thread forever (first-wins,
-  // no clearer), so preferring the binding unconditionally would thread every
-  // later post into it — the removed "hook 3", arriving through a new door.
-  const boundThread = sessionOwnsAChannel(getSessionRouting()) ? null : (dest.threadId ?? null);
+  // Guarded by `isAgentLane` exactly as `resolveRouting` is, and for the
+  // reason recorded there: a session that once posted proactively into
+  // another channel is bound to that first thread forever (first-wins, no
+  // clearer), so preferring the binding for a long-lived session would thread
+  // every later post into it — the removed "hook 3", arriving through a new
+  // door.
+  //
+  // AGENT LANE ONLY. `!sessionOwnsAChannel` is the wider set — it also holds
+  // for a SCHEDULED TASK session, whose `channel_type` is null — and the
+  // binding is first-wins with nothing to clear it, so a recurring task would
+  // thread every future run into its first run's thread. That is the removed
+  // hook 3 arriving through a new door, which the note above warns about but
+  // the old predicate did not actually exclude.
+  const boundThread = isAgentLane(getSessionRouting()) ? (dest.threadId ?? null) : null;
   // Channel destinations only. An agent-to-agent message is machine input,
   // and a telemetry line appended to it is noise the receiving agent has to
   // reason about.

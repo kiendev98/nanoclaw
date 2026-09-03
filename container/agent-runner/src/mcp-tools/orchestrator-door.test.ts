@@ -268,4 +268,25 @@ describe('a worker replies into the thread it opened', () => {
     const [out] = getUndeliveredMessages();
     expect(out.thread_id).toBe('slack:C0ANYA:111.1');
   });
+
+  it('does NOT thread a scheduled-task session into its binding', async () => {
+    // A task session ALSO has no channel of its own — `channel_type` is null,
+    // because `workerOrchestratorGroup` returns null unless the group carries
+    // both `workspace_path` and `origin_session_id`. Scoping the binding by
+    // "no channel of its own" therefore swept task sessions in, and a task
+    // RECURS: the binding is first-wins with nothing to clear it, so every
+    // future run would post into the thread the first run opened — the daily
+    // digest filed under day one, which is the hook-3 failure that was
+    // deliberately removed.
+    //
+    // Only the agent lane gets the binding. A worker is short-lived, so its
+    // thread stays the conversation it started; a task is not.
+    seedSessionRouting(null, null);
+    seedBoundChannel('ai-anya', 'slack:C0ANYA', 'slack:C0ANYA:111.1');
+
+    await sendMessage.handler({ to: 'ai-anya', text: 'daily digest' });
+
+    const [out] = getUndeliveredMessages();
+    expect(out.thread_id).toBeNull();
+  });
 });

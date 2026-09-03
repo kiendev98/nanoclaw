@@ -725,11 +725,28 @@ A lent channel carries other people's threads. Following whichever is newest is
 how a considered answer lands in a stranger's conversation — so a newer inbound
 elsewhere on the channel does not move a worker off the thread it opened.
 
-Still scoped to a session with **no channel of its own**, exactly as the
-inbound fallback is. An ordinary chat session is untouched, and the removed
-hook 3 cannot return through this door: a session that once posted proactively
-into another channel is bound to that first thread forever, so preferring the
-binding unconditionally would thread every later post into it.
+Scoped to the **agent lane** (`isAgentLane`), which is narrower than "has no
+channel of its own" — and the difference is load-bearing. A **scheduled-task**
+session also has `channel_type = null`, because `workerOrchestratorGroup`
+returns null unless the group carries both `workspace_path` and
+`origin_session_id`. The binding is first-wins and nothing clears it, so
+scoping by the wider set would thread every future run of a recurring task
+into the thread its first run opened — the daily digest filed under day one,
+which is exactly the hook-3 failure that was removed.
+
+A worker is on the agent lane and is short-lived, so its binding means "the
+conversation I started here" for its whole life. A task is not. The inbound
+fallback keeps the wider scope, unchanged.
+
+The projection also has to be **refreshed while the container is alive.**
+`writeDestinations` otherwise runs only at spawn, `wakeContainer` returns
+early for a container already running, and the binding is created *after* the
+first post — so the column would read NULL for the whole run, up to the
+30-minute idle ceiling, and the feature would work only when a container
+happened to die between two posts. `delivery.ts` reprojects in the
+successful-bind branch, which is the invariant `db/agent-destinations.ts`
+already states: a destinations mutation made while a container may be alive
+MUST reproject.
 
 ### What this retires
 

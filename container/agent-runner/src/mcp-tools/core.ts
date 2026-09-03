@@ -163,10 +163,21 @@ function resolveRouting(
       // already is the durable record of "one thread per PR", so nothing has
       // to be persisted, re-read, or searched for.
       //
-      // Still scoped to a session with NO channel of its own, exactly as the
-      // fallback is, so an ordinary chat session is untouched and the removed
-      // hook 3 cannot return through this door.
-      threadId = dest.threadId ?? latestInboundThread(dest.channelType!, dest.platformId!);
+      // SCOPED TO THE AGENT LANE, not to "has no channel of its own". Those
+      // are different sets, and `session-lane.ts` says so: a SCHEDULED TASK
+      // session also has `channel_type = null`, because
+      // `workerOrchestratorGroup` returns null unless the group carries both
+      // `workspace_path` and `origin_session_id`. Preferring the binding for
+      // one of those brings back exactly the hook-3 failure that was removed:
+      // the binding is first-wins and nothing clears it, so a RECURRING task
+      // would thread every future run into the thread its first run opened —
+      // the daily digest filed under day one.
+      //
+      // A worker is on the agent lane and is short-lived, so its binding
+      // means "the conversation I started here" for its whole life. The
+      // inbound fallback stays scoped to the wider set, unchanged.
+      const boundThread = isAgentLane(session) ? dest.threadId : null;
+      threadId = boundThread ?? latestInboundThread(dest.channelType!, dest.platformId!);
     }
     return {
       channel_type: dest.channelType!,
