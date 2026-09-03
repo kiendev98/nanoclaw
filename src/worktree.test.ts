@@ -207,9 +207,9 @@ describe('worktreePath', () => {
     // The bug the fingerprint exists to close. `resolveRepo` accepts a name
     // with separators and searches EVERY allowed root, so `wego/saber` and
     // `kien/saber` are two repositories a basename key collapses into one
-    // directory — after which `createWorktree` adopts the first one's worktree
-    // and `findWorkerForOrigin` answers with the first one's worker, reported
-    // to the agent as a reuse. Same branch on purpose: one thread, two repos.
+    // directory — after which `createWorktree` would silently adopt the first
+    // one's worktree for the second request. Same branch on purpose: one
+    // thread, two repos.
     expect(worktreePath('/roots/wego/saber', 'nanoclaw/sess-1')).not.toBe(
       worktreePath('/roots/kien/saber', 'nanoclaw/sess-1'),
     );
@@ -219,7 +219,7 @@ describe('worktreePath', () => {
     // The mirror of the test above, and why the fingerprint canonicalizes
     // instead of hashing the string it was handed. Splitting one repository
     // across two worktrees is the same failure seen from the other side: two
-    // branches, and a second worker that cannot see the first one's work.
+    // branches that cannot see each other's work.
     const real = fs.realpathSync(initRepo(path.join(tmp, 'canon')));
     const linkDir = path.join(tmp, 'via-link');
     fs.mkdirSync(linkDir, { recursive: true });

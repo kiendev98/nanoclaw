@@ -7,10 +7,13 @@ import {
   getRunningSessions,
   getActiveSessions,
   createPendingQuestion,
+  getSession,
   isTaskThread,
   TASKS_SYSTEM_THREAD_ID,
+  updateSession,
 } from './db/sessions.js';
 import { appendRunLog } from './modules/scheduling/run-log.js';
+import { answerPendingRunRequest } from './modules/scheduling/run-task.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import {
@@ -253,12 +256,20 @@ async function drainSession(session: Session): Promise<void> {
     }
   }
 
+  // Tracked across the whole batch, not read off `session`: `session` is one
+  // in-memory object reused for every message drained here, so a bind made by
+  // an earlier message in this same batch never appears on it. Without this,
+  // `bindOpenedThread`'s already-bound guard never fires for message #2, and a
+  // second root post in one batch overwrites the first binding.
+  let boundThisBatch = Boolean(session.messaging_group_id || session.bound_root_message_id);
+
   for (const msg of pending) {
     try {
       const platformMsgId = await deliverMessage(msg, session);
       await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) =>
         mailbox.markDelivered(msg.id, platformMsgId ?? null),
       );
+      if (!boundThisBatch) boundThisBatch = await bindOpenedThread(session, msg, platformMsgId);
       const firstDelivery = delivered.size === 0;
       delivered.add(msg.id);
       await clearAttemptRow(msg.id);
@@ -318,6 +329,62 @@ async function drainSession(session: Session): Promise<void> {
   }
 }
 
+/**
+ * Claim the thread a routeless session just opened, so replies come back to it.
+ *
+ * A task session has no messaging group, so nothing else can route a reply to
+ * it: the inbound thread id has never been seen, `findSessionForAgent` misses,
+ * and a brand new session answers in a thread it knows nothing about.
+ *
+ * `!session.messaging_group_id` alone is NOT "this is a task session" — an
+ * agent-to-agent companion session (`resolveSession(groupId, null, null,
+ * 'agent-shared')`) has the identical shape (no messaging group, no bound root
+ * yet) and would otherwise claim a real channel thread the first time it
+ * happens to deliver into one. `isTaskThread` is the actual predicate: a task
+ * session's `thread_id` is always `system:tasks:<series>`, which an
+ * agent-shared session never carries.
+ *
+ * ONLY A ROOT POST BINDS. `threadId === null` is what makes a delivery open a
+ * new thread — the bridge falls back to the channel id — and only that root
+ * message's id is a thread key. A reply carries its own id, which names
+ * nothing: measured on a live install, a reply delivered into the thread
+ * rooted at `…925.613579` came back as `1788370933.675069`. Binding on any
+ * delivery would therefore store a value no inbound thread can ever match, and
+ * it would fail silently.
+ *
+ * FIRST CLAIM WINS. A session that already holds a thread keeps it; a second
+ * top-level post is a second conversation, and re-pointing the binding would
+ * abandon the first thread's replies with nothing to route them to.
+ *
+ * @returns true when this call bound the session, so a caller draining a
+ *   batch of messages against one in-memory `session` object can skip binding
+ *   again for the rest of the batch.
+ */
+async function bindOpenedThread(
+  session: Session,
+  msg: { kind: string; platformId: string | null; channelType: string | null; threadId: string | null },
+  platformMsgId: string | undefined,
+): Promise<boolean> {
+  if (session.messaging_group_id || session.bound_root_message_id) return false;
+  if (!isTaskThread(session.thread_id)) return false;
+  if (msg.threadId !== null || !platformMsgId) return false;
+  if (!msg.platformId || !msg.channelType || msg.channelType === 'agent' || msg.kind === 'system') return false;
+
+  const group = await getMessagingGroupByPlatform(msg.channelType, msg.platformId);
+  if (!group) return false;
+
+  await updateSession(session.id, {
+    bound_messaging_group_id: group.id,
+    bound_root_message_id: platformMsgId,
+  });
+  log.info('Session bound to the thread it opened', {
+    sessionId: session.id,
+    messagingGroupId: group.id,
+    rootMessageId: platformMsgId,
+  });
+  return true;
+}
+
 async function deliverMessage(
   msg: {
     id: string;
@@ -350,10 +417,21 @@ async function deliverMessage(
   if (msg.kind === 'task_log') {
     if (session.messaging_group_id === null && isTaskThread(session.thread_id) && session.thread_id) {
       const series = session.thread_id.slice(`${TASKS_SYSTEM_THREAD_ID}:`.length);
+      const summary = typeof content.text === 'string' ? content.text : '';
       try {
-        await appendRunLog(session.agent_group_id, series, typeof content.text === 'string' ? content.text : '');
+        await appendRunLog(session.agent_group_id, series, summary);
       } catch (err) {
         log.warn('Failed to append task run log', { id: msg.id, sessionId: session.id, err });
+      }
+      // A run's final text IS the answer a `run_task` caller is waiting for,
+      // and this row is the only place the host learns the run produced one.
+      // Re-read rather than trusting `session`: the park was written after
+      // this delivery pass loaded it.
+      try {
+        const fresh = await getSession(session.id);
+        if (fresh) await answerPendingRunRequest(fresh, summary);
+      } catch (err) {
+        log.warn('Failed to answer a pending run_task', { id: msg.id, sessionId: session.id, err });
       }
     } else {
       log.warn('task_log row outside a task session — ignoring', { id: msg.id, sessionId: session.id });
@@ -549,7 +627,7 @@ export function registerPostDeliveryHook(hook: PostDeliveryHook): void {
  * Modules register handlers for system-kind outbound message actions via
  * `registerDeliveryAction`. Unknown actions log "Unknown system action".
  *
- * Privileged delivery actions (create_agent, spawn_worker, install_packages,
+ * Privileged delivery actions (create_agent, install_packages,
  * add_mcp_server) register with a guard spec: every path to the handler body
  * — dispatch, approved replay, test lookup — goes through the guard consult
  * (allow / hold / deny), so there is no unguarded route to it. On approve,

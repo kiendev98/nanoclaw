@@ -202,10 +202,9 @@ export function sanitizeSegment(value: string): string {
  * separators and searches EVERY allowed root, so `wego/saber` and `kien/saber`
  * — or one `saber` under each of two roots — are different repositories with
  * the same basename. Keyed on basename they collide into one directory, and
- * because `createWorktree` adopts an existing directory and
- * `findWorkerForOrigin` looks up by `workspace_path`, the second request is
- * answered with the FIRST repository's worker, reported as a reuse. A worker
- * standing in the wrong repository is indistinguishable from a working one.
+ * `createWorktree` would silently adopt the FIRST repository's worktree for
+ * the second request. A worktree standing in the wrong repository is
+ * indistinguishable from a working one.
  *
  * CANONICALIZED first, so one physical repository has exactly one fingerprint
  * however it was named. `path.resolve` alone is not enough: it collapses `..`

@@ -6,7 +6,7 @@ A room is one Slack group conversation shared by the user and N agents, with a c
 
 When the user asks for a TEAM (several agents for one project), call `create_room` ONCE with all their names and a short public `purpose`. Never open one room per agent — that yields N separate three-way rooms nobody wants.
 
-You cannot create the agents themselves: an agent inside a container creates repo workers (`spawn_worker`) and nothing else. The operator provisions companion agents.
+You cannot create the agents themselves: an agent inside a container has no tool for that. The operator provisions companion agents.
 
 ### How it works
 

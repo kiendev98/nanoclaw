@@ -13,13 +13,19 @@
  * direct dynamic import. When scheduling moves to the modules branch in
  * PR #8, the install skill re-fills the marker on install.
  */
+import fs from 'fs';
+
 import { CronExpressionParser } from 'cron-parser';
 
 import { resolveGroupTimezone } from '../../container-config.js';
+import { isTaskThread, TASKS_SYSTEM_THREAD_ID, updateSession } from '../../db/sessions.js';
 import { log } from '../../log.js';
+import { withExistingMailboxSession } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import type { InboundMailbox } from '../../mailbox/index.js';
 import { appendRunLog } from './run-log.js';
+import { parseTaskContent } from './task-content.js';
+import { prepareTaskWorkspace } from './task-workspace.js';
 
 // Consecutive pre-task-script failures (the series' trailing FAILED runs —
 // derived from occurrence rows, no stored counter) throttle a broken monitor
@@ -118,4 +124,48 @@ export async function handleRecurrence(inDb: InboundMailbox, session: Session): 
       });
     }
   }
+}
+
+/**
+ * Repair a due session's worktree before the sweep wakes it.
+ *
+ * `prepareTaskWorkspace` used to run only at creation and from `ncl tasks
+ * run` — never on the cron/recurrence fire path — so `ncl worktrees prune`
+ * (or a human `rm -rf`) left `sessions.workspace_path` pointing at a
+ * directory that no longer exists, and the container spawned into a cwd that
+ * was never there. Called from `reconcile-session.ts`'s existing lazy hop
+ * into this module, right before it wakes a due session, so no new static
+ * core→module import is created.
+ *
+ * A no-op (ok) when the session carries no workspace, or its directory is
+ * already on disk. Never throws — this runs on the sweep, and the caller must
+ * skip the wake rather than crash the tick.
+ */
+export async function prepareDueWorkspace(session: Session): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!session.workspace_path || fs.existsSync(session.workspace_path)) return { ok: true };
+
+  if (!isTaskThread(session.thread_id) || !session.thread_id) {
+    return {
+      ok: false,
+      error: `session ${session.id} has a workspace_path but is not a task session — refusing to guess its repository`,
+    };
+  }
+
+  const seriesId = session.thread_id.slice(`${TASKS_SYSTEM_THREAD_ID}:`.length);
+  const repo = await withExistingMailboxSession(session.agent_group_id, session.id, (mailbox) => {
+    const series = mailbox.getTask(seriesId);
+    return series ? parseTaskContent(series.content).repo : null;
+  });
+  if (!repo) {
+    return {
+      ok: false,
+      error: `no repository on record for task series ${seriesId} — cannot rebuild its worktree`,
+    };
+  }
+
+  const workspace = prepareTaskWorkspace(repo, seriesId);
+  if (!workspace.ok) return workspace;
+
+  await updateSession(session.id, { workspace_path: workspace.path });
+  return { ok: true };
 }

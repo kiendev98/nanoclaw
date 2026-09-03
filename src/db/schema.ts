@@ -15,13 +15,13 @@ export const SCHEMA = `
 -- folder", which is what every group did before the column existed. The folder
 -- stays the agent's STATE directory either way: memory and telemetry never
 -- follow cwd into a repo.
--- origin_session_id (migration 026) is the other half of a worker's identity:
--- the session it was created for. Together with workspace_path -- which is
--- itself derived from (repo, origin session) -- it is the (repo, thread) key
--- that makes a second spawn_worker for the same repo in the same thread return
--- the FIRST worker instead of minting a rival on a second branch. NULL means
--- "not a worker". Not an FK: an ON DELETE CASCADE would delete the worker when
--- its origin session row goes, orphaning a worktree that may hold uncommitted
+-- origin_session_id (migration 026) is unread now: it named the session a
+-- repo-scoped worker was created for, back when a delivery action minted one
+-- per (repo, thread) pair. That action is gone (migration 027 deleted every
+-- row it had set), and the column stays only because dropping it would
+-- falsify migration 026 -- a released migration's identity is permanent.
+-- Not an FK: an ON DELETE CASCADE would have deleted the worker when its
+-- origin session row went, orphaning a worktree that may hold uncommitted
 -- work.
 CREATE TABLE agent_groups (
   id                TEXT PRIMARY KEY,
@@ -138,10 +138,21 @@ CREATE TABLE sessions (
   status             TEXT DEFAULT 'active',
   container_status   TEXT DEFAULT 'stopped',
   last_active        TEXT,
-  created_at         TEXT NOT NULL
+  created_at         TEXT NOT NULL,
+  -- Task-scoped workspace and Slack thread binding (module:scheduling:task-workspace).
+  -- workspace_path is the directory this session's agent runs in; the two bound_*
+  -- columns are the thread it opened, so a reply resolves back to it instead of
+  -- minting a new session. All three are NULL for an ordinary chat session.
+  workspace_path            TEXT,
+  bound_messaging_group_id  TEXT,
+  bound_root_message_id     TEXT,
+  -- Who is waiting for this task session's next run to finish, as JSON. Set by
+  -- run_task, read and cleared when the run's task_log arrives.
+  pending_run_request       TEXT
 );
 CREATE INDEX idx_sessions_agent_group ON sessions(agent_group_id);
 CREATE INDEX idx_sessions_lookup ON sessions(messaging_group_id, thread_id);
+CREATE INDEX idx_sessions_bound ON sessions(bound_messaging_group_id, bound_root_message_id);
 
 -- Pending interactive questions
 CREATE TABLE pending_questions (

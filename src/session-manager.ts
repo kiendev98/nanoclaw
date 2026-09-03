@@ -11,16 +11,18 @@ import { isSafeAttachmentName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
 import { ensureContainedInboxDir, isPathInside } from './inbox-safety.js';
-import { getAgentGroup } from './db/agent-groups.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import { isUniqueViolation } from './db/errors.js';
 import {
+  composeThreadId,
   createSession,
+  findSessionBoundToThread,
   findSystemSession,
   findSessionByAgentGroup,
   findSessionForAgent,
   getSession,
   taskThreadId,
+  threadRootMessageId,
   updateSession,
 } from './db/sessions.js';
 import { log } from './log.js';
@@ -110,6 +112,25 @@ export async function resolveSession(
 ): Promise<{ session: Session; created: boolean }> {
   const key = sessionCreationKey(agentGroupId, messagingGroupId, threadId, sessionMode);
   return withSessionCreationLock(key, async () => {
+    // A reply in a thread this agent's task opened belongs to THAT session.
+    //
+    // Checked before every other lookup, because none of them can find it: a
+    // task session's own `thread_id` is `system:tasks:<series>` and its
+    // `messaging_group_id` is null, so the ordinary key misses and a new
+    // session is created — with an empty transcript, in the same agent group,
+    // answering in a thread it knows nothing about. That is the failure this
+    // whole binding exists to remove.
+    //
+    // Matched on the LAST SEGMENT of the inbound thread id rather than by
+    // rebuilding `<platform_id>:<ts>`: the format belongs to the Chat SDK and
+    // can change, and a rebuilt guess fails silently by never matching.
+    if (messagingGroupId && threadId) {
+      const bound = await findSessionBoundToThread(messagingGroupId, threadRootMessageId(threadId));
+      if (bound && bound.agent_group_id === agentGroupId) {
+        return { session: bound, created: false };
+      }
+    }
+
     // agent-shared: single session per agent group, regardless of messaging group
     if (sessionMode === 'agent-shared') {
       const existing = await findSessionByAgentGroup(agentGroupId);
@@ -138,6 +159,9 @@ export async function resolveSession(
       container_status: 'stopped',
       last_active: null,
       created_at: new Date().toISOString(),
+      workspace_path: null,
+      bound_messaging_group_id: null,
+      bound_root_message_id: null,
     };
 
     try {
@@ -161,15 +185,31 @@ export async function resolveSession(
 }
 
 /** Find or create the per-agent-group session used for scheduled tasks. */
-/** Find or create the isolated session for one task series (thread `system:tasks:<seriesId>`). */
+/**
+ * Find or create the isolated session for one task series (thread
+ * `system:tasks:<seriesId>`).
+ *
+ * @param workspacePath Host directory the task's agent runs in, for a series
+ *   that named a repository. Re-stamped on every call rather than only at
+ *   creation: `ncl worktrees prune` and a human's `rm -rf` both move the
+ *   worktree without touching this row, and the spawn reads the COLUMN, so a
+ *   stale value starts the agent in a directory that is no longer there.
+ */
 export async function resolveTaskSession(
   agentGroupId: string,
   seriesId: string,
+  workspacePath: string | null = null,
 ): Promise<{ session: Session; created: boolean }> {
   const threadId = taskThreadId(seriesId);
   return withSessionCreationLock(`system\0${agentGroupId}\0${threadId}`, async () => {
     const existing = await findSystemSession(agentGroupId, threadId);
-    if (existing) return { session: existing, created: false };
+    if (existing) {
+      if (workspacePath !== null && workspacePath !== existing.workspace_path) {
+        await updateSession(existing.id, { workspace_path: workspacePath });
+        return { session: { ...existing, workspace_path: workspacePath }, created: false };
+      }
+      return { session: existing, created: false };
+    }
 
     const id = generateId();
     const session: Session = {
@@ -182,6 +222,9 @@ export async function resolveTaskSession(
       container_status: 'stopped',
       last_active: null,
       created_at: new Date().toISOString(),
+      workspace_path: workspacePath,
+      bound_messaging_group_id: null,
+      bound_root_message_id: null,
     };
 
     try {
@@ -214,46 +257,14 @@ export async function destroySessionMailbox(agentGroupId: string, sessionId: str
 }
 
 /**
- * The agent group a repo worker answers to, or null when this group is not a
- * worker.
- *
- * A worker is the pair (repository, originating thread): `workspace_path` is
- * the worktree it stands in and `origin_session_id` is the conversation that
- * asked for it, and BOTH are written once, by the action that creates it. The
- * orchestrator is that session's agent group, so the target is fixed at
- * creation and nothing the worker later emits can move it.
- *
- * Returns null for every ordinary agent group — `create_agent` leaves both
- * columns NULL — so no companion's routing changes.
- */
-async function workerOrchestratorGroup(agentGroupId: string): Promise<string | null> {
-  const group = await getAgentGroup(agentGroupId);
-  if (!group?.workspace_path || !group.origin_session_id) return null;
-  const origin = await getSession(group.origin_session_id);
-  if (!origin || origin.agent_group_id === agentGroupId) return null;
-  return origin.agent_group_id;
-}
-
-/**
  * Write the current chat/thread routing for a session into its inbound mailbox.
  *
  * The container uses this to preserve thread_id when an explicitly named
- * destination resolves to the conversation this session is bound to, and — for
- * a worker — as the lane its plain turn output goes down.
+ * destination resolves to the conversation this session is bound to.
  *
  * Derived from session.messaging_group_id → messaging_groups row +
- * session.thread_id, with ONE exception. A repo worker's session is created by
- * `resolveSession(groupId, null, null, 'agent-shared')`, so it has no
- * messaging group and would get `channelType: null, platformId: null` — no
- * channel at all, and anything it wrote as ordinary output would go nowhere,
- * silently. It gets the agent-to-agent lane to its orchestrator instead, which
- * `delivery.ts` already routes through `routeAgentMessage`. Delivery is
- * therefore by CODE, not by the worker remembering to address a destination.
- *
- * That lane is not a wider permission: the route still passes the `a2a.send`
- * guard, which denies any pair with no `agent_destinations` row, and the
- * worker holds exactly one such row — for its own orchestrator, written when
- * it was provisioned.
+ * session.thread_id, with one exception for a task session that opened a
+ * thread — see the `boundGroup` branch below.
  *
  * Called on every container wake alongside the agent-to-agent module's
  * writeDestinations() (when installed) so the latest routing is always in
@@ -266,20 +277,28 @@ export async function writeSessionRouting(agentGroupId: string, sessionId: strin
   let channelType: string | null = null;
   let platformId: string | null = null;
   let threadId: string | null = session.thread_id;
-  if (session.messaging_group_id) {
+  // A task session that opened a thread answers INTO it. Checked before the
+  // messaging-group branch because a task session has no messaging group at
+  // all — its own `thread_id` is `system:tasks:<series>`, which addresses
+  // nothing — so without this it would fall through to having no route and
+  // answer nobody.
+  //
+  // This is also what removes the need for a `thread` argument on
+  // `send_message`: once the routing row IS the thread, `resolveRouting`
+  // reuses it for any send whose destination matches, unchanged.
+  const boundGroup =
+    session.bound_messaging_group_id && session.bound_root_message_id
+      ? await getMessagingGroup(session.bound_messaging_group_id)
+      : undefined;
+  if (boundGroup) {
+    channelType = boundGroup.channel_type;
+    platformId = boundGroup.platform_id;
+    threadId = composeThreadId(boundGroup.platform_id, session.bound_root_message_id!);
+  } else if (session.messaging_group_id) {
     const mg = await getMessagingGroup(session.messaging_group_id);
     if (mg) {
       channelType = mg.channel_type;
       platformId = mg.platform_id;
-    }
-  } else {
-    const orchestrator = await workerOrchestratorGroup(agentGroupId);
-    if (orchestrator) {
-      channelType = 'agent';
-      platformId = orchestrator;
-      // An agent-to-agent message has no thread. Carrying one over would name
-      // a thread in a channel this lane does not address.
-      threadId = null;
     }
   }
 

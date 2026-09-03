@@ -7,7 +7,6 @@ import {
   type MessageInRow,
 } from './db/messages-in.js';
 import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
-import { getSessionRouting } from './db/session-routing.js';
 import { clearStaleProcessingAcks } from './db/container-state.js';
 import { touchHeartbeat } from './heartbeat.js';
 import { getAgentMailbox } from './mailbox/index.js';
@@ -61,8 +60,9 @@ export interface PollLoopConfig {
   };
   /**
    * Start every TASK with a clean transcript instead of resuming. True for a
-   * repo worker, which `container.json` identifies by carrying a
-   * `workspacePath`; absent for an ordinary group, which resumes as before.
+   * task-scoped workspace session, which `container.json` identifies by
+   * carrying a `workspacePath`; absent for an ordinary group, which resumes
+   * as before.
    */
   freshSessionPerTask?: boolean;
   /**
@@ -149,21 +149,21 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     const routing = extractRouting(messages);
 
-    // A repo worker starts every TASK with a clean transcript — per batch, not
-    // per container start. The distinction is the whole point: the case this
-    // targets is a second task arriving in a thread that already has a worker,
-    // and that path reuses a WARM container. Resetting only at startup would
-    // have left exactly that case resuming, which is the unbounded bill it
-    // exists to stop.
+    // A task-scoped workspace session starts every TASK with a clean
+    // transcript — per batch, not per container start. The distinction is
+    // the whole point: the case this targets is a second task arriving in a
+    // thread that already has one, and that path reuses a WARM container.
+    // Resetting only at startup would have left exactly that case resuming,
+    // which is the unbounded bill it exists to stop.
     //
-    // Set for groups carrying a `workspace_path`, which reaches the runner
+    // Set for sessions carrying a `workspace_path`, which reaches the runner
     // through `container.json` — so an ordinary group never sees it and resumes
     // as before. Same two lines as the `/clear` branch below.
     //
-    // A worker's durable state is its worktree, which persists across tasks
-    // either way. Its transcript is rebuildable from those files.
+    // Durable state is the worktree, which persists across tasks either way.
+    // Its transcript is rebuildable from those files.
     if (continuation && config.freshSessionPerTask) {
-      log('Worker task — starting a fresh session rather than resuming');
+      log('Task-scoped workspace — starting a fresh session rather than resuming');
       continuation = undefined;
       clearContinuation(config.providerName);
     }
@@ -582,25 +582,21 @@ export async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          const { sent, hasUnwrapped, taskBlocks, resultBlocks, scratchpad } = await dispatchResultText(
-            event.text,
-            routing,
-            {
-              midTurnSent,
-              // For emitsMidTurnText providers the result door NEVER delivers
-              // content (error results excepted, below): mid-turn streaming is
-              // the single content door. The result door's remaining job is
-              // the nudge decision — see turnDelivered.
-              suppressDelivery: emitsMidTurnText,
-              // "Did anything user-visible go out this turn?" — door
-              // deliveries (midTurnSent) plus any chat row written since the
-              // turn boundary (which also sees MCP send_message calls the
-              // frame-local count can't). When false and the result still
-              // carries content, the wrap-nudge fires so the model re-sends
-              // and the retry streams through the mid-turn door.
-              turnDelivered: emitsMidTurnText ? midTurnSent > 0 || chatRowWrittenSince(turnStartSeq) : undefined,
-            },
-          );
+          const { sent, hasUnwrapped, taskBlocks, resultBlocks } = await dispatchResultText(event.text, routing, {
+            midTurnSent,
+            // For emitsMidTurnText providers the result door NEVER delivers
+            // content (error results excepted, below): mid-turn streaming is
+            // the single content door. The result door's remaining job is
+            // the nudge decision — see turnDelivered.
+            suppressDelivery: emitsMidTurnText,
+            // "Did anything user-visible go out this turn?" — door
+            // deliveries (midTurnSent) plus any chat row written since the
+            // turn boundary (which also sees MCP send_message calls the
+            // frame-local count can't). When false and the result still
+            // carries content, the wrap-nudge fires so the model re-sends
+            // and the retry streams through the mid-turn door.
+            turnDelivered: emitsMidTurnText ? midTurnSent > 0 || chatRowWrittenSince(turnStartSeq) : undefined,
+          });
           const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
           // One-door task delivery: the final text becomes the run log entry
           // while explicit append-log calls remain optional additive notes.
@@ -622,22 +618,12 @@ export async function processQuery(
             });
             archivePrompts.shift();
           } else {
-            // A session on the agent lane — a repo worker, which has no
-            // channel of its own — has exactly ONE place its output can go,
-            // and the host fixed that lane at creation. So unwrapped text is
-            // delivered there rather than nudged: a worker that simply writes
-            // its answer is answered by code, and never has to remember to
-            // address a destination. Everything else keeps the nudge, where
-            // "which destination?" is a real question the model must answer.
-            const lane = hasUnwrapped ? agentLaneRouting() : null;
-            if (lane && scratchpad) await deliverOnAgentLane(scratchpad, lane, routing.inReplyTo);
-            const autoDelivered = lane !== null && scratchpad !== '';
-            const willRetryWrapping = hasUnwrapped && !unwrappedNudged && !autoDelivered;
+            const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
               result: event.text,
               continuation: queryContinuation ?? initialContinuation,
-              status: (hasUnwrapped && !autoDelivered) || willRetryTaskBlocks ? 'undelivered' : 'completed',
+              status: hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
             });
             if (willRetryWrapping) {
               unwrappedNudged = true;
@@ -732,56 +718,6 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  * This is the same user-facing write the outer catch block does, minus the
  * `Error:` prefix — the provider's text is already a user-facing message.
  */
-/**
- * The agent-to-agent lane this session answers on, or null when it has a
- * channel of its own (or no routing at all).
- *
- * Read from the SESSION routing, which the host writes on every wake from
- * `agent_groups.origin_session_id` — not from the inbound batch, whose
- * routing follows whoever last wrote to this session. A worker's replies must
- * reach its own orchestrator and nothing else, and only the session routing
- * carries that guarantee.
- */
-function agentLaneRouting(): { channelType: string; platformId: string } | null {
-  let routing;
-  try {
-    routing = getSessionRouting();
-  } catch (err) {
-    // No routing written yet (a mailbox that has never been woken by the
-    // host). Absence is not an agent lane.
-    log(`Session routing unavailable: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
-  }
-  if (routing.channel_type !== 'agent' || !routing.platform_id) return null;
-  return { channelType: routing.channel_type, platformId: routing.platform_id };
-}
-
-/**
- * Deliver a turn's unwrapped text down this session's agent lane.
- *
- * `in_reply_to` rides along because the host stamps the a2a return path from
- * it — without it the reply lands on whichever of the orchestrator's sessions
- * the newest-active fallback picks.
- */
-async function deliverOnAgentLane(
-  text: string,
-  lane: { channelType: string; platformId: string },
-  inReplyTo: string | null,
-): Promise<void> {
-  const body = text.trim();
-  if (!body) return;
-  await writeMessageOut({
-    id: generateId(),
-    in_reply_to: inReplyTo,
-    kind: 'chat',
-    platform_id: lane.platformId,
-    channel_type: lane.channelType,
-    thread_id: null,
-    content: JSON.stringify({ text: body }),
-  });
-  log(`Agent-lane delivery: ${body.length} chars to ${lane.platformId}`);
-}
-
 async function deliverErrorResult(text: string, routing: RoutingContext): Promise<void> {
   log('Error result with no <message> envelope — delivering to channel');
   await writeMessageOut({

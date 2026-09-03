@@ -7,7 +7,7 @@
  */
 import './core.js';
 import './interactive.js';
-import './workers.js';
+import './scheduling.js';
 import './self-mod.js';
 import './canvas.js';
 import './rooms.js';

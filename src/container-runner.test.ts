@@ -182,13 +182,16 @@ describe('composeSessionSpec', () => {
    * `.claude/settings.json` a session loads.
    *
    * It rides the typed `ContainerSpec.cwd`, which the local driver's
-   * `resolveSpawnCwd` reads, and `container.json`'s `workspacePath`, which the
-   * runner reads. No environment variable carries it.
+   * `resolveSpawnCwd` reads, plus `NANOCLAW_WORKSPACE_PATH` on this spawn's
+   * own env, which the runner's `resolveCwd` prefers over `container.json`'s
+   * `workspacePath` — that file is one per agent GROUP and rewritten at every
+   * spawn, so two sessions of one group race on it.
    */
   it('publishes a repo-scoped group workspace as the container cwd', () => {
     const spec = composeWithWorkspace('/Users/kien/.saber/worktrees/saber-nanoclaw-scout');
     expect(spec.containers[0].cwd).toBe('/Users/kien/.saber/worktrees/saber-nanoclaw-scout');
     expect(spec.containers[0].env).not.toHaveProperty('NANOCLAW_PROJECT_DIR');
+    expect(spec.containers[0].env.NANOCLAW_WORKSPACE_PATH).toBe('/Users/kien/.saber/worktrees/saber-nanoclaw-scout');
   });
 
   it('sets no cwd for a group without a workspace', () => {
@@ -197,6 +200,23 @@ describe('composeSessionSpec', () => {
     // to the host's own checkout — the 11,618-token CLAUDE.md leak of 5a592b62.
     expect(composeWithWorkspace(null).containers[0].cwd).toBeUndefined();
     expect(compose().containers[0].cwd).toBeUndefined();
+  });
+
+  /**
+   * PRESENT-AND-EMPTY, not absent — the opposite of the `cwd` contract above,
+   * and deliberately so. The local driver copies the host's whole
+   * `process.env` into the child, and the runner falls back to
+   * `container.json` when the variable is missing; that file is shared per
+   * GROUP, so another session of this group may have just stamped ITS worktree
+   * into it. Leaving the variable unset for a session with no workspace would
+   * therefore let an ordinary chat session inherit a task's worktree and
+   * commit into the wrong repository. An empty value is the host saying "this
+   * session has no workspace", which the runner can tell apart from an old
+   * host that said nothing at all.
+   */
+  it('states an empty workspace path rather than omitting the variable', () => {
+    expect(composeWithWorkspace(null).containers[0].env.NANOCLAW_WORKSPACE_PATH).toBe('');
+    expect(compose().containers[0].env).toHaveProperty('NANOCLAW_WORKSPACE_PATH', '');
   });
 
   /**
