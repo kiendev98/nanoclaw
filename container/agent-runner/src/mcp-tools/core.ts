@@ -144,7 +144,59 @@ function resolveRouting(
     if (isOwnChannel) {
       threadId = session.thread_id;
     } else if (!sessionOwnsAChannel(session)) {
-      threadId = latestInboundThread(dest.channelType!, dest.platformId!);
+      // THE THREAD THIS SESSION OPENED WINS OVER THE NEWEST INBOUND.
+      //
+      // `dest.threadId` is the host's binding for this session, projected into
+      // the destination map on every wake (modules/agent-to-agent/
+      // write-destinations.ts). It answers "the conversation I started here",
+      // which is what a worker driving a review actually means.
+      //
+      // The inbound fallback below cannot answer that on its own, and its two
+      // gaps are the ones that broke the protocol. Before anyone has replied
+      // there is no inbound at all, so a second post named no thread, opened a
+      // SECOND root, and — hook 1 being first-wins — that root never bound, so
+      // every reply in it was lost. And once several threads of one channel
+      // reach one session, "newest inbound" can name a different conversation
+      // than the one being continued.
+      //
+      // It also retires the PR-body thread marker for this runner: the binding
+      // already is the durable record of "one thread per PR", so nothing has
+      // to be persisted, re-read, or searched for.
+      //
+      // SCOPED TO THE AGENT LANE, not to "has no channel of its own". Those
+      // are different sets, and `session-lane.ts` says so: a SCHEDULED TASK
+      // session also has `channel_type = null`, because
+      // `workerOrchestratorGroup` returns null unless the group carries both
+      // `workspace_path` and `origin_session_id`. Preferring the binding for
+      // one of those brings back exactly the hook-3 failure that was removed:
+      // the binding is first-wins and nothing clears it, so a RECURRING task
+      // would thread every future run into the thread its first run opened —
+      // the daily digest filed under day one.
+      //
+      // KNOWN LIMIT, and do not read this as a guarantee it does not give.
+      // An earlier draft justified the scoping with "a worker is short-lived".
+      // That is FALSE: the per-task continuation wipe was deliberately deleted
+      // (poll-loop.ts), so a worker resumes across tasks, and `spawn_worker`
+      // reuses one worker per (origin session, repo).
+      //
+      // So a second task given to the SAME worker for the SAME repo posts into
+      // the first task's thread, because the binding is first-wins and nothing
+      // clears it. Reachable from any orchestrator session that is long-lived
+      // — a DM or the CLI channel, where `session_mode` stays `shared`. It is
+      // NOT reachable on a threaded group channel like `#ai-anya`, where
+      // router.ts forces `per-thread` regardless of the wiring's column, so
+      // each PR thread is its own origin session and gets its own worker.
+      //
+      // This is not a regression: without the binding the fallback picks the
+      // newest inbound, which after the first task has replies is that same
+      // wrong thread. The binding makes the existing wrong answer
+      // deterministic rather than introducing it. A real fix needs the binding
+      // to have a LIFETIME — cleared when a worker starts a new task — which
+      // is a design change, not a scoping tweak.
+      //
+      // The inbound fallback stays scoped to the wider set, unchanged.
+      const boundThread = isAgentLane(session) ? dest.threadId : null;
+      threadId = boundThread ?? latestInboundThread(dest.channelType!, dest.platformId!);
     }
     return {
       channel_type: dest.channelType!,

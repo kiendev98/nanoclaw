@@ -201,3 +201,92 @@ describe('report_progress — the door that replaces it', () => {
     expect(getUndeliveredMessages()).toHaveLength(2);
   });
 });
+
+/**
+ * A worker replying into the thread it opened.
+ *
+ * The host binds a session to the thread its first top-level post created, and
+ * until now that binding was readable only by the host: it routed a human's
+ * reply IN, and the container had no way to learn where to reply OUT. So a
+ * second post named no thread and opened a SECOND root — and hook 1 being
+ * first-wins, that root never bound, so every reply in it was lost.
+ *
+ * The binding now rides the destination map (`write-destinations.ts`), which is
+ * rewritten on every wake.
+ */
+describe('a worker replies into the thread it opened', () => {
+  function seedBoundChannel(name: string, platformId: string, threadId: string | null): void {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id, thread_id)
+         VALUES (?, ?, 'channel', 'slack', ?, NULL, ?)`,
+      )
+      .run(name, name, platformId, threadId);
+  }
+
+  it('threads into its bound thread before anyone has replied', async () => {
+    // The gap that broke the protocol: with no inbound on that channel yet,
+    // `getLatestInboundRoute` has nothing to offer and the post went
+    // top-level, opening a rival root.
+    seedSessionRouting('agent', ORCHESTRATOR);
+    seedBoundChannel('ai-anya', 'slack:C0ANYA', 'slack:C0ANYA:111.1');
+
+    await sendMessage.handler({ to: 'ai-anya', text: 'PR #42 is ready for review' });
+
+    const [out] = getUndeliveredMessages();
+    expect(out.thread_id).toBe('slack:C0ANYA:111.1');
+    expect(out.platform_id).toBe('slack:C0ANYA');
+  });
+
+  it('still posts top-level when it has opened no thread there', async () => {
+    // A worker's FIRST post has to open the thread, so a null binding must
+    // stay null — otherwise there is nothing for the host to bind to.
+    seedSessionRouting('agent', ORCHESTRATOR);
+    seedBoundChannel('ai-anya', 'slack:C0ANYA', null);
+
+    await sendMessage.handler({ to: 'ai-anya', text: 'PR #42 is ready for review' });
+
+    const [out] = getUndeliveredMessages();
+    expect(out.thread_id).toBeNull();
+  });
+
+  it('keeps its own thread when another conversation is newer on that channel', async () => {
+    // The binding wins over a newer inbound, and both doors agree on that.
+    // A lent channel carries other people's threads; following whichever is
+    // newest is how a considered answer lands in a stranger's conversation.
+    seedSessionRouting('agent', ORCHESTRATOR);
+    seedBoundChannel('ai-anya', 'slack:C0ANYA', 'slack:C0ANYA:111.1');
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, thread_id, content)
+         VALUES ('in-1', 'chat', datetime('now'), 'pending', 'slack:C0ANYA', 'slack', 'slack:C0ANYA:222.2', ?)`,
+      )
+      .run(JSON.stringify({ sender: 'Someone else', text: 'unrelated thread' }));
+
+    await sendMessage.handler({ to: 'ai-anya', text: 'thanks' });
+
+    const [out] = getUndeliveredMessages();
+    expect(out.thread_id).toBe('slack:C0ANYA:111.1');
+  });
+
+  it('does NOT thread a scheduled-task session into its binding', async () => {
+    // A task session ALSO has no channel of its own — `channel_type` is null,
+    // because `workerOrchestratorGroup` returns null unless the group carries
+    // both `workspace_path` and `origin_session_id`. Scoping the binding by
+    // "no channel of its own" therefore swept task sessions in, and a task
+    // RECURS: the binding is first-wins with nothing to clear it, so every
+    // future run would post into the thread the first run opened — the daily
+    // digest filed under day one, which is the hook-3 failure that was
+    // deliberately removed.
+    //
+    // Only the agent lane gets the binding. A worker is short-lived, so its
+    // thread stays the conversation it started; a task is not.
+    seedSessionRouting(null, null);
+    seedBoundChannel('ai-anya', 'slack:C0ANYA', 'slack:C0ANYA:111.1');
+
+    await sendMessage.handler({ to: 'ai-anya', text: 'daily digest' });
+
+    const [out] = getUndeliveredMessages();
+    expect(out.thread_id).toBeNull();
+  });
+});

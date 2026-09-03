@@ -99,7 +99,11 @@ async function activate(): Promise<void> {
 }
 
 /** The chat, plus one wired agent that only engages when mentioned. */
-async function seedChat(engageMode: MessagingGroupAgent['engage_mode'] = 'mention'): Promise<void> {
+async function seedChat(
+  engageMode: MessagingGroupAgent['engage_mode'] = 'mention',
+  ignoredMessagePolicy: MessagingGroupAgent['ignored_message_policy'] = 'drop',
+  threads: 0 | 1 = 1,
+): Promise<void> {
   await createAgentGroup({
     id: 'ag-wired',
     name: 'Orchestrator',
@@ -124,10 +128,10 @@ async function seedChat(engageMode: MessagingGroupAgent['engage_mode'] = 'mentio
     engage_mode: engageMode,
     engage_pattern: null,
     sender_scope: 'all',
-    ignored_message_policy: 'drop',
+    ignored_message_policy: ignoredMessagePolicy,
     session_mode: 'per-thread',
     priority: 0,
-    threads: 1,
+    threads,
     created_at: now(),
   });
 }
@@ -492,5 +496,103 @@ describe("a wired agent's own policy is not reopened by its binding", () => {
     await inbound('m1', BOUND_THREAD, 'rework the migration');
 
     expect(inboundRows('ag-worker', WORKER_SESSION)).toHaveLength(1);
+  });
+});
+
+/**
+ * The thread-ownership guard.
+ *
+ * These cover a takeover that needs TWO messages to appear, which is why it
+ * survived review: the first one looks like nothing happening.
+ *
+ * `accumulate` stores a non-engaging message as silent context, and storing
+ * it creates a session for (agent, mg, thread). `mention-sticky` then reads
+ * session existence as proof the thread was activated. So an agent that was
+ * never addressed, and has never spoken in the thread, engages on the second
+ * unmentioned message — inside a thread another agent opened and is running a
+ * protocol in.
+ */
+describe('a thread another agent opened is not a wired agent’s conversation', () => {
+  it('does not let accumulate create a session in someone else’s thread', async () => {
+    await activate();
+    await seedChat('mention-sticky', 'accumulate');
+    await seedBoundWorker();
+
+    await inbound('m1', BOUND_THREAD, 'rework the migration');
+
+    // The whole takeover starts here. No session, nothing to arm sticky with.
+    expect(sessionDirsFor('ag-wired')).toHaveLength(0);
+    expect(inboundRows('ag-worker', WORKER_SESSION)).toHaveLength(1);
+  });
+
+  it('does not let the second unmentioned message engage the wired agent', async () => {
+    // The step that was observed live: a session created by accumulate, then
+    // a later unmentioned message waking an agent that reasoned "Neither
+    // @-mentions me" and answered anyway.
+    await activate();
+    await seedChat('mention-sticky', 'accumulate');
+    await seedBoundWorker();
+
+    await inbound('m1', BOUND_THREAD, 'rework the migration');
+    await inbound('m2', BOUND_THREAD, 'and the rollback too');
+
+    expect(sessionDirsFor('ag-wired')).toHaveLength(0);
+    expect(inboundRows('ag-worker', WORKER_SESSION)).toHaveLength(2);
+  });
+
+  it('still engages the wired agent when it is explicitly mentioned', async () => {
+    // Being addressed by name is a decision to bring this agent in, and it is
+    // the one signal that does not depend on the accumulate side effect.
+    // Closing the implicit paths must not close this one.
+    await activate();
+    await seedChat('mention-sticky', 'accumulate');
+    await seedBoundWorker();
+
+    await inbound('m1', BOUND_THREAD, 'orchestrator, take a look', true);
+
+    const [session] = sessionDirsFor('ag-wired');
+    expect(session).toBeDefined();
+    expect(inboundRows('ag-wired', session)).toHaveLength(1);
+  });
+
+  it('leaves a thread the wired agent owns alone', async () => {
+    // The guard keys on WHOSE binding it is, not on the existence of one. An
+    // agent must keep accumulating in a thread it opened itself.
+    await activate();
+    await seedChat('mention-sticky', 'accumulate');
+    await seedBoundWorker('ag-wired');
+
+    await inbound('m1', BOUND_THREAD, 'a follow-up in my own thread');
+
+    expect(inboundRows('ag-wired', WORKER_SESSION)).toHaveLength(1);
+  });
+
+  it('does not skip a wiring that has threads turned OFF', async () => {
+    // The guard must run AFTER the thread policy. A wiring with threads
+    // disabled reads the channel as ONE flat conversation — thread identity
+    // never reaches session resolution — so "another agent owns this thread"
+    // describes nothing, and skipping on it would silently drop a message
+    // from an agent that is meant to read the whole channel. The live
+    // `#ai-anya` wiring is `shared`, so this is the deployed shape.
+    await activate();
+    await seedChat('mention-sticky', 'accumulate', 0);
+    await seedBoundWorker();
+
+    await inbound('m1', BOUND_THREAD, 'rework the migration');
+
+    expect(sessionDirsFor('ag-wired')).toHaveLength(1);
+  });
+
+  it('does not touch top-level messages, which belong to nobody', async () => {
+    // `findBoundSessionFor` answers undefined with no thread id, so the guard
+    // cannot fire on a channel post — the ordinary wiring decides as before.
+    await activate();
+    await seedChat('pattern', 'accumulate');
+    await seedBoundWorker();
+
+    await inbound('m1', null, 'hello there');
+
+    const [session] = sessionDirsFor('ag-wired');
+    expect(session).toBeDefined();
   });
 });

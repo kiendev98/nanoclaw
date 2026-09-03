@@ -1301,7 +1301,30 @@ async function sendToDestination(dest: DestinationEntry, body: string, routing: 
   // that came from this same channel+platform. In agent-shared sessions,
   // different destinations have different thread contexts — using a single
   // routing.threadId would stamp one channel's thread onto another.
+  //
+  // NEWEST-WINS IS DELIBERATE WHEN A BATCH SPANS THREADS, and is asserted by
+  // `integration.test.ts` ("resolves most recent thread_id …"): the agent read
+  // every message in the batch, and the last one is the likeliest subject of a
+  // single reply. It is not changed here.
   const destRouting = resolveDestinationThread(channelType, platformId);
+  // The thread this session opened on that channel, same as `send_message`
+  // uses — the two doors must not disagree about where a reply belongs, and
+  // this one had no way to know about a thread nobody had replied in yet.
+  //
+  // Guarded by `isAgentLane` exactly as `resolveRouting` is, and for the
+  // reason recorded there: a session that once posted proactively into
+  // another channel is bound to that first thread forever (first-wins, no
+  // clearer), so preferring the binding for a long-lived session would thread
+  // every later post into it — the removed "hook 3", arriving through a new
+  // door.
+  //
+  // AGENT LANE ONLY. `!sessionOwnsAChannel` is the wider set — it also holds
+  // for a SCHEDULED TASK session, whose `channel_type` is null — and the
+  // binding is first-wins with nothing to clear it, so a recurring task would
+  // thread every future run into its first run's thread. That is the removed
+  // hook 3 arriving through a new door, which the note above warns about but
+  // the old predicate did not actually exclude.
+  const boundThread = isAgentLane(getSessionRouting()) ? (dest.threadId ?? null) : null;
   // Channel destinations only. An agent-to-agent message is machine input,
   // and a telemetry line appended to it is noise the receiving agent has to
   // reason about.
@@ -1316,7 +1339,14 @@ async function sendToDestination(dest: DestinationEntry, body: string, routing: 
     kind: 'chat',
     platform_id: platformId,
     channel_type: channelType,
-    thread_id: destRouting?.threadId ?? null,
+    // THE BINDING WINS, and both doors agree on that — `resolveRouting` in
+    // mcp-tools/core.ts resolves the same order. The thread this session
+    // opened IS its conversation on that channel; a newer inbound elsewhere in
+    // the same channel is somebody else's, and following it is the cross-thread
+    // mistake this pair of fixes exists to stop. The inbound lookup stays as
+    // the answer for every session that has no binding, which is all of them
+    // until one posts.
+    thread_id: boundThread ?? destRouting?.threadId ?? null,
     content: JSON.stringify({ text: body, ...(footer ? { footer } : {}) }),
   });
 }

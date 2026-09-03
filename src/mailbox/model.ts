@@ -122,6 +122,20 @@ export interface DeliveryRecord {
 interface DestinationRecordBase {
   name: string;
   displayName: string | null;
+  /**
+   * The thread THIS session opened on that channel, when it opened one.
+   *
+   * Carried per destination rather than on `session_routing`, because that
+   * row is the session's own LANE and repointing it at a lent channel would
+   * send the worker's report and its `ask_user_question` to the channel
+   * instead of to the agent that briefed it (§3.5, worker-reachability.md).
+   * "Which thread on which channel" is per-channel data, so it rides the
+   * per-channel row.
+   *
+   * Null for an agent destination, and for a channel this session has never
+   * posted into.
+   */
+  threadId: string | null;
 }
 
 export type DestinationRecord =
@@ -475,10 +489,12 @@ export function parseDestinationRecord(value: unknown): DestinationRecord {
     'channelType',
     'platformId',
     'agentGroupId',
+    'threadId',
   ]);
   const common = {
     name: text(record, 'name'),
     displayName: nullableText(record, 'displayName'),
+    threadId: nullableText(record, 'threadId'),
   };
   const type = oneOf(record, 'type', ['channel', 'agent'] as const);
   const channelType = nullableText(record, 'channelType');

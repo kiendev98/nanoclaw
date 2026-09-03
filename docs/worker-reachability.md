@@ -674,6 +674,90 @@ exchange is bounded by that number rather than by either agent.
 Neither is a bug. Both are the a2a bridge doing its job, and both are
 configuration rather than code — but a worker↔bot loop needs all three doors
 open, and they fail in that order.
+
+## 3.7 The worker replies into the thread it opened
+
+§3.4 threads a worker's reply through `getLatestInboundRoute` — the newest
+inbound on that channel. That answers only once somebody has replied, and the
+protocol needs an answer before that.
+
+```
+   ai-anya                 WORKER
+     │◄─ send_message ──────┤  post #1: no binding yet → top-level ✓
+     │   thread T opens     │
+     │                 ┌────┴────┐
+     │                 │ HOOK 1  │ host binds session ↔ T
+     │                 └────┬────┘
+     │◄─ send_message ──────┤  post #2, nobody replied yet:
+     │                      │    getLatestInboundRoute → null
+     │   thread U opens ✗   │    → TOP-LEVEL, a rival root
+     │                      │    → first-wins, so U never binds
+     │                      │    → every reply in U is lost
+```
+
+The binding already knew the answer. It was simply unreadable from inside the
+container: it routed a human's reply IN and had no path OUT.
+
+**It now rides the destination map.** `write-destinations.ts` projects
+`sessions.bound_root_message_id` onto the channel row it belongs to, composed
+as `<platform_id>:<root>` — the form every inbound row and every adapter uses.
+Rewritten wholesale on every wake, so it tracks the binding with no second
+write path and no invalidation rule.
+
+**Composed, never matched.** `threadRootMessageId` warns against rebuilding a
+composed thread id, because a rebuilt guess that stops matching fails by
+silently finding nothing. That warning is about the INBOUND direction. This
+value is only ever used to send.
+
+**Not on `session_routing`.** That row is the session's own LANE, and
+repointing it at a lent channel would send the worker's report and its
+`ask_user_question` to the channel instead of to the agent that briefed it
+(§3.5). "Which thread on which channel" is per-channel data, so it rides the
+per-channel row.
+
+### The binding wins, and both doors agree
+
+`resolveRouting` (`send_message`) and `sendToDestination` (the
+`<message to="…">` path) resolve the same order: **binding, then newest
+inbound, then top-level.**
+
+A lent channel carries other people's threads. Following whichever is newest is
+how a considered answer lands in a stranger's conversation — so a newer inbound
+elsewhere on the channel does not move a worker off the thread it opened.
+
+Scoped to the **agent lane** (`isAgentLane`), which is narrower than "has no
+channel of its own" — and the difference is load-bearing. A **scheduled-task**
+session also has `channel_type = null`, because `workerOrchestratorGroup`
+returns null unless the group carries both `workspace_path` and
+`origin_session_id`. The binding is first-wins and nothing clears it, so
+scoping by the wider set would thread every future run of a recurring task
+into the thread its first run opened — the daily digest filed under day one,
+which is exactly the hook-3 failure that was removed.
+
+A worker is on the agent lane and is short-lived, so its binding means "the
+conversation I started here" for its whole life. A task is not. The inbound
+fallback keeps the wider scope, unchanged.
+
+The projection also has to be **refreshed while the container is alive.**
+`writeDestinations` otherwise runs only at spawn, `wakeContainer` returns
+early for a container already running, and the binding is created *after* the
+first post — so the column would read NULL for the whole run, up to the
+30-minute idle ceiling, and the feature would work only when a container
+happened to die between two posts. `delivery.ts` reprojects in the
+successful-bind branch, which is the invariant `db/agent-destinations.ts`
+already states: a destinations mutation made while a container may be alive
+MUST reproject.
+
+### What this retires
+
+The PR-body thread marker, for any runner with a binding. `saber-pr-babysit`
+recovers its thread in three steps — read the marker, search the channel, else
+open one — and a nanoclaw worker could do none of them: `send_message` takes no
+thread argument and returns the container `seq`, not the platform `ts`, so
+there was nothing to persist and no way to search. The binding is now the
+durable record of "one thread per PR", and it needs no marker at all.
+
+The marker still matters for a runner without a binding, so the skill keeps it.
 ## Limits
 
 - **One thread per worker session.** The binding is first-wins with no clearer.
@@ -967,3 +1051,27 @@ sent by a worker that has crashed.
   mid-turn-acknowledgment advice in `destinations.ts` — sound for a human
   audience — reached a session whose correspondent is an agent. Anything added
   there needs the lane branch, or it is advice to two audiences at once.
+
+## Known limit: a reused worker keeps its first task's thread
+
+`spawn_worker` reuses one worker per `(origin session, repo)`, and PR #19
+deleted the per-task continuation wipe so a worker **resumes across tasks**. A
+worker is therefore not short-lived, and any reasoning that assumes it is —
+including an earlier draft of §3.7's own justification — is wrong.
+
+The binding is first-wins and nothing clears it. So a second task given to the
+same worker for the same repo posts into the **first task's thread**.
+
+| Where the orchestrator lives | Reachable? |
+|---|---|
+| A threaded group channel (`#ai-anya`) | **No.** `router.ts` forces `per-thread` when the thread policy is on in a group, whatever the wiring's `session_mode` column says — so each thread is its own origin session and gets its own worker |
+| A DM, or the CLI channel | **Yes.** `is_group = 0` short-circuits that override, `session_mode` stays `shared`, and one session lasts forever |
+
+**It is not a regression.** Without the binding the fallback takes the newest
+inbound on that channel, which after the first task has replies is the same
+wrong thread. The binding makes an existing wrong answer deterministic rather
+than introducing it.
+
+**The real fix is a lifetime, not a scope.** The binding has to be cleared when
+a worker starts a new task — a new write path against a first-wins invariant,
+which is a design change rather than a tweak to the predicate.

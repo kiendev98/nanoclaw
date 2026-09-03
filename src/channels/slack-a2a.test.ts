@@ -151,6 +151,49 @@ describe('slack-a2a room policy (registered via the channel barrel)', () => {
     expect(calls).toHaveLength(4);
   });
 
+  it('budgets each thread separately, so one review cannot spend another’s', async () => {
+    // A room is not an exchange. `#ai-anya` carries a live thread per pull
+    // request, and a room-wide budget let one PR's review throttle every
+    // other PR — with the symptom landing on an innocent thread.
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    const pid = 'slack:G0HOPS';
+    const threadA = 'slack:G0HOPS:100.1';
+    const threadB = 'slack:G0HOPS:200.2';
+
+    await wrapped.onInbound(pid, threadA, botMsg('a1'));
+    await wrapped.onInbound(pid, threadA, botMsg('a2'));
+    await wrapped.onInbound(pid, threadA, botMsg('a3'));
+    expect(calls).toHaveLength(2); // thread A is spent at maxHops=2
+
+    // Thread B has its own budget and is untouched by A's runaway.
+    await wrapped.onInbound(pid, threadB, botMsg('b1'));
+    await wrapped.onInbound(pid, threadB, botMsg('b2'));
+    expect(calls).toHaveLength(4);
+  });
+
+  it('a human anywhere in the room frees every thread in it', async () => {
+    // The key got narrower; the reset deliberately did not. The signal is "a
+    // person is here and watching", and a per-thread reset would strand an
+    // exhausted thread whose human happened to answer in a sibling one.
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    const pid = 'slack:G0HOPS';
+    const spent = 'slack:G0HOPS:300.3';
+    const elsewhere = 'slack:G0HOPS:400.4';
+
+    await wrapped.onInbound(pid, spent, botMsg('s1'));
+    await wrapped.onInbound(pid, spent, botMsg('s2'));
+    await wrapped.onInbound(pid, spent, botMsg('s3'));
+    expect(calls).toHaveLength(2);
+
+    await wrapped.onInbound(pid, elsewhere, humanMsg());
+    expect(calls).toHaveLength(3);
+
+    await wrapped.onInbound(pid, spent, botMsg('s4'));
+    expect(calls).toHaveLength(4);
+  });
+
   it('tracks the hop budget per room', async () => {
     const { setup, calls } = makeSetup();
     const wrapped = wrapSlackBotGuard(setup, 'slack');

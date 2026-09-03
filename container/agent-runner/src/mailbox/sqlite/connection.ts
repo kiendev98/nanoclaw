@@ -200,7 +200,8 @@ export function initTestSessionDb(): { inbound: Database; outbound: Database } {
       type            TEXT NOT NULL,
       channel_type    TEXT,
       platform_id     TEXT,
-      agent_group_id  TEXT
+      agent_group_id  TEXT,
+      thread_id       TEXT
     );
   `);
 

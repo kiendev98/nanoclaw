@@ -6,9 +6,20 @@
  * Core container-runner calls this via a dynamic import guarded by a
  * `hasTable('agent_destinations')` check — without the agent-to-agent module
  * installed, the central table doesn't exist and the projection is skipped.
+ *
+ * IT ALSO CARRIES THE THREAD THIS SESSION OPENED. `delivery.ts` binds a
+ * session to the thread its first top-level post created, and until now that
+ * binding was readable only by the host: it routed a human's reply IN, and the
+ * container had no way to learn where to reply OUT. A worker's second post
+ * therefore named no thread and opened a SECOND root — which is first-wins, so
+ * it never bound, and every reply in it was lost.
+ *
+ * Rewritten wholesale on every wake, so the value tracks the binding without a
+ * second write path or an invalidation rule.
  */
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
+import { composeThreadId, getSession } from '../../db/sessions.js';
 import type { Destination } from '../../mailbox/index.js';
 import { log } from '../../log.js';
 import { withMailboxSession } from '../../session-manager.js';
@@ -18,10 +29,24 @@ export async function writeDestinations(agentGroupId: string, sessionId: string)
   const rows = await getDestinations(agentGroupId);
   const resolved: Destination[] = [];
 
+  // The session's own binding, if it has one: (messaging group, root message).
+  const session = await getSession(sessionId);
+  const boundMg = session?.bound_messaging_group_id ?? null;
+  const boundRoot = session?.bound_root_message_id ?? null;
+
   for (const row of rows) {
     if (row.target_type === 'channel') {
       const mg = await getMessagingGroup(row.target_id);
       if (!mg) continue;
+      // COMPOSED, not stored, and through the ONE function that owns the
+      // format (`composeThreadId`) rather than a second copy of the rule.
+      // `bound_root_message_id` is the platform's own root id; a thread
+      // address is `<platform_id>:<root>`, the form every inbound row and
+      // every adapter uses. This composition is only ever used to SEND, never
+      // to match an inbound thread — the direction `threadRootMessageId`
+      // warns about, and the reason the risk here is a visible top-level post
+      // rather than a silent miss.
+      const threadId = boundMg && boundRoot && mg.id === boundMg ? composeThreadId(mg.platform_id, boundRoot) : null;
       resolved.push({
         name: row.local_name,
         displayName: mg.name ?? row.local_name,
@@ -29,6 +54,7 @@ export async function writeDestinations(agentGroupId: string, sessionId: string)
         channelType: mg.channel_type,
         platformId: mg.platform_id,
         agentGroupId: null,
+        threadId,
       });
     } else if (row.target_type === 'agent') {
       const ag = await getAgentGroup(row.target_id);
@@ -40,6 +66,8 @@ export async function writeDestinations(agentGroupId: string, sessionId: string)
         channelType: null,
         platformId: null,
         agentGroupId: ag.id,
+        // An agent destination is a lane, not a conversation.
+        threadId: null,
       });
     }
   }

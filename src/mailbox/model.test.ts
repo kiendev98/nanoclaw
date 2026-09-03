@@ -179,6 +179,7 @@ describe('canonical mailbox model', () => {
         channelType: 'test',
         platformId: 'room-1',
         agentGroupId: null,
+        threadId: null,
       }),
     ).toMatchObject({ type: 'channel', channelType: 'test', platformId: 'room-1', agentGroupId: null });
     expect(
@@ -189,6 +190,7 @@ describe('canonical mailbox model', () => {
         channelType: null,
         platformId: null,
         agentGroupId: 'agent-1',
+        threadId: null,
       }),
     ).toMatchObject({ type: 'agent', channelType: null, platformId: null, agentGroupId: 'agent-1' });
 
@@ -200,6 +202,7 @@ describe('canonical mailbox model', () => {
         channelType: null,
         platformId: 'room-1',
         agentGroupId: 'agent-1',
+        threadId: null,
       }),
     ).toThrow('channel routing fields');
     expect(() =>
@@ -210,6 +213,7 @@ describe('canonical mailbox model', () => {
         channelType: 'test',
         platformId: null,
         agentGroupId: null,
+        threadId: null,
       }),
     ).toThrow('agent routing fields');
   });

@@ -3,7 +3,12 @@ import fs from 'fs';
 import path from 'path';
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 
-import { forwardAttachedFiles, isSafeAttachmentName, routeAgentMessage } from './agent-route.js';
+import {
+  _resetA2aWakesForTesting,
+  forwardAttachedFiles,
+  isSafeAttachmentName,
+  routeAgentMessage,
+} from './agent-route.js';
 import { log } from '../../log.js';
 import { createDestination } from './db/agent-destinations.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from '../../db/index.js';
@@ -421,6 +426,34 @@ describe('routeAgentMessage return-path', () => {
     expect(errors).toHaveLength(0);
     expect(bRows).toHaveLength(20);
     expect(s1Rows.length + s2Rows.length).toBe(20);
+  });
+
+  it('writes a throttled route with trigger=0 so nothing wakes the peer', async () => {
+    // THE PATH, NOT THE ARITHMETIC. The first version of this throttle only
+    // skipped `requestWake`, which does nothing: `writeSessionMessage` ends
+    // with `enqueueSessionReconcile`, whose queue pumps immediately and wakes
+    // the peer itself for any row `countDueMessages` counts. The unit test
+    // for the budget passed while the throttle was a no-op, so this test
+    // asserts the ROW — the only thing that decides whether a wake happens.
+    _resetA2aWakesForTesting();
+
+    // One past the default budget of 20 in a single direction.
+    for (let i = 0; i < 21; i++) {
+      await routeAgentMessage(
+        { id: `flood-${i}`, platform_id: B, content: JSON.stringify({ text: `flood ${i}` }), in_reply_to: null },
+        S1,
+      );
+    }
+
+    const db = new Database(inboundDbPath(B, SB.id), { readonly: true });
+    const rows = db.prepare('SELECT trigger FROM messages_in ORDER BY seq').all() as Array<{ trigger: number }>;
+    db.close();
+
+    expect(rows).toHaveLength(21);
+    // Every message is DELIVERED — the throttle costs latency, never content.
+    expect(rows.slice(0, 20).every((r) => r.trigger === 1)).toBe(true);
+    // The one past budget is inert: it rides along on the next genuine trigger.
+    expect(rows[20].trigger).toBe(0);
   });
 
   it('file forwarding: copies bytes from source outbox to target inbox', async () => {

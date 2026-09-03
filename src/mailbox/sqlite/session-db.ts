@@ -63,14 +63,15 @@ export interface DestinationRow {
   channel_type: string | null;
   platform_id: string | null;
   agent_group_id: string | null;
+  thread_id: string | null;
 }
 
 export function replaceDestinations(db: Database.Database, entries: DestinationRow[]): void {
   const tx = db.transaction((rows: DestinationRow[]) => {
     db.prepare('DELETE FROM destinations').run();
     const stmt = db.prepare(
-      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
-       VALUES (@name, @display_name, @type, @channel_type, @platform_id, @agent_group_id)`,
+      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id, thread_id)
+       VALUES (@name, @display_name, @type, @channel_type, @platform_id, @agent_group_id, @thread_id)`,
     );
     for (const row of rows) stmt.run(row);
   });
@@ -267,6 +268,32 @@ export function markDeliveryFailed(db: Database.Database, messageOutId: string):
   ).run(messageOutId, new Date().toISOString());
 }
 
+/**
+ * Ensure `destinations` carries the bound-thread column.
+ *
+ * Same lazy, on-open shape as the tables above, and for the same reason:
+ * session DBs have no central migration, so an existing install upgrades the
+ * first time the host opens each one. No-op on a fresh install.
+ *
+ * No backfill. The column is rewritten wholesale by `replaceDestinations` on
+ * every wake, so an existing row's NULL is corrected the moment the session
+ * next spawns — and a NULL is the correct answer anyway for a session that
+ * has not opened a thread.
+ */
+export function migrateDestinationsTable(db: Database.Database): void {
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info('destinations')").all() as Array<{ name: string }>).map((c) => c.name),
+  );
+  // An ABSENT table reads as zero columns, which is indistinguishable here
+  // from a table missing the column — and `ALTER TABLE` on a table that does
+  // not exist throws, which would fail every session open for that DB rather
+  // than just skipping a migration. `migrateDeliveredTable` is guarded at its
+  // call site for the same reason; guarding here covers every caller instead.
+  if (cols.size === 0) return;
+  if (!cols.has('thread_id')) {
+    db.prepare('ALTER TABLE destinations ADD COLUMN thread_id TEXT').run();
+  }
+}
 /** Ensure the delivered table has columns added after initial schema. */
 export function migrateDeliveredTable(db: Database.Database): void {
   const cols = new Set(
