@@ -30,7 +30,7 @@ vi.mock('./config.js', async () => {
 
 import { deliverSessionMessages, setDeliveryAdapter } from './delivery.js';
 import { resolveSession } from './session-manager.js';
-import { outboundDbPath } from './mailbox/sqlite/paths.js';
+import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
 import { closeDb, createAgentGroup, createMessagingGroup, getSession, initTestDb, runMigrations } from './db/index.js';
 import { createDestination } from './modules/agent-to-agent/db/agent-destinations.js';
 
@@ -131,6 +131,30 @@ describe('a top-level post claims the thread it opens', () => {
     const after = await getSession(session.id);
     expect(after?.bound_messaging_group_id).toBe(AWAY_MG);
     expect(after?.bound_root_message_id).toBe(ROOT);
+  });
+
+  it('reprojects the destination map so a LIVE container can see the new thread', async () => {
+    // THE HALF THAT WAS MISSING. Binding alone is invisible to the container:
+    // `writeDestinations` is what carries it across, and it otherwise runs
+    // only at spawn — while `wakeContainer` returns early for a container
+    // already running, and a container lives up to the 30-minute idle
+    // ceiling. So without a reprojection here the map held NULL for the whole
+    // run, the session's SECOND post named no thread, and it opened a rival
+    // root that first-wins binding could never adopt.
+    const session = await homeSession();
+    insertOutbound(session.id, 'out-1');
+    recordingAdapter([]);
+
+    await deliverSessionMessages(session);
+
+    const db = new Database(inboundDbPath(AG, session.id), { readonly: true });
+    const row = db.prepare('SELECT thread_id FROM destinations WHERE name = ?').get('away') as
+      | { thread_id: string | null }
+      | undefined;
+    db.close();
+
+    // Composed as `<platform_id>:<root>` — the form every inbound row uses.
+    expect(row?.thread_id).toBe(`${AWAY_PLATFORM}:${ROOT}`);
   });
 
   it('does NOT bind a message that already names a thread', async () => {

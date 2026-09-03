@@ -299,17 +299,26 @@ const a2aWakes = new Map<string, number[]>();
  * Record this wake and say whether the lane still has budget.
  *
  * Exported for the test only; nothing else should call it. Trimming on read
- * rather than on a timer keeps the map bounded by the number of ACTIVE pairs
- * — an idle pair's entry is dropped the next time it is touched, and a pair
- * that never routes again holds one array of at most `A2A_WAKE_BUDGET`
- * numbers until the process ends.
+ * rather than on a timer keeps the map bounded by the number of ACTIVE pairs:
+ * an idle pair's entry is dropped the next time it is touched.
+ *
+ * A DENIED ATTEMPT STILL CONSUMES WINDOW — the push precedes the check on
+ * purpose, so a pair sustaining more than the budget stays denied until its
+ * rate actually drops, rather than being let through one per window.
+ *
+ * The array is capped at the budget because nothing past that point changes
+ * the answer: once the count exceeds the budget the lane is denied whatever
+ * else arrives, so retaining a timestamp per attempt would only make a
+ * runaway pair — the exact case this exists for — pay an O(n) filter per
+ * call and hold every timestamp of the burst resident.
  */
 export function _a2aWakeAllowed(from: string, to: string, now = Date.now()): boolean {
   const key = `${from}->${to}`;
   const recent = (a2aWakes.get(key) ?? []).filter((at) => now - at < A2A_WAKE_WINDOW_MS);
   recent.push(now);
-  a2aWakes.set(key, recent);
-  return recent.length <= A2A_WAKE_BUDGET;
+  const allowed = recent.length <= A2A_WAKE_BUDGET;
+  a2aWakes.set(key, recent.length > A2A_WAKE_BUDGET + 1 ? recent.slice(-(A2A_WAKE_BUDGET + 1)) : recent);
+  return allowed;
 }
 
 /** Test seam — the window is real time, so a suite must be able to clear it. */
@@ -423,6 +432,21 @@ async function performAgentRoute(
   // read the bytes — they live in a session dir it doesn't mount.
   const forwardedContent = forwardFileAttachments(msg, a2aMsgId, session, targetAgentGroupId, targetSession.id);
 
+  // DECIDED BEFORE THE WRITE, and this ordering is the whole fix. Suppressing
+  // `requestWake` after the write accomplishes nothing: `writeSessionMessage`
+  // ends with `enqueueSessionReconcile` (session-manager.ts), whose queue
+  // pumps IMMEDIATELY and calls `requestWake` itself for any row that
+  // `countDueMessages` counts. A throttle that only skips the call below is a
+  // log line; the peer is woken milliseconds later by the reconcile.
+  //
+  // The only way to withhold a wake is to write a row nothing counts.
+  // `trigger: false` is that row, and both gates already honour it — the
+  // host's `countDueMessages` (`WHERE ... trigger = 1`) and the container's
+  // accumulate gate in poll-loop. Both leave it `pending`, so it rides along
+  // on the next genuine trigger. That is the "delivered but not woken"
+  // contract this throttle always claimed and did not implement.
+  const wakeAllowed = _a2aWakeAllowed(session.agent_group_id, targetAgentGroupId);
+
   await writeSessionMessage(targetAgentGroupId, targetSession.id, {
     id: a2aMsgId,
     kind: 'chat',
@@ -432,6 +456,7 @@ async function performAgentRoute(
     threadId: null,
     content: forwardedContent,
     sourceSessionId: session.id,
+    trigger: wakeAllowed,
   });
   log.info('Agent message routed', {
     from: session.agent_group_id,
@@ -441,20 +466,19 @@ async function performAgentRoute(
     forwardedFileCount: countForwardedFiles(forwardedContent),
   });
 
-  const fresh = await getSession(targetSession.id);
-  if (!fresh) return;
-  // The row is already written. Suppressing only the wake is what breaks a
-  // runaway pair without losing the message — see the loop-breaker note above.
-  if (!_a2aWakeAllowed(session.agent_group_id, targetAgentGroupId)) {
+  if (!wakeAllowed) {
     log.error('Agent lane throttled — message delivered but peer not woken', {
       from: session.agent_group_id,
       to: targetAgentGroupId,
       targetSession: targetSession.id,
       a2aMsgId,
-      hint: 'two agents are waking each other faster than a conversation; the row is in the inbox and will be read on the next natural wake',
+      hint: 'two agents are waking each other faster than a conversation; the row is written with trigger=0 and rides along on the next genuine trigger',
     });
     return;
   }
+
+  const fresh = await getSession(targetSession.id);
+  if (!fresh) return;
   await requestWake(fresh, 'inbound-message');
 }
 

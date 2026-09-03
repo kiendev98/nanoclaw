@@ -553,6 +553,22 @@ async function deliverMessage(
           messagingGroupId: deliverMg.id,
           rootMessageId: platformMsgId,
         });
+        // REPROJECT NOW, because the container is alive and will not respawn.
+        // `writeDestinations` carries this binding to the container, and it
+        // otherwise runs only at spawn — while `wakeContainer` returns early
+        // for a container already running, and a container lives up to the
+        // 30-minute idle ceiling. Without this the map holds NULL for the
+        // whole run, the worker's SECOND post names no thread, and it opens a
+        // rival root that first-wins binding will never adopt.
+        //
+        // This is the invariant `db/agent-destinations.ts` already states: a
+        // mutation made while a container may be alive MUST reproject.
+        // Non-fatal for the same reason the bind is — a delivery that already
+        // succeeded is not failed over a projection.
+        if (await hasTable(getDb(), 'agent_destinations')) {
+          const { writeDestinations } = await import('./modules/agent-to-agent/write-destinations.js');
+          await writeDestinations(session.agent_group_id, session.id);
+        }
       }
     } catch (err) {
       log.warn('Could not bind the opened thread', { id: msg.id, sessionId: session.id, err });
