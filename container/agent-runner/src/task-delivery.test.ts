@@ -59,6 +59,32 @@ describe('explicit outbound destinations', () => {
     expect(getTaskSeriesId()).toBeNull();
   });
 
+  /**
+   * A task session that opens a thread has its routing REWRITTEN to that
+   * thread, so replies land in it. Identity must not travel on that field:
+   * once it changed, a task run stopped recognising itself mid-flight, and the
+   * PreCompact hook handed it the chat delivery contract during a task.
+   */
+  it('keeps its task identity after binding rewrites the routing thread', () => {
+    const previous = process.env.NANOCLAW_TASK_SERIES_ID;
+    process.env.NANOCLAW_TASK_SERIES_ID = 'daily-digest-a1b2';
+    try {
+      // Exactly what the host writes once this session binds the thread it
+      // opened — no `system:tasks:` prefix left anywhere in the routing row.
+      seedSessionRouting('slack', 'slack:C123', 'slack:C123:1788411557.424379');
+      expect(getTaskSeriesId()).toBe('daily-digest-a1b2');
+
+      // Present-and-empty is a current host saying "not a task", and it must
+      // win over a stale routing row rather than fall through to parsing it.
+      process.env.NANOCLAW_TASK_SERIES_ID = '';
+      seedSessionRouting(null, null, 'system:tasks:stale-a1b2');
+      expect(getTaskSeriesId()).toBeNull();
+    } finally {
+      if (previous === undefined) delete process.env.NANOCLAW_TASK_SERIES_ID;
+      else process.env.NANOCLAW_TASK_SERIES_ID = previous;
+    }
+  });
+
   it('requires `to` in both outbound tool schemas', () => {
     expect(sendMessage.tool.inputSchema.required).toContain('to');
     expect(sendFile.tool.inputSchema.required).toContain('to');
