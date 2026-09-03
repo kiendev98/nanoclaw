@@ -105,7 +105,12 @@ describe('a reply in a thread the agent opened', () => {
   it('creates a session as before for a thread nobody opened', async () => {
     await openerBoundToThread();
 
-    const { session, created } = await resolveSession(AG, MG, composeThreadId(PLATFORM, '9999999999.000001'), 'per-thread');
+    const { session, created } = await resolveSession(
+      AG,
+      MG,
+      composeThreadId(PLATFORM, '9999999999.000001'),
+      'per-thread',
+    );
 
     expect(created).toBe(true);
     expect(session.thread_id).toBe(composeThreadId(PLATFORM, '9999999999.000001'));
