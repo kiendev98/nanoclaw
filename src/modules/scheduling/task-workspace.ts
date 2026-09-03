@@ -18,6 +18,7 @@
  * than re-deriving one.
  */
 import { PROJECT_ROOTS } from '../../config.js';
+import { getSessionDriver } from '../../drivers/index.js';
 import { createWorktree, resolveRepo, worktreePath } from '../../worktree.js';
 
 /**
@@ -48,8 +49,15 @@ export function taskWorkspace(repoPath: string, seriesId: string): string {
  * Idempotent on the resulting path, so this is both the create path and the
  * repair path. `ncl worktrees prune` removes a clean worktree without touching
  * the row that points at it, and a human can `rm -rf` one just as easily — so
- * every run calls this, and a missing directory is rebuilt rather than
- * discovered by a spawn that chdirs into nothing.
+ * a missing directory must be rebuilt rather than discovered by a spawn that
+ * chdirs into nothing.
+ *
+ * NOT every run calls this — a task with no `workspace_path` never reaches
+ * here at all. Among those that do, creation (`createScheduledTask`) and the
+ * on-demand paths (`ensureTaskSeries` for `run_task`, `runTaskCommand` for
+ * `ncl tasks run <id>`) all called it already; the cron/recurrence fire path
+ * did not, until `prepareDueWorkspace` (`recurrence.ts`) added it — that gap
+ * is what let a pruned worktree survive to a scheduled fire.
  *
  * @returns The absolute worktree path, or the agent-facing reason there is
  *   none. Never throws: callers answer a blocking tool, and an unhandled throw
@@ -59,6 +67,21 @@ export function prepareTaskWorkspace(
   repoName: string,
   seriesId: string,
 ): { ok: true; path: string } | { ok: false; error: string } {
+  // A worktree lives on the host under WORKTREES_DIR and nothing mounts it
+  // into a container — and nothing cheaply can, since a worktree's `.git` is a
+  // pointer file into the parent repository. Left to fail, the spawn gets a
+  // cwd that does not exist inside the container, dies at the first query,
+  // and the undelivered brief respawns it in a loop with no readable cause.
+  const driver = getSessionDriver().kind;
+  if (driver !== 'local') {
+    return {
+      ok: false,
+      error:
+        `Cannot prepare a workspace in "${repoName}": task workspaces need the local runtime driver, ` +
+        `and this install runs '${driver}'. A worktree lives on the host and is not mounted into a container.`,
+    };
+  }
+
   try {
     const repoPath = resolveRepo(repoName, PROJECT_ROOTS);
     return { ok: true, path: createWorktree(repoPath, taskBranch(seriesId)) };

@@ -23,12 +23,14 @@
  * one session are serialized, so their `task_log` rows arrive in the same
  * order the waiters were added.
  */
-import { parseBoundedRequest, respondAndWake } from '../../bounded-request.js';
+import { randomUUID } from 'crypto';
+
+import { parseBoundedRequest, respondAndWake, wakeRequester } from '../../bounded-request.js';
 import { getSession, findSystemSession, taskThreadId, updateSession } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import { withExistingMailboxSession } from '../../session-manager.js';
 import type { Session } from '../../types.js';
-import { ensureTaskSeries, makeTaskId, workspaceSeriesId } from './create.js';
+import { ensureTaskSeries, workspaceSeriesId } from './create.js';
 import { parseTaskContent } from './task-content.js';
 
 /** One caller waiting on a run, as stored on the task session. */
@@ -45,6 +47,14 @@ interface RunTaskRequest {
   instruction: string;
   requestId: string;
   waitUntil: number | null;
+  /**
+   * Stable id the calling tool mints once per call, independent of
+   * `requestId` (which is absent for a fire-and-forget call). Used to derive
+   * the occurrence row's id, so a delivery RETRY of this exact system message
+   * — identical content, same runId — converges on the row it already queued
+   * instead of minting a second one.
+   */
+  runId: string;
 }
 
 function parseRequest(content: Record<string, unknown>): RunTaskRequest {
@@ -55,10 +65,19 @@ function parseRequest(content: Record<string, unknown>): RunTaskRequest {
     instruction: str('instruction'),
     requestId: bounded.requestId,
     waitUntil: bounded.waitUntil,
+    runId: str('runId'),
   };
 }
 
-/** Tell the caller, through whichever door it left open. */
+/**
+ * Tell the caller, through whichever door it left open.
+ *
+ * A FAILURE is exempt from the silence a missing `requestId` normally buys
+ * (see `bounded-request.ts`'s table): the container tool already told the
+ * agent "Queued in <repo>…" before this ever runs, so an error that reaches
+ * nobody is worse than a wake nobody asked for. Success stays silent with no
+ * `requestId` — nobody asked to be told the run merely started.
+ */
 async function respond(session: Session, req: RunTaskRequest, ok: boolean, message: string): Promise<void> {
   await respondAndWake(
     session,
@@ -73,6 +92,7 @@ async function respond(session: Session, req: RunTaskRequest, ok: boolean, messa
       wakeText: message,
     },
   );
+  if (!ok && !req.requestId) await wakeRequester(session, message);
 }
 
 function readWaiters(raw: string | null | undefined): PendingRunRequest[] {
@@ -87,31 +107,79 @@ function readWaiters(raw: string | null | undefined): PendingRunRequest[] {
 }
 
 /**
+ * Keyed mutex serializing every read-modify-write of a task session's
+ * `pending_run_request`, one per task session id.
+ *
+ * `queueRun` (append a waiter) and `answerPendingRunRequest` (pop one) both
+ * read the column, compute a new array, and write it back — and they run from
+ * independent call paths (a container's `run_task` call vs. a delivered
+ * `task_log` row), so without this two in flight at once silently drop
+ * whichever write lost the race. Per host process only, matching the same
+ * precedent `session-manager.ts`'s `withSessionCreationLock` sets for session
+ * creation — a second host process is not covered, and none exists here.
+ */
+const taskSessionLocks = new Map<string, Promise<void>>();
+
+async function withTaskSessionLock<T>(taskSessionId: string, fn: () => Promise<T>): Promise<T> {
+  const previous = taskSessionLocks.get(taskSessionId) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.then(() => current);
+  taskSessionLocks.set(taskSessionId, tail);
+  await previous;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (taskSessionLocks.get(taskSessionId) === tail) taskSessionLocks.delete(taskSessionId);
+  }
+}
+
+/**
  * The "run" half: queue exactly one occurrence, and park the caller if it
  * asked to be told how the run went.
  *
  * The waiter is added BEFORE the occurrence. The sweep can arm a due task
  * within milliseconds, and a waiter registered afterwards would be recorded
  * against a run that had already reported.
+ *
+ * Both steps are idempotent under a RETRY of the exact same call (a delivery
+ * retry re-running this system action with identical content): the occurrence
+ * id is derived from `runId`, which the calling tool mints once and a retry
+ * repeats, so a second attempt finds the row already there instead of mining
+ * a second one; and the waiter list is deduped by `requestId` before a new
+ * entry is appended.
  */
 async function queueRun(
   taskSessionId: string,
   agentGroupId: string,
   seriesId: string,
   instruction: string,
+  runId: string,
   waiter: PendingRunRequest | null,
 ): Promise<void> {
   if (waiter) {
-    const session = await getSession(taskSessionId);
-    const waiters = [...readWaiters(session?.pending_run_request), waiter];
-    await updateSession(taskSessionId, { pending_run_request: JSON.stringify(waiters) });
+    await withTaskSessionLock(taskSessionId, async () => {
+      const session = await getSession(taskSessionId);
+      const waiters = readWaiters(session?.pending_run_request);
+      if (waiters.some((w) => w.requestId === waiter.requestId)) return;
+      await updateSession(taskSessionId, { pending_run_request: JSON.stringify([...waiters, waiter]) });
+    });
   }
 
+  // Deterministic, not `makeTaskId` (which appends random hex on every call):
+  // a retried delivery carries the same runId, so this has to land on the
+  // SAME id both times, not a fresh one the second time around.
+  const occurrenceId = `${seriesId}-run-${runId}`;
+
   await withExistingMailboxSession(agentGroupId, taskSessionId, (mailbox) => {
+    if (mailbox.getTask(occurrenceId)) return; // already queued by an earlier attempt at this same call
     const series = mailbox.getTask(seriesId);
     const content = series ? parseTaskContent(series.content) : null;
     return mailbox.insertTask({
-      id: makeTaskId(`${seriesId}-run`),
+      id: occurrenceId,
       seriesId,
       processAfter: new Date().toISOString(),
       // recurrence=NULL is load-bearing: a run-now row must not be re-armed by
@@ -150,22 +218,28 @@ export async function runTask(content: Record<string, unknown>, session: Session
 
   let place: { sessionId: string; created: boolean };
   try {
-    place = await ensureTaskSeries(session.agent_group_id, {
-      id: seriesId,
-      repo: req.repo,
-      prompt: req.instruction,
-    });
+    place = await ensureTaskSeries(
+      session.agent_group_id,
+      { id: seriesId, repo: req.repo, prompt: req.instruction },
+      target,
+    );
   } catch (err) {
     await respond(session, req, false, `run_task failed: ${err instanceof Error ? err.message : String(err)}`);
     log.warn('run_task could not prepare a workspace', { repo: req.repo, err });
     return;
   }
 
+  // A missing runId (an unpatched container image, or a malformed payload)
+  // degrades to the pre-fix behaviour — a fresh random id every call — rather
+  // than failing the run outright; only a retried delivery needs it to match.
+  const runId = req.runId || randomUUID();
+
   await queueRun(
     place.sessionId,
     session.agent_group_id,
     seriesId,
     req.instruction,
+    runId,
     req.requestId ? { requesterSessionId: session.id, requestId: req.requestId, waitUntil: req.waitUntil } : null,
   );
 
@@ -189,22 +263,30 @@ export async function runTask(content: Record<string, unknown>, session: Session
  * FIFO — runs in a session are serialized, so the queues line up.
  */
 export async function answerPendingRunRequest(taskSession: Session, runSummary: string): Promise<void> {
-  const waiters = readWaiters(taskSession.pending_run_request);
-  if (waiters.length === 0) {
-    if (taskSession.pending_run_request) {
-      await updateSession(taskSession.id, { pending_run_request: null });
+  // Re-read inside the lock rather than trust the passed-in snapshot: a
+  // concurrent `queueRun` on this same task session may have appended a
+  // waiter after `taskSession` was loaded, and writing back a shift computed
+  // from the stale list would silently erase that append.
+  const next = await withTaskSessionLock(taskSession.id, async () => {
+    const fresh = await getSession(taskSession.id);
+    const waiters = readWaiters(fresh?.pending_run_request);
+    if (waiters.length === 0) {
+      if (fresh?.pending_run_request) await updateSession(taskSession.id, { pending_run_request: null });
+      return null;
     }
-    return;
-  }
 
-  // Shifted and written back BEFORE the answer is sent. A second `task_log`
-  // for one run — an explicit `ncl tasks append-log` after the automatic one —
-  // must not answer the same caller twice, and a throw below must not leave
-  // this waiter to consume the next run's result instead.
-  const [next, ...rest] = waiters;
-  await updateSession(taskSession.id, {
-    pending_run_request: rest.length > 0 ? JSON.stringify(rest) : null,
+    // Shifted and written back BEFORE the answer is sent. A second `task_log`
+    // for one run — an explicit `ncl tasks append-log` after the automatic one —
+    // must not answer the same caller twice, and a throw below must not leave
+    // this waiter to consume the next run's result instead.
+    const [head, ...rest] = waiters;
+    await updateSession(taskSession.id, {
+      pending_run_request: rest.length > 0 ? JSON.stringify(rest) : null,
+    });
+    return head;
   });
+
+  if (!next) return;
 
   const requester = await getSession(next.requesterSessionId);
   if (!requester) {

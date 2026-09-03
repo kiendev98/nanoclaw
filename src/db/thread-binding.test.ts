@@ -67,8 +67,8 @@ beforeEach(async () => {
   });
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
 });
 
 describe('threadRootMessageId', () => {

@@ -466,11 +466,28 @@ export class LocalSessionDriver implements SessionDriver {
     child.stdout?.on('data', (chunk: Buffer) => log.info(`[${name}] ${chunk.toString().trimEnd()}`));
     child.stderr?.on('data', (chunk: Buffer) => log.info(`[${name}] ${chunk.toString().trimEnd()}`));
 
-    child.once('exit', (code) => {
+    // 'error' fires for a spawn that never became a process at all (ENOENT from
+    // a missing cwd, EACCES, a bad runtimeBin) — Node emits it asynchronously,
+    // after this function has already returned a ChildProcess with no listener
+    // yet attached. With none registered, that event has no handler and
+    // src/log.ts's global uncaughtException handler turns it into
+    // process.exit(1), taking every other session down with it. 'exit' may or
+    // may not also fire for the same failure, so `finished` guards against
+    // double-processing one terminal transition.
+    let finished = false;
+    const finish = (code: number | null): void => {
+      if (finished) return;
+      finished = true;
       this.#exits.set(name, code);
       this.#children.delete(name);
       this.#emit({ key: spec.key, kind: 'terminal' });
+    };
+
+    child.once('error', (err) => {
+      log.error('Local runner process failed to spawn', { name, err: String(err) });
+      finish(-1);
     });
+    child.once('exit', (code) => finish(code));
 
     this.#children.set(name, child);
     const record = this.#records.get(name);

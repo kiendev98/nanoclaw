@@ -97,7 +97,9 @@ function formatList(rows: WorktreeReport[]): string {
   for (const row of rows) {
     lines.push(`${row.clean ? 'clean' : 'DIRTY'}  ${row.path}`);
     lines.push(`       repo: ${row.repo}   branch: ${row.branch}`);
-    lines.push(`       owner: ${row.owner ? `${row.owner} (${row.owner_id})` : 'none — the agent group is gone'}`);
+    lines.push(
+      `       owner: ${row.owner ? `${row.owner} (${row.owner_id})` : 'none — no owning agent group row (a task session may still be using it)'}`,
+    );
     lines.push(`       ${row.reason}`);
     if (!row.clean) lines.push(`       keep it, or remove it yourself: ${forceCommand(row.path)}`);
     lines.push('');
@@ -189,7 +191,11 @@ registerResource({
     { name: 'branch', type: 'string', description: 'Branch it has checked out.' },
     { name: 'clean', type: 'boolean', description: 'True when removing it would destroy nothing.' },
     { name: 'reason', type: 'string', description: 'Why it is clean or dirty.' },
-    { name: 'owner', type: 'string', description: 'Worker agent group that owns it, or null when the group is gone.' },
+    {
+      name: 'owner',
+      type: 'string',
+      description: 'Worker agent group that owns it, or null when there is no owning agent group row.',
+    },
     { name: 'owner_id', type: 'string', description: 'Agent group id of the owner, or null.' },
   ],
   operations: {},
@@ -200,8 +206,10 @@ registerResource({
       description:
         'List every worker worktree on disk: path, repository, branch, the worker agent group that owns it, ' +
         'and whether removing it would destroy work.\n\n' +
-        'A worktree with no owner is an orphan — its agent group was deleted — and it is judged by exactly the ' +
-        'same cleanliness rules, because losing its owner does not make its commits disposable. ' +
+        'A worktree with no owner has no owning agent group row — either none ever existed (every worktree ' +
+        '`ncl tasks create --repo` makes) or one did and was deleted — and a task session may still be using ' +
+        'it. It is judged by exactly the same cleanliness rules either way, because having no owner does not ' +
+        'make its commits disposable. ' +
         'A DIRTY entry names what it holds (uncommitted changes, untracked files, or commits that exist ' +
         'nowhere else) and prints the git command to remove it anyway.',
       args: [],

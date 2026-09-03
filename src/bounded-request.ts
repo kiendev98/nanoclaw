@@ -16,9 +16,19 @@
  * | set         | `null`      | the answer whenever it is ready, by wake  |
  * | absent      | —           | nothing. Fire and forget                  |
  *
- * The third row is why the wake lives INSIDE the `requestId` check. A caller
- * that minted no correlation id is not polling and did not ask to be told, so
- * waking it would start a container to deliver a result nobody wanted.
+ * The third row is why the wake lives INSIDE the `requestId` check — for a
+ * SUCCESS. A caller that minted no correlation id is not polling and did not
+ * ask to be told it merely started, so waking it would start a container to
+ * deliver a result nobody wanted.
+ *
+ * A FAILURE is exempt from that row. Fire-and-forget means "don't bother me
+ * with how it went", not "don't bother me if it failed outright" — the caller
+ * may already have been told elsewhere that the work is under way (e.g.
+ * `run_task`'s tool response, "Queued in <repo>…"), and an error that reaches
+ * nobody is worse than an unwanted wake. A caller in that position calls the
+ * exported `wakeRequester` directly on its own failure path instead of going
+ * through `respondAndWake`, which stays a no-op with no `requestId` regardless
+ * of outcome.
  */
 import { getSession } from './db/sessions.js';
 import { requestWake } from './request-wake.js';
@@ -95,8 +105,15 @@ export async function respondAndWake(session: Session, req: BoundedRequest, resp
   if (callerStoppedWaiting(req)) await wakeRequester(session, response.wakeText);
 }
 
-/** A renderable chat note that wakes the requester — the late-answer path. */
-async function wakeRequester(session: Session, text: string): Promise<void> {
+/**
+ * A renderable chat note that wakes the requester — the late-answer path.
+ *
+ * Exported for callers that must reach the requester even with no
+ * `requestId` at all, which `respondAndWake` never does (see the table
+ * above) — a failure a caller answers through `run_task`'s `respond()` being
+ * the motivating case.
+ */
+export async function wakeRequester(session: Session, text: string): Promise<void> {
   await writeSessionMessage(session.agent_group_id, session.id, {
     id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     kind: 'chat',

@@ -256,13 +256,20 @@ async function drainSession(session: Session): Promise<void> {
     }
   }
 
+  // Tracked across the whole batch, not read off `session`: `session` is one
+  // in-memory object reused for every message drained here, so a bind made by
+  // an earlier message in this same batch never appears on it. Without this,
+  // `bindOpenedThread`'s already-bound guard never fires for message #2, and a
+  // second root post in one batch overwrites the first binding.
+  let boundThisBatch = Boolean(session.messaging_group_id || session.bound_root_message_id);
+
   for (const msg of pending) {
     try {
       const platformMsgId = await deliverMessage(msg, session);
       await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) =>
         mailbox.markDelivered(msg.id, platformMsgId ?? null),
       );
-      await bindOpenedThread(session, msg, platformMsgId);
+      if (!boundThisBatch) boundThisBatch = await bindOpenedThread(session, msg, platformMsgId);
       const firstDelivery = delivered.size === 0;
       delivered.add(msg.id);
       await clearAttemptRow(msg.id);
@@ -329,6 +336,14 @@ async function drainSession(session: Session): Promise<void> {
  * it: the inbound thread id has never been seen, `findSessionForAgent` misses,
  * and a brand new session answers in a thread it knows nothing about.
  *
+ * `!session.messaging_group_id` alone is NOT "this is a task session" — an
+ * agent-to-agent companion session (`resolveSession(groupId, null, null,
+ * 'agent-shared')`) has the identical shape (no messaging group, no bound root
+ * yet) and would otherwise claim a real channel thread the first time it
+ * happens to deliver into one. `isTaskThread` is the actual predicate: a task
+ * session's `thread_id` is always `system:tasks:<series>`, which an
+ * agent-shared session never carries.
+ *
  * ONLY A ROOT POST BINDS. `threadId === null` is what makes a delivery open a
  * new thread — the bridge falls back to the channel id — and only that root
  * message's id is a thread key. A reply carries its own id, which names
@@ -340,18 +355,23 @@ async function drainSession(session: Session): Promise<void> {
  * FIRST CLAIM WINS. A session that already holds a thread keeps it; a second
  * top-level post is a second conversation, and re-pointing the binding would
  * abandon the first thread's replies with nothing to route them to.
+ *
+ * @returns true when this call bound the session, so a caller draining a
+ *   batch of messages against one in-memory `session` object can skip binding
+ *   again for the rest of the batch.
  */
 async function bindOpenedThread(
   session: Session,
   msg: { kind: string; platformId: string | null; channelType: string | null; threadId: string | null },
   platformMsgId: string | undefined,
-): Promise<void> {
-  if (session.messaging_group_id || session.bound_root_message_id) return;
-  if (msg.threadId !== null || !platformMsgId) return;
-  if (!msg.platformId || !msg.channelType || msg.channelType === 'agent' || msg.kind === 'system') return;
+): Promise<boolean> {
+  if (session.messaging_group_id || session.bound_root_message_id) return false;
+  if (!isTaskThread(session.thread_id)) return false;
+  if (msg.threadId !== null || !platformMsgId) return false;
+  if (!msg.platformId || !msg.channelType || msg.channelType === 'agent' || msg.kind === 'system') return false;
 
   const group = await getMessagingGroupByPlatform(msg.channelType, msg.platformId);
-  if (!group) return;
+  if (!group) return false;
 
   await updateSession(session.id, {
     bound_messaging_group_id: group.id,
@@ -362,6 +382,7 @@ async function bindOpenedThread(
     messagingGroupId: group.id,
     rootMessageId: platformMsgId,
   });
+  return true;
 }
 
 async function deliverMessage(

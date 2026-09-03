@@ -985,7 +985,7 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
   //
   // NOT a substitute for NANOCLAW_AGENT_DIR, which stays the group folder in
   // every case — memory and footer telemetry must not follow cwd into a repo.
-  if (workspacePath) {
+  {
     // A repo-scoped session does not resume its previous conversation, and
     // `workspace_path` is the only thing that distinguishes one — an ordinary
     // group never sets this and keeps resuming exactly as before.
@@ -1008,9 +1008,27 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     // `categorizeMessage` treats anything not starting with `/` as prose —
     // silently degrading every slash-command task.
     //
-    // The signal itself rides `container.json`, which carries `workspacePath`
-    // straight from the DB — no environment variable, and no derived flag whose
-    // origin the next reader would have to guess.
+    // The signal rides THIS spawn's own env, not only `container.json`'s
+    // `workspacePath` field. `container.json` is ONE file per agent GROUP,
+    // rewritten at every spawn (`materializeContainerJson`) — two sessions of
+    // one group spawning concurrently already race on every field in that
+    // file, and this is the field that decides which repository the SDK
+    // reasons from, so racing it means committing a write to the wrong one. A
+    // per-spawn env var can't race the same way: it is set once, in this
+    // spec, scoped to this session's own process. `resolveCwd` in the runner
+    // now prefers `NANOCLAW_WORKSPACE_PATH` over the file for exactly that
+    // reason; the file field stays for compatibility (older runners,
+    // `container.json` inspection) but no longer decides cwd.
+    //
+    // SET UNCONDITIONALLY, empty string included. Leaving it unset for a
+    // session with no workspace would reopen the same bug through two other
+    // doors: the local driver copies the host's whole `process.env` into the
+    // child, so a stray ambient value would be inherited; and with nothing in
+    // the env the runner falls back to `container.json` — the shared,
+    // per-GROUP file another session may have just stamped with ITS worktree.
+    // An empty value is the host stating "this session has no workspace",
+    // which is a different fact from the host saying nothing at all.
+    env.NANOCLAW_WORKSPACE_PATH = workspacePath ?? '';
   }
   // The contributed lane (ContainerSpec.contributedEnv): registry-sourced env,
   // exempt from the credential-NAME check and still refused credential VALUES.

@@ -7,10 +7,21 @@
  * instead: that would fork the branch on each fire and strand the previous
  * run's commits, silently.
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { workspaceSeriesId } from './create.js';
 import { prepareTaskWorkspace, taskBranch, taskWorkspace } from './task-workspace.js';
+
+// Mutable so one test can assert the driver refusal without affecting the
+// rest of this file, which all assume the default 'local' driver.
+const driverKind = vi.hoisted(() => ({ value: 'local' }));
+vi.mock('../../drivers/index.js', () => ({
+  getSessionDriver: () => ({ kind: driverKind.value }),
+}));
+
+afterEach(() => {
+  driverKind.value = 'local';
+});
 
 const REPO = '/tmp/nanoclaw-test-repo';
 
@@ -55,6 +66,24 @@ describe('prepareTaskWorkspace', () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toMatch(/Cannot prepare a workspace/);
+  });
+
+  // A worktree lives on the host under WORKTREES_DIR and nothing mounts it
+  // into a container — and nothing cheaply can, since a worktree's `.git` is
+  // a pointer file into the parent repository. Left unrefused, the spawn
+  // gets a cwd that does not exist inside the container, dies at the first
+  // query, and the undelivered brief respawns it in a loop with no readable
+  // cause.
+  it('refuses under any driver but local, before ever touching git', () => {
+    driverKind.value = 'docker';
+
+    const result = prepareTaskWorkspace(REPO, 'series-1');
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain('local runtime driver');
+      expect(result.error).toContain('docker');
+    }
   });
 });
 

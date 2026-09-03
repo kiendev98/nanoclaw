@@ -98,6 +98,11 @@ export const runTask: McpToolDefinition = {
     // flag the host would have to interpret.
     const wants = args.notify === true;
     const requestId = wants ? generateId() : '';
+    // Minted unconditionally, unlike requestId — a delivery RETRY of this
+    // exact system message carries the same content and therefore the same
+    // runId, which is what lets the host converge a retry on the occurrence
+    // it already queued instead of minting a second one.
+    const runId = generateId();
 
     await writeMessageOut({
       id: requestId || generateId(),
@@ -108,6 +113,7 @@ export const runTask: McpToolDefinition = {
         // Never polls: this tool has no blocking mode, so the host always
         // takes the wake path when there is a requestId at all.
         waitUntil: null,
+        runId,
         // Passed through unvalidated ON PURPOSE. This container cannot be
         // relied on to gate itself, so the host resolves the name against its
         // own allowlist and refuses everything else.
