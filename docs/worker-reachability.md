@@ -580,6 +580,100 @@ briefed it, not the reviewer who raised it.
 **The escalation trigger is whose decision it is, not whether a human is
 reachable.**
 
+## 3.6 The worker admits whoever its principal admits
+
+§3.1 lends a channel and calls it delegation. It is only half of one: every
+grant above is OUTBOUND, and nothing gave anyone permission to answer.
+
+```
+   ai-anya          WORKER                        HOST
+     ├─ Anya replies in T ────────────────────────►│
+     │                    │                        │ findSessionBoundToThread ✓
+     │                    │                        │ wiredHere.has(worker)?   ✗
+     │                    │                        │ accessGate(anya, worker)
+     │                    │                        │   owner?        no
+     │                    │                        │   global admin? no
+     │                    │                        │   scoped admin? no
+     │                    │                        │   MEMBER?       no  ◄── here
+     │                    │                        │ → not_member → HOLD → DROP
+     │                    │  (never arrives)       │
+```
+
+Membership is per `(user, agent group)`, and a worker is a BRAND NEW agent
+group that nobody has ever been a member of. So `canAccessAgentGroup` answers
+`not_member` for every human except an owner or a global admin, and
+`deliverToBoundSession` drops the reply — *after* the binding matched and
+picked exactly the right session. Outbound worked and inbound did not, which is
+the same shape as the `agentCount === 0` bug in **The channel needs no wiring of
+its own**, one layer further in.
+
+**It is invisible to the person most likely to test it.** `canAccessAgentGroup`
+short-circuits at `isOwner`, so the operator's own replies always land. Only a
+member — the review counterparty this whole section exists to reach — is
+refused.
+
+**And it repeats per worker**, because a worker is the pair (repo, thread): a
+second PR mints a second group with a second empty member list. Approving the
+unknown-sender card fixes exactly one.
+
+So `spawnWorker` mirrors the requester's member rows onto the worker, beside
+the channel grant, and the rule is the one already stated in the other
+direction:
+
+| | |
+|---|---|
+| outbound (§3.1) | you cannot lend reach you do not hold |
+| inbound (here) | the worker admits exactly who its principal admits |
+
+Everyone copied could already reach the orchestrator, which spawns, briefs and
+kills the worker — so reaching the worker directly grants nothing that was not
+already reachable through it.
+
+**Four decisions worth knowing.**
+
+**Unconditional, not gated on `channels`.** A guest list is owed whether or not
+this call also lends a channel. Coupling them would leave a worker reachable
+only when it happened to be given somewhere to talk.
+
+**On the reuse path too.** Same trap as the channel grant: the reuse branch
+answers inside `validateSpawnWorker` and returns before the guarded body runs,
+so mirroring only in the body would silently do nothing on the path that
+actually fires. It is also what backfills a worker spawned before this existed.
+
+**`added_by` names the ORCHESTRATOR, not a person.** No human approved these
+rows; they exist because the group they were copied from admits that user. An
+audit reading a human id here would be reading an approval that never happened.
+
+**A snapshot, not a subscription.** A member added to the orchestrator later
+does not reach a worker already spawned. The alternative — resolving the gate
+through the origin group at delivery time — is truer to the model but edits a
+decision on the path serving EVERY bound session rather than only workers. The
+rows are cheap to re-add, `deleteAgentGroup` already clears them, and the stale
+window is bounded by the worker's own life.
+
+**Scoped admins are NOT carried.** `canAccessAgentGroup`'s third rung is
+`isAdminOfAgentGroup(user, thisGroup)`, and a scoped admin of the orchestrator
+holds no row for the worker. Only plain members are mirrored, so an install
+that grants reach through scoped admin rather than membership still refuses
+those people at a worker.
+
+### Two gates sit in FRONT of this one, and neither is nanoclaw's
+
+**The room allowlist.** `slack-a2a-guard.ts` drops every bot-authored Slack
+inbound unless its channel is in `SLACK_A2A_ROOMS`, before `routeInbound` and
+therefore before the binding lookup and this gate. A reviewer who is another
+BOT — which Anya is — is refused at the bridge with the drop logged at `debug`,
+so on a default `LOG_LEVEL` of `info` it is invisible. A lent channel that
+carries bot traffic must be listed there.
+
+**The hop limit.** `SLACK_A2A_MAX_HOPS` (default 6) caps CONSECUTIVE
+bot-authored messages in a room and resets when a human speaks. A worker
+talking to a bot reviewer is bot-to-bot on both sides, so a long review
+exchange is bounded by that number rather than by either agent.
+
+Neither is a bug. Both are the a2a bridge doing its job, and both are
+configuration rather than code — but a worker↔bot loop needs all three doors
+open, and they fail in that order.
 ## Limits
 
 - **One thread per worker session.** The binding is first-wins with no clearer.

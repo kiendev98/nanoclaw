@@ -54,6 +54,9 @@ const {
   mockCreateDestination,
   mockGetMessagePolicy,
   mockHasDestination,
+  mockDbAll,
+  mockDbRun,
+  mockHasTable,
   liveApprovals,
   approvalHandlers,
 } = vi.hoisted(() => ({
@@ -72,10 +75,23 @@ const {
   mockCreateDestination: vi.fn(),
   mockGetMessagePolicy: vi.fn().mockResolvedValue(undefined),
   mockHasDestination: vi.fn().mockResolvedValue(true),
+  mockDbAll: vi.fn().mockResolvedValue([]),
+  mockDbRun: vi.fn().mockResolvedValue({ changes: 1 }),
+  mockHasTable: vi.fn().mockResolvedValue(true),
   liveApprovals: new Map<string, import('../../types.js').PendingApproval>(),
   approvalHandlers: new Map<string, (ctx: Record<string, unknown>) => Promise<void>>(),
 }));
 
+// `mirrorMembers` reaches the central DB directly rather than through the
+// permissions module, which this module must not import — so the connection is
+// mocked here the way `delivery.ts`'s guarded lookups are elsewhere.
+vi.mock('../../db/connection.js', () => ({
+  getDb: () => ({
+    all: (...a: unknown[]) => mockDbAll(...a),
+    run: (...a: unknown[]) => mockDbRun(...a),
+  }),
+  hasTable: (...a: unknown[]) => mockHasTable(...a),
+}));
 vi.mock('../approvals/index.js', () => ({
   requestApproval: (...a: unknown[]) => mockRequestApproval(...a),
   notifyAgent: vi.fn(),
@@ -756,6 +772,115 @@ describe('spawn_worker — lending a worker a channel', () => {
   });
 });
 
+/**
+ * The INBOUND half of the delegation, and the half that was missing.
+ *
+ * `grantChannels` gives a worker somewhere to post. Nothing gave anyone
+ * permission to answer: membership is per (user, agent group), a worker is a
+ * brand new group, and `canAccessAgentGroup` therefore returns `not_member`
+ * for every human except an owner or a global admin. The access gate in
+ * `router-bound-session.ts` then drops the reply AFTER the thread binding
+ * already matched and picked the right session.
+ *
+ * These assert the copy at the seam that fixes it. They deliberately do not
+ * re-test the gate — that lives in the permissions module — only that the rows
+ * it reads are written, to the worker and never to the requester.
+ */
+describe('spawn_worker — mirroring the requester members onto a worker', () => {
+  // The suite's shared reset clears CALLS but not implementations, so the
+  // absent-module case below would otherwise leave `hasTable` false for every
+  // test after it — which passes in isolation and fails in the file.
+  beforeEach(() => {
+    mockHasTable.mockResolvedValue(true);
+    mockDbRun.mockResolvedValue({ changes: 1 });
+  });
+
+  /** Every membership row written for a group other than the requester. */
+  function mirrored(): Array<{ user: string; group: string; addedBy: string }> {
+    return (mockDbRun.mock.calls as Array<[string, ...unknown[]]>)
+      .filter(([sql]) => sql.includes('INSERT INTO agent_group_members'))
+      .map(([, user, group, addedBy]) => ({
+        user: user as string,
+        group: group as string,
+        addedBy: addedBy as string,
+      }));
+  }
+
+  function requesterHasMembers(...userIds: string[]): void {
+    mockDbAll.mockImplementation(async (_sql: string, agentGroupId: string) =>
+      agentGroupId === 'ag-1' ? userIds.map((user_id) => ({ user_id })) : [],
+    );
+  }
+
+  it('copies every member of the requester onto the new worker', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    requesterHasMembers('slack:U-human', 'slack:bot:U-reviewer');
+
+    await runSpawnWorker(request({}));
+
+    const rows = mirrored();
+    expect(rows.map((r) => r.user).sort()).toEqual(['slack:U-human', 'slack:bot:U-reviewer']);
+    // Onto the WORKER, never back onto the requester — a mirror that also
+    // wrote to `ag-1` would be a no-op that silently passes this suite.
+    for (const row of rows) expect(row.group).not.toBe('ag-1');
+  });
+
+  it('records the orchestrator as the grantor, not a person', async () => {
+    // Nobody approved these rows. They exist because the group they were
+    // copied from admits that user, and an audit reading a human id here would
+    // be reading an approval that never happened.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    requesterHasMembers('slack:U-human');
+
+    await runSpawnWorker(request({}));
+
+    expect(mirrored()[0]?.addedBy).toBe('ag-1');
+  });
+
+  it('mirrors even when no channel is lent', async () => {
+    // A guest list is owed whatever the outbound grant does. Coupling the two
+    // would leave a worker reachable only when it also happened to be given
+    // somewhere to talk.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    requesterHasMembers('slack:U-human');
+
+    await runSpawnWorker(request({ channels: undefined }));
+
+    expect(mirrored()).toHaveLength(1);
+  });
+
+  it('writes nothing when the permissions module is absent', async () => {
+    // The table belongs to an optional module. Without it the access gate is
+    // allow-all, so there is nothing to mirror and nothing to fail on.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    mockHasTable.mockResolvedValue(false);
+    requesterHasMembers('slack:U-human');
+
+    await runSpawnWorker(request({}));
+
+    expect(mirrored()).toHaveLength(0);
+  });
+
+  it('mirrors on the reuse path, so an older worker is backfilled', async () => {
+    // The reuse branch answers inside the precheck and returns before the
+    // guarded body ever runs — the same trap that once made a channel grant
+    // silently lend nothing on the path that actually fires.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    requesterHasMembers('slack:U-human');
+    mockFindWorkerForOrigin.mockResolvedValue({
+      id: 'ag-worker',
+      name: 'SCOUT',
+      folder: 'scout',
+      workspace_path: WORKTREE,
+      origin_session_id: 'sess-1',
+    });
+    mockGetDestinationByTarget.mockResolvedValue({ local_name: 'scout' });
+
+    await runSpawnWorker(request({}));
+
+    expect(mirrored()).toEqual([{ user: 'slack:U-human', group: 'ag-worker', addedBy: 'ag-1' }]);
+  });
+});
 describe('create_agent — no longer takes a repo', () => {
   it('still holds for `group` scope — the guard rail against this change leaking into create_agent', async () => {
     // spawn_worker's own guard rewrite must not have touched agents.create:
