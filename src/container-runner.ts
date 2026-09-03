@@ -980,22 +980,21 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
   // NOT a substitute for NANOCLAW_AGENT_DIR, which stays the group folder in
   // every case — memory and footer telemetry must not follow cwd into a repo.
   if (agentGroup.workspace_path) {
-    // A worker does not resume its previous conversation, and `workspace_path`
-    // is the only thing that distinguishes one — an ordinary group never sets
-    // this and keeps resuming exactly as before.
+    // A WORKER RESUMES, like every other session, and this block now only
+    // selects cwd.
     //
-    // Two different lifetimes were sharing one key. The worktree holds
-    // uncommitted work that cannot be rebuilt, so it is durable and shared
-    // across every task in a thread. A transcript can always be rebuilt from
-    // the files it was reasoning about, so it is disposable — and keeping it
-    // is what made a thread an unbounded bill: every later task paid for every
-    // earlier one, on every turn, whether or not it was relevant.
+    // It used to suppress the resume, on the reasoning that a transcript is
+    // rebuildable from the files it reasoned about while keeping one made a
+    // thread an unbounded bill. Rebuildable turned out not to be free — a
+    // second task in a thread re-read the same files and re-derived findings
+    // the first had already reached — and the bill is now bounded by
+    // autocompact rather than by forgetting everything up front.
     //
-    // What a fresh session cannot recover is rationale: what was tried and
-    // abandoned, and why. That is not on disk, so `project-doc-compose.ts`
-    // asks each task to leave it in NOTES.md inside the worktree and asks the
-    // next one to read it. Continuity moves into the workspace, where it
-    // survives, instead of into a transcript that only grows.
+    // The NOTES.md handoff that `project-doc-compose.ts` used to inject went
+    // with it. That note existed to carry the one thing a wipe destroyed and
+    // the worktree did not hold — what was tried, rejected, and why — so with
+    // the transcript kept it asked each task to maintain a second, manual copy
+    // of what the conversation already says.
     //
     // It goes in the standing document and NOT in front of the task: prefixing
     // a brief would push a leading `/` off the start of the message, and

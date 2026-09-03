@@ -340,7 +340,6 @@ instruction sent during the same turn is silently relabelled as the answer.
 ```
    USER            ORCHESTRATOR              WORKER              HOST
      │                   │◄─ question ─────────┤ ░ ...600 s...     │
-     │                   │                     ├─ markLateAnswerExpected
      │                   │◄─ "blocked on X" ───┤   turn ENDS       │
      │                   │                     ╳          pending question
      │        · · · later · · ·                │          EXPIRED at +600 s
@@ -376,12 +375,25 @@ delivers the answer as prose while the tool still listens, and expiring late
 destroys it. A row written by an older container carries no deadline and falls
 back to the historical bound.
 
-**The late-answer flag names its question, and reading it does not consume it.**
-It used to hold "yes" and clear on the next batch, whichever batch that was — so
-an unrelated message took the exemption and the real answer arrived to a
-transcript that had just been wiped, which is the exact failure the flag exists
-to prevent. Only the message carrying that answer clears it now, which the host
-can mark because it knows which question it is degrading.
+**There is no longer a flag holding the transcript open, because nothing
+closes it.** A worker used to start every task with a clean transcript
+(`freshSessionPerTask`), so a late answer would have landed with no question
+above it — the exact failure this section exists to prevent. Two mechanisms
+guarded that one case: `markLateAnswerExpected`, which named the question the
+worker was still waiting on, and an `answersQuestionId` tag the host attached to
+a degraded answer so only the message CARRYING that answer cleared the flag.
+
+Both are gone, along with the wipe. A worker resumes like every other session,
+so the question is always still above the answer — unconditionally, rather than
+by exception. What bounds a resuming worker's context is autocompact, which is
+lossier than a wipe in a different way: older turns become a summary rather than
+nothing at all, which is strictly more than the wipe preserved.
+
+The `NOTES.md` handoff went with the wipe. It was injected into every worker's
+standing document to carry the one thing a wipe destroyed and the worktree did
+not hold — what was tried, rejected, and why. With the transcript kept, it asked
+each task to maintain a second copy, by hand, of what the conversation already
+says.
 
 ## 2.6 Channel sessions are untouched
 

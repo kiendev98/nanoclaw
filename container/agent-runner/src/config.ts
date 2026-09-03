@@ -27,8 +27,12 @@ export interface RunnerConfig {
   fastMode?: boolean;
   /**
    * The repository or worktree this agent stands in, when it is a repo worker.
-   * Absent for an ordinary group, which is what distinguishes the two: a worker
-   * starts every task with a clean transcript, an ordinary group resumes.
+   * Absent for an ordinary group.
+   *
+   * PURELY A CWD SELECTOR. It used to do a second job — it was the sole input
+   * to `freshSessionPerTask`, which wiped a worker's transcript at the start of
+   * every task — and that is gone: a worker resumes like every other session,
+   * and autocompact bounds the context the wipe was there to bound.
    */
   workspacePath?: string;
   /**

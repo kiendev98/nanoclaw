@@ -209,29 +209,31 @@ describe('composeGroupProjectDoc corrupt skill selection', () => {
   });
 });
 
-describe('composeGroupProjectDoc handoff notes', () => {
-  // The pair that makes a worker's clean transcript survivable: the worktree
-  // carries the files, NOTES.md carries the reasoning that never became one.
-  it('tells a repo worker to read and write NOTES.md', async () => {
+describe('composeGroupProjectDoc handoff notes were removed', () => {
+  // NOTES.md existed because a worker's transcript was wiped per task: the
+  // worktree kept the files, and the note was asked to carry the reasoning
+  // that never became one. The wipe is gone, so a worker's own transcript
+  // carries that reasoning and the standing instruction to keep a second copy
+  // by hand is work with no reader.
+  it('says nothing about NOTES.md to a worker', async () => {
     const ag = await seed('ag-worker', 'worker-group');
 
-    // The composer reads the group it is handed, not the row — so the flag
-    // travels with the spawn, exactly as `container-runner.ts` passes it.
     const doc = await compose({ ...ag, workspace_path: '/tmp/wt/demo' });
 
-    expect(doc).toContain('# Handoff notes');
-    expect(doc).toContain('NOTES.md');
+    expect(doc).not.toContain('Handoff notes');
+    expect(doc).not.toContain('NOTES.md');
   });
 
-  // The section keys on `workspace_path` alone, so an ordinary companion must
-  // not inherit instructions about a worktree it does not have.
-  it('says nothing to a group that is not a worker', async () => {
-    const ag = await seed('ag-companion', 'companion-group');
+  it('composes a worker and a non-worker identically', async () => {
+    // `workspace_path` was the only thing this section keyed on, so with it
+    // gone the two documents must not differ at all.
+    const worker = await seed('ag-worker-2', 'worker-group-2');
+    const companion = await seed('ag-companion', 'companion-group');
 
-    const doc = await compose(ag);
-
-    expect(doc).not.toContain('# Handoff notes');
-    expect(doc).not.toContain('NOTES.md');
+    expect(await compose({ ...worker, workspace_path: '/tmp/wt/demo' })).toBe(
+      await compose({ ...worker, workspace_path: null }),
+    );
+    expect(await compose(companion)).not.toContain('NOTES.md');
   });
 });
 
