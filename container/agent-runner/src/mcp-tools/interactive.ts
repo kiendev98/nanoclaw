@@ -6,7 +6,7 @@
  */
 import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
 import { writeMessageOut } from '../db/messages-out.js';
-import { getSessionRouting } from '../db/session-routing.js';
+import { getSessionRouting, getTaskSeriesId } from '../db/session-routing.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -62,7 +62,10 @@ export const askUserQuestion: McpToolDefinition = {
           },
           description: 'Options for the user to choose from (string or {label, selectedLabel?, value?})',
         },
-        timeout: { type: 'number', description: 'Timeout in seconds (default: 300)' },
+        timeout: {
+          type: 'number',
+          description: 'Timeout in seconds (default: 300 in a conversation, 1200 in a task run).',
+        },
       },
       required: ['title', 'question', 'options'],
     },
@@ -71,7 +74,17 @@ export const askUserQuestion: McpToolDefinition = {
     const title = args.title as string;
     const question = args.question as string;
     const rawOptions = args.options as unknown[];
-    const timeout = ((args.timeout as number) || 300) * 1000;
+    // A task run's question travels further than a chat one: host → the
+    // session that started the run → a human → back again, two agent turns
+    // around a person who is not necessarily looking. 300s loses that race
+    // routinely.
+    //
+    // 1200s, not more, because the heartbeat is touched per SDK event and this
+    // tool blocks between them — so a waiting run looks idle, and
+    // ABSOLUTE_CEILING_MS (30 min) kills it. 20 minutes keeps a margin under
+    // that ceiling rather than racing it.
+    const defaultTimeout = getTaskSeriesId() ? 1200 : 300;
+    const timeout = ((args.timeout as number) || defaultTimeout) * 1000;
     if (!title || !question || !rawOptions?.length) {
       return err('title, question, and options are required');
     }

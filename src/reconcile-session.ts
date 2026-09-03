@@ -132,16 +132,19 @@ async function reconcileActiveSession(session: Session): Promise<void> {
   try {
     let dueCount = 0;
     let shouldWake = false;
+    let closedTaskSession = false;
     const exists = await withExistingMailboxSession(agentGroup.id, session.id, async (mailbox) => {
       mailbox.applyProcessingAcks(mailbox.getTerminalProcessingAcks());
       dueCount = mailbox.countDueMessages();
       shouldWake = dueCount > 0 && !isContainerRunning(session.id);
       if (!shouldWake) {
-        await maintainSessionMailbox(mailbox, session, agentGroup.id);
+        closedTaskSession = await maintainSessionMailbox(mailbox, session, agentGroup.id);
       }
       return true;
     });
     if (!exists) return;
+
+    if (closedTaskSession) await releaseAbandonedWaiters(session);
 
     if (!shouldWake) return;
 
@@ -164,9 +167,10 @@ async function reconcileActiveSession(session: Session): Promise<void> {
     log.info('Waking container for due messages', { sessionId: session.id, count: dueCount });
     await requestWake(session, 'due-message');
 
-    await withExistingMailboxSession(agentGroup.id, session.id, async (mailbox) => {
-      await maintainSessionMailbox(mailbox, session, agentGroup.id);
-    });
+    const closedAfterWake = await withExistingMailboxSession(agentGroup.id, session.id, async (mailbox) =>
+      maintainSessionMailbox(mailbox, session, agentGroup.id),
+    );
+    if (closedAfterWake) await releaseAbandonedWaiters(session);
   } catch (err) {
     log.error('Session mailbox sweep failed', {
       agentGroupId: agentGroup.id,
@@ -176,11 +180,17 @@ async function reconcileActiveSession(session: Session): Promise<void> {
   }
 }
 
+/**
+ * @returns true when it closed a spent task session, so the caller can release
+ *   any waiters OUTSIDE the mailbox session — answering one wakes the
+ *   requester, and this file keeps wakes off the sweep's own transaction.
+ */
 async function maintainSessionMailbox(
   mailbox: InboundMailbox & OutboundMailbox,
   session: Session,
   agentGroupId: string,
-): Promise<void> {
+): Promise<boolean> {
+  let closedTaskSession = false;
   const alive = isContainerRunning(session.id);
   if (alive) {
     await enforceRunningContainerSla(mailbox, mailbox, session, agentGroupId);
@@ -198,6 +208,7 @@ async function maintainSessionMailbox(
     const liveTasks = mailbox.countLiveTasks();
     if (shouldCloseTaskSession(session.thread_id, isContainerRunning(session.id), liveTasks)) {
       await updateSession(session.id, { status: 'closed' });
+      closedTaskSession = true;
       log.info('Closed spent task session', { sessionId: session.id, threadId: session.thread_id });
     }
   }
@@ -211,6 +222,25 @@ async function maintainSessionMailbox(
     log.error('Echo backlog prune failed', { sessionId: session.id, err });
   }
   // MODULE-HOOK:cross-session-echo-prune:end
+
+  return closedTaskSession;
+}
+
+/**
+ * Release waiters left parked on a task session that just closed.
+ *
+ * Runs OUTSIDE the mailbox session for the same reason `requestWake` does:
+ * answering a waiter wakes the requester, and re-entering while the sweep
+ * still owns the session is what the surrounding code is careful to avoid.
+ * Lazy import so core keeps no static dependency on the scheduling module.
+ */
+async function releaseAbandonedWaiters(session: Session): Promise<void> {
+  try {
+    const { answerAbandonedRunRequests } = await import('./modules/scheduling/run-task.js');
+    await answerAbandonedRunRequests(session);
+  } catch (err) {
+    log.error('Failed to release waiters on a closed task session', { sessionId: session.id, err });
+  }
 }
 
 function heartbeatMtimeMs(agentGroupId: string, sessionId: string): number {

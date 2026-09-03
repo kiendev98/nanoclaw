@@ -23,6 +23,8 @@ export type WakeReason =
   | 'self-mod-apply'
   | 'agent-created'
   | 'interactive'
+  /** A run this session started is blocked on a question only it can relay. */
+  | 'task-question'
   | 'cli'
   | 'approval-response'
   | 'adoption';

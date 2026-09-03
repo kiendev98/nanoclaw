@@ -546,10 +546,24 @@ export async function processQuery(
     })();
   }, ACTIVE_POLL_INTERVAL_MS);
 
+  // Every background task (subagent, backgrounded Bash) alive right now.
+  //
+  // REPLACED wholesale on each `background_tasks` event, per the SDK's own
+  // instruction: it is a level signal, and pairing start/finish edges wedges a
+  // stale indicator whenever one bookend is missed. Starts empty because the
+  // SDK emits nothing at startup — which is also the safe default, since empty
+  // means "this turn is final", i.e. the behaviour before this existed.
+  let liveBackgroundTasks = new Set<string>();
+
   try {
     for await (const event of query.events) {
       handleEvent(event, routing);
       touchHeartbeat();
+
+      if (event.type === 'background_tasks') {
+        liveBackgroundTasks = new Set(event.ids);
+        continue;
+      }
 
       if (event.type === 'init') {
         queryContinuation = event.continuation;
@@ -603,7 +617,13 @@ export async function processQuery(
           // Errors included: a failed run's text belongs in its log, not chat.
           // A corrective retry handles delivery only; its result is not a
           // second run summary.
-          if (routing.taskRun && !taskBlockNudged) await autoAppendTaskLog(event.text);
+          // A finished TURN is not a finished RUN. With subagents still live
+          // the agent will be re-invoked when they report, so this text is an
+          // interim note — recorded in the log, but it must not be handed to a
+          // `notify` caller as the run's result.
+          if (routing.taskRun && !taskBlockNudged) {
+            await autoAppendTaskLog(event.text, liveBackgroundTasks.size === 0);
+          }
           if (resultBlocks === 0 && event.isError === true && !routing.taskRun) {
             // Non-retryable error turn (e.g. a 403 billing_error) with no
             // <message> envelope: deliver the notice instead of dropping it as
@@ -707,6 +727,9 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
       break;
     case 'progress':
       log(`Progress: ${event.message}`);
+      break;
+    case 'background_tasks':
+      log(`Background tasks live: ${event.ids.length}`);
       break;
   }
 }
@@ -1140,8 +1163,17 @@ function escapePromptXml(value: string): string {
  * `ncl tasks append-log` calls are additive mid-run notes. Written as a
  * `task_log` outbound row; the host appends it to the series' tasks/<id>.md
  * with its usual timestamp stamp. Never delivered to anyone.
+ *
+ * `final` says whether this turn ended the RUN, and it is the only thing that
+ * releases a `notify` caller. One run can end several turns — an agent that
+ * leaves subagents working ends its turn and is re-invoked when they report —
+ * and the host used to answer the waiter on the first of them. A live run then
+ * reported "still working" as its result, and whatever it produced afterwards,
+ * including the error that killed it, reached nobody.
+ *
+ * Every turn is still logged. `final` decides who is TOLD, never what is kept.
  */
-export async function autoAppendTaskLog(text: string): Promise<void> {
+export async function autoAppendTaskLog(text: string, final = true): Promise<void> {
   // Run-log hygiene: an inert <message to> block never belongs in the log as
   // raw XML — replace each with its inner text, marked undelivered, so the
   // log stays readable prose.
@@ -1154,9 +1186,9 @@ export async function autoAppendTaskLog(text: string): Promise<void> {
   await writeMessageOut({
     id: generateId(),
     kind: 'task_log',
-    content: JSON.stringify({ text: line }),
+    content: JSON.stringify({ text: line, final }),
   });
-  log('Task run log auto-appended from final text');
+  log(`Task run log auto-appended from ${final ? 'final' : 'interim'} text`);
 }
 
 async function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): Promise<void> {

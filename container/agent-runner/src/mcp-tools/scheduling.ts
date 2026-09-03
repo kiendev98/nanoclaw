@@ -139,4 +139,63 @@ export const runTask: McpToolDefinition = {
   },
 };
 
-registerTools([runTask]);
+/**
+ * Answer a question a run you started is blocked on.
+ *
+ * A task run is headless: its own question card has nowhere to go until it has
+ * posted something, and even then it lands in a thread nobody may be reading.
+ * So the host relays the question to whoever started the run — you — and this
+ * is the door back. The run is parked polling for the answer and continues
+ * within a second of it arriving.
+ */
+export const answerTaskQuestion: McpToolDefinition = {
+  tool: {
+    name: 'answer_task_question',
+    description:
+      'Answer a question that a run you started with run_task is BLOCKED on. You receive the question, its options, and its questionId as a message. ' +
+      'Ask the human and pass back their choice verbatim — one of the exact option values, never your own judgement of what they would say. ' +
+      'The run resumes immediately. It can only answer a question from a run you started yourself.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        questionId: {
+          type: 'string',
+          description:
+            'The questionId from the relayed question. Copy it exactly; it is how the host finds the blocked run.',
+        },
+        answer: {
+          type: 'string',
+          description: "The human's choice, exactly as one of the option values offered by the question.",
+        },
+      },
+      required: ['questionId', 'answer'],
+    },
+  },
+  async handler(args) {
+    const questionId = ((args.questionId as string) || '').trim();
+    const answer = ((args.answer as string) || '').trim();
+    if (!questionId) return err('questionId is required — copy it from the relayed question.');
+    if (!answer) return err('answer is required — one of the option values the question offered.');
+
+    const requestId = generateId();
+    await writeMessageOut({
+      id: requestId,
+      kind: 'system',
+      content: JSON.stringify({
+        action: 'answer_task_question',
+        requestId,
+        waitUntil: null,
+        questionId,
+        answer,
+      }),
+    });
+
+    log(`answer_task_question: ${questionId}`);
+    return ok(
+      `Sent "${answer}" to the blocked run. NOT CONFIRMED YET: the host checks that the question is still open and ` +
+        `that the run is yours, and answers either way — end your turn and wait for it.`,
+    );
+  },
+};
+
+registerTools([runTask, answerTaskQuestion]);

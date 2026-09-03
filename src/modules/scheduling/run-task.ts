@@ -28,7 +28,8 @@ import { randomUUID } from 'crypto';
 import { parseBoundedRequest, respondAndWake, wakeRequester } from '../../bounded-request.js';
 import { getSession, findSystemSession, taskThreadId, updateSession } from '../../db/sessions.js';
 import { log } from '../../log.js';
-import { withExistingMailboxSession } from '../../session-manager.js';
+import { requestWake } from '../../request-wake.js';
+import { withExistingMailboxSession, writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import { ensureTaskSeries, workspaceSeriesId } from './create.js';
 import { parseTaskContent } from './task-content.js';
@@ -38,6 +39,15 @@ export interface PendingRunRequest {
   requesterSessionId: string;
   requestId: string;
   waitUntil: number | null;
+  /**
+   * The most recent interim turn's text, carried so the close-path backstop
+   * can say something true when a run dies before its final turn.
+   *
+   * Kept on the waiter rather than in a new `sessions` column on purpose: this
+   * is already a JSON blob the host owns, so it costs no migration, and the
+   * text is only ever needed by the waiter it belongs to.
+   */
+  lastSummary?: string;
 }
 
 const RESPONSE_KIND = 'run-task';
@@ -303,4 +313,180 @@ export async function answerPendingRunRequest(taskSession: Session, runSummary: 
       wakeText: runSummary,
     },
   );
+}
+
+/**
+ * The requester's answer to a question its run asked.
+ *
+ * Resume needs no new machinery: `deliverQuestionResponse` is the same path a
+ * button click takes, and the run is blocked polling its own inbox for exactly
+ * this row, so it continues within a second of the write.
+ *
+ * THE GUARD IS THE POINT. Without it any agent that learned a questionId could
+ * answer any run's question — including one belonging to a conversation it
+ * cannot see. A caller may answer only a question asked by a run it is itself
+ * waiting on, which the parked waiter proves.
+ */
+export async function answerTaskQuestion(content: Record<string, unknown>, session: Session): Promise<void> {
+  const questionId = typeof content.questionId === 'string' ? content.questionId.trim() : '';
+  const answer = typeof content.answer === 'string' ? content.answer.trim() : '';
+  const req = parseBoundedRequest(content);
+  const fail = async (message: string): Promise<void> => {
+    await respondAndWake(session, req, {
+      kind: 'answer-task-question',
+      body: { type: 'answer_task_question_response', status: 'error', result: { error: message } },
+      wakeText: message,
+    });
+    if (!req.requestId) await wakeRequester(session, message);
+  };
+
+  if (!questionId || !answer) {
+    await fail('answer_task_question needs both questionId and answer.');
+    return;
+  }
+
+  const { getPendingQuestion } = await import('../../db/sessions.js');
+  const pending = await getPendingQuestion(questionId);
+  if (!pending) {
+    await fail(`No question "${questionId}" is waiting — it was already answered, or it timed out.`);
+    return;
+  }
+
+  const taskSession = await getSession(pending.session_id);
+  const owns = readWaiters(taskSession?.pending_run_request).some((w) => w.requesterSessionId === session.id);
+  if (!owns) {
+    await fail(`Question "${questionId}" belongs to a run you did not start.`);
+    return;
+  }
+
+  const { deliverQuestionResponse } = await import('../interactive/index.js');
+  const delivered = await deliverQuestionResponse(questionId, answer, '');
+  if (!delivered) {
+    await fail(`Could not deliver the answer to "${questionId}" — the run may have ended.`);
+    return;
+  }
+
+  await respondAndWake(session, req, {
+    kind: 'answer-task-question',
+    body: { type: 'answer_task_question_response', status: 'completed', result: { questionId, answer } },
+    wakeText: `Answered "${answer}". The run has resumed.`,
+  });
+}
+
+/**
+ * Hand a task run's question to whoever started the run.
+ *
+ * A task session is headless. Its question card is addressed from its own
+ * routing, which is empty until it has posted something and bound a thread —
+ * so before this, a question from a run that had not yet spoken was recorded
+ * as pending, dropped by the routing check, answered by nobody, and timed out.
+ * Even a bound run asks in a thread the human may not be watching.
+ *
+ * The waiter already names the session that asked for the work, and that
+ * session is talking to a human right now. So the question goes there, and the
+ * requester relays it, exactly as it relays the result.
+ *
+ * Deliberately NOT for fire-and-forget runs: with no waiter there is nobody to
+ * ask, and this returns false so the caller falls back to the channel path.
+ *
+ * @returns true when the question was handed to a requester, meaning the
+ *   caller must not also deliver the card to a channel.
+ */
+export async function relayQuestionToRequester(
+  taskSession: Session,
+  question: { questionId: string; title: string; question: string; options: Array<{ label: string; value: string }> },
+): Promise<boolean> {
+  const waiters = readWaiters(taskSession.pending_run_request);
+  // FIFO head: the caller whose run this is. A second parked caller is waiting
+  // on a later run and has no standing to answer this one's question.
+  const target = waiters[0];
+  if (!target) return false;
+
+  const requester = await getSession(target.requesterSessionId);
+  if (!requester) {
+    log.warn('run_task question has no requester to relay to', { sessionId: target.requesterSessionId });
+    return false;
+  }
+
+  const choices = question.options.map((o) => `"${o.value}"`).join(', ');
+  const text =
+    `The run you started is BLOCKED on a question and cannot continue until you answer.\n\n` +
+    `${question.title}\n${question.question}\n\n` +
+    `Options: ${choices}\n\n` +
+    `Ask the human, then call answer_task_question({ questionId: "${question.questionId}", answer: "<their choice>" }) ` +
+    `with one of those exact values. Do not answer on their behalf. ` +
+    `The run times out if nothing arrives, and its work so far is lost.`;
+
+  await writeSessionMessage(requester.agent_group_id, requester.id, {
+    id: `taskq-${question.questionId}`,
+    kind: 'chat',
+    timestamp: new Date().toISOString(),
+    content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
+  });
+  await requestWake(requester, 'task-question');
+  log.info('Relayed a task question to its requester', {
+    questionId: question.questionId,
+    taskSessionId: taskSession.id,
+    requesterSessionId: requester.id,
+  });
+  return true;
+}
+
+/**
+ * Remember an interim turn's text on every parked waiter, without answering.
+ *
+ * A run that ends a turn with subagents still working is not finished, so no
+ * waiter is released — but if it then dies (rate limit, kill, crash) there is
+ * no final turn and nothing else would ever be said. This is what lets
+ * `answerAbandonedRunRequests` report the last thing that was actually true.
+ */
+export async function recordInterimRunSummary(taskSession: Session, summary: string): Promise<void> {
+  if (!summary) return;
+  await withTaskSessionLock(taskSession.id, async () => {
+    const fresh = await getSession(taskSession.id);
+    const waiters = readWaiters(fresh?.pending_run_request);
+    if (waiters.length === 0) return;
+    const updated = waiters.map((w) => ({ ...w, lastSummary: summary }));
+    await updateSession(taskSession.id, { pending_run_request: JSON.stringify(updated) });
+  });
+}
+
+/**
+ * Release every waiter still parked on a task session that is being closed.
+ *
+ * THE BACKSTOP, and it is what makes final-turn gating safe to ship. Gating
+ * alone trades a premature answer for a permanent silence: a run killed
+ * between an interim turn and its final one leaves a waiter nothing will ever
+ * release, and the caller waits forever. A session only closes once it is
+ * spent — no container, no live tasks — so at that point the run is over
+ * however it ended, and whatever was last true is the honest answer.
+ *
+ * Drains the whole queue rather than one waiter: the run is not coming back,
+ * so a second caller parked behind the first would never be answered either.
+ */
+export async function answerAbandonedRunRequests(taskSession: Session): Promise<void> {
+  const waiters = await withTaskSessionLock(taskSession.id, async () => {
+    const fresh = await getSession(taskSession.id);
+    const parked = readWaiters(fresh?.pending_run_request);
+    if (parked.length === 0) return [];
+    await updateSession(taskSession.id, { pending_run_request: null });
+    return parked;
+  });
+
+  for (const waiter of waiters) {
+    const requester = await getSession(waiter.requesterSessionId);
+    if (!requester) continue;
+    const message = waiter.lastSummary
+      ? `The run ended without a final result. The last thing it reported was: ${waiter.lastSummary}`
+      : 'The run ended without reporting a result. Check its run log with `ncl tasks get <series>`.';
+    await respondAndWake(
+      requester,
+      { requestId: waiter.requestId, waitUntil: waiter.waitUntil },
+      {
+        kind: RESPONSE_KIND,
+        body: { type: 'run_task_response', status: 'error', result: { error: message } },
+        wakeText: message,
+      },
+    );
+  }
 }

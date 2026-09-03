@@ -189,6 +189,19 @@ export type ProviderEvent =
   | { type: 'progress'; message: string }
   | { type: 'file'; path: string }
   /**
+   * Every background task alive after a membership change — a LEVEL signal,
+   * not an edge. Consumers replace their set with each payload; pairing
+   * start/finish edges is what leaves a stale indicator wedged when one
+   * bookend is missed.
+   *
+   * It answers one question the poll-loop cannot otherwise ask: does a
+   * finished turn mean the RUN is finished? An agent may end a turn with
+   * subagents still working and be re-invoked when they report, so a task
+   * run's first `result` is not necessarily its last. Nothing is emitted at
+   * startup, so an empty set is also the correct initial state.
+   */
+  | { type: 'background_tasks'; ids: string[] }
+  /**
    * Liveness signal. Providers MUST yield this on every underlying SDK
    * event (tool call, thinking, partial message, anything) so the
    * poll-loop's idle timer stays honest during long tool runs.

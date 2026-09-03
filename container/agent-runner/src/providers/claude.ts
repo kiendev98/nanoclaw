@@ -903,6 +903,16 @@ export class ClaudeProvider implements AgentProvider {
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
           const tn = message as { summary?: string };
           yield { type: 'progress', message: tn.summary || 'Task notification' };
+        } else if (
+          message.type === 'system' &&
+          (message as { subtype?: string }).subtype === 'background_tasks_changed'
+        ) {
+          // The level signal beside the task_started/task_notification edges.
+          // Forwarded as the full set rather than a delta because that is the
+          // SDK's own stated contract: replace, never reconcile.
+          const bt = message as { tasks?: Array<{ task_id?: string }> };
+          const ids = (bt.tasks ?? []).map((t) => t.task_id).filter((id): id is string => typeof id === 'string');
+          yield { type: 'background_tasks', ids };
         }
       }
       log(`Query completed after ${messageCount} SDK messages`);

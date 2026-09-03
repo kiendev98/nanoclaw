@@ -20,10 +20,20 @@
  */
 import { registerDeliveryAction } from '../../delivery.js';
 import { unguarded } from '../../guard/index.js';
-import { runTask } from './run-task.js';
+import { answerTaskQuestion, runTask } from './run-task.js';
 
 registerDeliveryAction(
   'run_task',
   runTask,
   unguarded("queues a run of an existing task series in the caller's own agent group; no privileged effect"),
+);
+
+registerDeliveryAction(
+  'answer_task_question',
+  answerTaskQuestion,
+  // Unguarded because the handler carries its own, tighter check: the caller
+  // must hold a parked waiter on the very run that asked. A guard here could
+  // only ask about agent groups, which is the wrong question — two runs in one
+  // group must not be able to answer each other's questions.
+  unguarded("answers a question asked by a run the caller started; ownership is enforced against the run's waiter"),
 );

@@ -13,7 +13,11 @@ import {
   updateSession,
 } from './db/sessions.js';
 import { appendRunLog } from './modules/scheduling/run-log.js';
-import { answerPendingRunRequest } from './modules/scheduling/run-task.js';
+import {
+  answerPendingRunRequest,
+  recordInterimRunSummary,
+  relayQuestionToRequester,
+} from './modules/scheduling/run-task.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import {
@@ -463,13 +467,27 @@ async function deliverMessage(
       } catch (err) {
         log.warn('Failed to append task run log', { id: msg.id, sessionId: session.id, err });
       }
-      // A run's final text IS the answer a `run_task` caller is waiting for,
-      // and this row is the only place the host learns the run produced one.
-      // Re-read rather than trusting `session`: the park was written after
-      // this delivery pass loaded it.
+      // ONLY A FINAL TURN ANSWERS. A run can end several turns — an agent that
+      // leaves subagents running ends its turn and is re-invoked when they
+      // report — and answering on the first spends the single waiter on
+      // interim text. Observed live: a blueprint run reported "explorers still
+      // running" as its result, then died on a rate limit three minutes later
+      // with nobody left to tell.
+      //
+      // `final !== false` rather than `final === true`: a runner too old to
+      // send the field answers as it always did. A wrong answer is recoverable;
+      // a waiter that never fires is not.
       try {
         const fresh = await getSession(session.id);
-        if (fresh) await answerPendingRunRequest(fresh, summary);
+        if (!fresh) {
+          // no session, nothing to answer
+        } else if (content.final === false) {
+          // Carry the interim text on the parked waiter so the close-path
+          // backstop has something to say if the final turn never arrives.
+          await recordInterimRunSummary(fresh, summary);
+        } else {
+          await answerPendingRunRequest(fresh, summary);
+        }
       } catch (err) {
         log.warn('Failed to answer a pending run_task', { id: msg.id, sessionId: session.id, err });
       }
@@ -590,6 +608,22 @@ async function deliverMessage(
       });
       if (inserted) {
         log.info('Pending question created', { questionId: content.questionId, sessionId: session.id });
+      }
+
+      // A TASK RUN ASKS THROUGH WHOEVER STARTED IT. The pending row above is
+      // still what `answer_task_question` validates against, so it is written
+      // either way — only the delivery door changes. Returning here skips the
+      // channel path deliberately: a task session's routing is empty until it
+      // has posted something, so that path would drop the card at the
+      // routing check below and the run would block until it timed out.
+      if (isTaskThread(session.thread_id)) {
+        const relayed = await relayQuestionToRequester(session, {
+          questionId: content.questionId as string,
+          title,
+          question: typeof content.question === 'string' ? content.question : title,
+          options: normalizeOptions(rawOptions as never),
+        });
+        if (relayed) return;
       }
     }
   }
