@@ -126,15 +126,29 @@ export const runTask: McpToolDefinition = {
     const where = repo ? `"${repo}"` : 'a separate session in your own workspace';
     log(`run_task: ${repo || '(no repo)'} (requestId=${requestId || 'none'})`);
 
+    // REQUESTED, NOT QUEUED — and the difference is not pedantry. All that has
+    // happened here is a row written to this session's outbound mailbox. The
+    // host has not yet resolved `repo` against its allowlist, which is where an
+    // unknown repository is refused, so nothing is running and the repository
+    // named above may not exist.
+    //
+    // Saying "Queued in <repo>" here caused a live failure: the tool reported
+    // success, the agent relayed that success to the human naming a repository
+    // the host rejected 9ms later, and the error — correctly delivered — landed
+    // as a contradiction of a claim this string had already authorised. Whatever
+    // this returns, the agent repeats. So it must not assert an outcome the
+    // container is not in a position to know.
     if (!requestId) {
       return ok(
-        `Queued in ${where}. You asked for no result, so nothing further will arrive — ` +
-          `pass notify: true if you need to know how it went.`,
+        `Requested a run in ${where}. You asked for no result, so nothing further will arrive — not even a ` +
+          `failure to start. Pass notify: true if you need to know how it went, or whether it went at all.`,
       );
     }
     return ok(
-      `Queued in ${where}. The result will arrive later as a message that wakes you — end your turn now. ` +
-        `Tell the human you are waiting rather than going silent.`,
+      `Requested a run in ${where}. NOT CONFIRMED YET: the host resolves the repository and answers either ` +
+        `with the result or with an error if that repository is unknown. Tell the human you have requested it ` +
+        `and are waiting — do not tell them it started, and do not repeat the repository name as though it ` +
+        `were accepted. End your turn now; the answer wakes you.`,
     );
   },
 };
