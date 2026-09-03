@@ -27,7 +27,7 @@ import { isUnguarded, type Unguarded } from './guard/index.js';
 import { fanOutboundMessage } from './modules/cross-session-context/index.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
-import { clearOutbox, readOutboxFiles, withExistingMailboxSession, writeSessionRouting } from './session-manager.js';
+import { clearOutbox, readOutboxFiles, withExistingMailboxSession } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
 import type { OutboundFile } from './channels/adapter.js';
 import type { PendingApproval, Session } from './types.js';
@@ -377,46 +377,6 @@ async function bindOpenedThread(
     bound_messaging_group_id: group.id,
     bound_root_message_id: platformMsgId,
   });
-
-  // REFRESH THE CONTAINER'S ROUTING NOW, not on its next spawn. The row above
-  // is what `resolveSession` matches an inbound reply against, so the binding
-  // alone already routes the human's answer back to this session — but the
-  // container reads its OWN outbound route from `session_routing` in
-  // inbound.db, and that snapshot is written by `writeSessionRouting` from
-  // `spawnContainer` alone.
-  //
-  // The ordering is what makes this necessary. A task session is unbound when
-  // it spawns, because it has not sent anything yet; it binds only once its
-  // first message is delivered, and by then its container is already running.
-  // Without this call the container keeps its pre-bind snapshot — `channelType`
-  // null — for the rest of its life, `resolveRouting` finds no match, and every
-  // reply it sends goes to TOP LEVEL instead of the thread it just opened.
-  //
-  // Observed live rather than in a test: the task opened its thread, a human
-  // replied inside it, the reply routed here correctly, and the answer came
-  // back as a new channel message. Every test asserted the session row, and the
-  // session row was right — the stale copy is the one the container holds.
-  //
-  // Safe here: `writeSessionRouting` re-reads the session from the central DB,
-  // so it sees the binding just written rather than the caller's stale
-  // in-memory `session`; and it opens its own mailbox session after the
-  // caller's has closed, so this is sequential, never nested.
-  //
-  // NON-FATAL BY CONSTRUCTION. The message is already delivered and already
-  // marked delivered by the time this runs, and the binding above is already
-  // committed — so letting a throw escape would push a SUCCEEDED delivery into
-  // the caller's failure path, recording a bogus attempt and skipping the
-  // post-delivery hooks. The worst a failure here can cost is the pre-existing
-  // behaviour: routing stays stale until the next spawn rewrites it anyway.
-  try {
-    await writeSessionRouting(session.agent_group_id, session.id);
-  } catch (err) {
-    log.warn('Could not refresh routing after thread bind — replies stay top-level until respawn', {
-      sessionId: session.id,
-      err,
-    });
-  }
-
   log.info('Session bound to the thread it opened', {
     sessionId: session.id,
     messagingGroupId: group.id,

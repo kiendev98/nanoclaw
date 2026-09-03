@@ -42,7 +42,7 @@ import {
 } from './db/coordination.js';
 import { getHostInstanceId } from './host-instance.js';
 import { getDb, hasTable } from './db/connection.js';
-import { getSession, isTaskThread, TASKS_SYSTEM_THREAD_ID } from './db/sessions.js';
+import { getSession } from './db/sessions.js';
 import { getSessionDriver, isSessionEventsDriver } from './drivers/index.js';
 import type { SupervisedHandle, SupervisedSnapshot } from './drivers/session-events.js';
 import { GROUP_FOLDER_LABEL, labelValueLegal, specInvalid } from './drivers/types.js';
@@ -1030,29 +1030,6 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     // which is a different fact from the host saying nothing at all.
     env.NANOCLAW_WORKSPACE_PATH = workspacePath ?? '';
   }
-
-  // TASK IDENTITY IS SPAWN-SCOPED AND IMMUTABLE — which is exactly why it must
-  // not be read back out of `session_routing`.
-  //
-  // The runner used to recover its series id by parsing `routing.thread_id` for
-  // the `system:tasks:` prefix. That field is the session's OUTBOUND route, and
-  // it is mutable: the moment a task session binds the thread it opened,
-  // `writeSessionRouting` replaces it with the real channel thread so replies
-  // land in that thread. Both facts wanted one field, and the mutable one wins,
-  // so a bound task session stopped being able to tell it was a task at all —
-  // `getTaskSeriesId()` returned null, the PreCompact hook flipped its guidance
-  // from the task contract to the chat contract, and a respawn framed the whole
-  // system prompt as a chat session.
-  //
-  // A session's task identity never changes for the life of a spawn, so the env
-  // is the honest carrier. Set unconditionally, empty for a non-task session,
-  // for the same reason as the workspace path above: absent must mean "an older
-  // host said nothing", never "this is not a task".
-  env.NANOCLAW_TASK_SERIES_ID =
-    isTaskThread(session.thread_id) && session.thread_id
-      ? session.thread_id.slice(`${TASKS_SYSTEM_THREAD_ID}:`.length)
-      : '';
-
   // The contributed lane (ContainerSpec.contributedEnv): registry-sourced env,
   // exempt from the credential-NAME check and still refused credential VALUES.
   // The model provider's contribution fills first, the gateway's second — a

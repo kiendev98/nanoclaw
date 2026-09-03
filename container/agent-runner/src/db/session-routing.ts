@@ -24,30 +24,8 @@ export function getSessionRouting(): SessionRouting {
 
 const TASK_THREAD_PREFIX = 'system:tasks:';
 
-/**
- * The task series this session is a run of, or null for a chat session.
- *
- * PREFERS `NANOCLAW_TASK_SERIES_ID`, which the host sets once per spawn, over
- * parsing `routing.thread_id`. The two facts used to share that one field and
- * they have different lifetimes: task identity is fixed for the life of a
- * spawn, while the outbound route is MUTABLE — the host rewrites it the moment
- * this session binds the thread it opened, so replies land in that thread
- * rather than at top level.
- *
- * Reading identity off the mutable field meant a task session stopped
- * recognising itself the instant it opened a thread: this function returned
- * null, and the PreCompact hook — which runs mid-session — swapped the task
- * delivery contract for the chat one, telling the agent to wrap its answers in
- * <message> blocks during a task run.
- *
- * An ABSENT variable means an older host that never set it, and only then is
- * the legacy parse consulted. Present-and-empty is a current host stating
- * "this is not a task session".
- */
+/** The task id encoded in this isolated task session's canonical thread id. */
 export function getTaskSeriesId(): string | null {
-  const fromEnv = process.env.NANOCLAW_TASK_SERIES_ID;
-  if (fromEnv !== undefined) return fromEnv || null;
-
   const threadId = getSessionRouting().thread_id;
   return threadId?.startsWith(TASK_THREAD_PREFIX) ? threadId.slice(TASK_THREAD_PREFIX.length) : null;
 }
