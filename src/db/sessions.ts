@@ -252,8 +252,8 @@ export async function deleteSession(id: string): Promise<void> {
  */
 export async function createPendingQuestion(pq: PendingQuestion): Promise<boolean> {
   const result = await getDb().run(
-    `INSERT INTO pending_questions (question_id, session_id, message_out_id, platform_id, channel_type, thread_id, title, options_json, created_at)
-       VALUES (@question_id, @session_id, @message_out_id, @platform_id, @channel_type, @thread_id, @title, @options_json, @created_at)
+    `INSERT INTO pending_questions (question_id, session_id, message_out_id, platform_id, channel_type, thread_id, title, options_json, created_at, expires_at)
+       VALUES (@question_id, @session_id, @message_out_id, @platform_id, @channel_type, @thread_id, @title, @options_json, @created_at, @expires_at)
        ON CONFLICT (question_id) DO NOTHING`,
     {
       question_id: pq.question_id,
@@ -265,6 +265,7 @@ export async function createPendingQuestion(pq: PendingQuestion): Promise<boolea
       title: pq.title,
       options_json: JSON.stringify(pq.options),
       created_at: pq.created_at,
+      expires_at: pq.expires_at ?? null,
     },
   );
   return result.changes > 0;
@@ -281,26 +282,45 @@ export async function getPendingQuestion(questionId: string): Promise<PendingQue
 }
 
 /**
- * The newest question any session of `agentGroupId` is still waiting on.
+ * The newest ESCALATED question any live session of `agentGroupId` is still
+ * waiting on — a question with no human at the other end.
  *
  * Asked by agent group rather than by session because the caller knows only
  * the group: an orchestrator names its worker by destination, and a
- * destination resolves to a group. At most one question is ever open per
- * worker anyway — `ask_user_question` blocks the whole turn, so the asking
- * session cannot reach a second call while the first is unanswered — which is
- * what makes "newest" the right and only answer rather than a heuristic.
+ * destination resolves to a group.
+ *
+ * THE LANE FILTER IS LOAD-BEARING, NOT TIDINESS. `pending_questions` holds
+ * both lanes: the escalated path writes `channel_type = 'agent'`
+ * (`recordEscalatedQuestion`) and the ordinary path writes a real channel when
+ * a card goes to a person. Without the filter, `answer_worker` reaches a row
+ * whose answer belongs to a HUMAN — it writes the `question_response`, the
+ * asking agent unblocks as though the button had been clicked, and the person
+ * who then clicks the live card finds the row gone and their click silently
+ * unclaimed. Filtering here makes the two lifecycles disjoint at the only
+ * place both can be seen.
+ *
+ * `status = 'active'` for the same reason `findSessionBoundToThread` has it: a
+ * closed session's row can still be newest, and answering into a dead session
+ * writes a response nothing will ever read.
+ *
+ * "NEWEST" IS STILL A CHOICE, and a group can hold more than one open question
+ * — a2a mints a session per peer, and each can block on its own. Within the
+ * escalated lane the wrong pick degrades safely: the answer reaches one
+ * waiting caller and the other times out into an ordinary message. Across
+ * lanes it did not, which is what the filter above fixes.
  *
  * FRESHNESS IS THE CALLER'S. This returns the row and says nothing about
  * whether the tool that wrote it is still listening; the caller compares
- * `created_at` against the bound that tool waits for. Keeping the clock out of
- * the query is what lets the bound live next to the tool it belongs to instead
- * of being duplicated in SQL.
+ * `expires_at` against now. Keeping the clock out of the query is what lets
+ * the bound stay owned by the side that actually does the waiting.
  */
 export async function getOpenQuestionForAgentGroup(agentGroupId: string): Promise<PendingQuestion | undefined> {
   const row = await getDb().get<Omit<PendingQuestion, 'options'> & { options_json: string }>(
     `SELECT pq.* FROM pending_questions pq
        JOIN sessions s ON s.id = pq.session_id
       WHERE s.agent_group_id = ?
+        AND s.status = 'active'
+        AND pq.channel_type = 'agent'
       ORDER BY pq.created_at DESC
       LIMIT 1`,
     agentGroupId,

@@ -15,11 +15,13 @@ import { renderFooter } from './message-footer.js';
 import {
   clearContinuation,
   clearCurrentInReplyTo,
-  takeLateAnswerExpected,
+  lateAnswerExpectedFor,
+  clearLateAnswerExpected,
   migrateLegacyContinuation,
   setContinuation,
   setCurrentInReplyTo,
 } from './db/session-state.js';
+import { isAgentLane } from './session-lane.js';
 import {
   formatMessages,
   extractRouting,
@@ -167,9 +169,23 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // ONE EXCEPTION: the last turn timed out waiting on an escalated question.
     // The orchestrator's answer arrives as a new batch, and wiping here would
     // hand the model a bare "use option B" with no question in front of it.
+    //
+    // The flag is not consumed by simply being read, and that is the fix to a
+    // real bug rather than caution: it used to clear on the next batch, so any
+    // unrelated message in between took the exemption and the actual answer
+    // was wiped anyway. Now only the batch CARRYING that answer clears it, and
+    // every batch until then keeps its transcript — the cheap side of the
+    // trade. The age bound in session-state.ts stops an unanswered question
+    // preserving transcripts forever.
     if (continuation && config.freshSessionPerTask) {
-      if (takeLateAnswerExpected()) {
-        log('Worker task — keeping the transcript: the last turn timed out waiting on an answer');
+      const awaitedQuestionId = lateAnswerExpectedFor();
+      if (awaitedQuestionId) {
+        if (batchCarriesAnswerTo(messages, awaitedQuestionId)) {
+          clearLateAnswerExpected();
+          log(`Worker task — keeping the transcript: this batch answers ${awaitedQuestionId}`);
+        } else {
+          log('Worker task — keeping the transcript: still waiting on an answer to a timed-out question');
+        }
       } else {
         log('Worker task — starting a fresh session rather than resuming');
         continuation = undefined;
@@ -669,7 +685,17 @@ export async function processQuery(
             // Nudging a worker to re-wrap text the lane is about to carry
             // would ask it to solve a problem it does not have.
             const lane = hasUnwrapped ? agentLaneRouting() : null;
-            if (lane && scratchpad) pendingLaneReport = { text: scratchpad, lane };
+            // SUPERSEDE, don't accumulate. Only the FINAL turn's report is
+            // wanted, and a turn that wrapped its answer properly has already
+            // delivered it — so whatever an earlier turn left held is now a
+            // stale progress note, not an outcome. Without the else it
+            // survived to the flush and arrived AFTER the real answer, reading
+            // as a second, contradictory message.
+            if (lane && scratchpad) {
+              pendingLaneReport = { text: scratchpad, lane };
+            } else {
+              pendingLaneReport = null;
+            }
             const autoDelivered = lane !== null && scratchpad !== '';
             const willRetryWrapping = hasUnwrapped && !unwrappedNudged && !autoDelivered;
             notifyExchangeComplete(onExchangeComplete, {
@@ -810,8 +836,31 @@ function agentLaneRouting(): { channelType: string; platformId: string } | null 
     log(`Session routing unavailable: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
-  if (routing.channel_type !== 'agent' || !routing.platform_id) return null;
-  return { channelType: routing.channel_type, platformId: routing.platform_id };
+  if (!isAgentLane(routing)) return null;
+  return { channelType: routing.channel_type as string, platformId: routing.platform_id as string };
+}
+
+/**
+ * Does this batch carry the answer to `questionId`?
+ *
+ * The host tags a late answer it had to degrade to an ordinary message
+ * (`answersQuestionId`, modules/agent-to-agent/answer-worker.ts), which is the
+ * only thing that distinguishes it from any other message arriving in the same
+ * window. Without the tag this was guesswork — "the next batch" — and the
+ * guess was wrong whenever anything else arrived first.
+ *
+ * A message whose content is not JSON, or carries no tag, simply is not it.
+ */
+function batchCarriesAnswerTo(messages: MessageInRow[], questionId: string): boolean {
+  return messages.some((m) => {
+    if (m.kind !== 'chat' && m.kind !== 'chat-sdk') return false;
+    try {
+      const parsed = JSON.parse(m.content) as { answersQuestionId?: unknown };
+      return parsed.answersQuestionId === questionId;
+    } catch {
+      return false;
+    }
+  });
 }
 
 /**

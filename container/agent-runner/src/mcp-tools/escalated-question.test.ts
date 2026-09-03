@@ -20,7 +20,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../mailbox/sqlite/connection.js';
-import { takeLateAnswerExpected, setCurrentInReplyTo, clearCurrentInReplyTo } from '../db/session-state.js';
+import {
+  lateAnswerExpectedFor,
+  clearLateAnswerExpected,
+  setCurrentInReplyTo,
+  clearCurrentInReplyTo,
+} from '../db/session-state.js';
 import { askUserQuestion, renderEscalatedQuestion, sendCard } from './interactive.js';
 
 function outbound(): Array<{
@@ -364,7 +369,26 @@ describe('a late answer must not land against an empty transcript', () => {
 
     await askUserQuestion.handler(ARGS);
 
-    expect(takeLateAnswerExpected()).toBe(true);
+    expect(lateAnswerExpectedFor()).toBe(outbound()[0].id);
+  });
+
+  it('names the question, so an unrelated message cannot take the exemption', async () => {
+    // THE BUG THIS REPLACED. The flag used to hold "yes" and clear on the next
+    // batch, whichever batch that was — so an orchestrator's unrelated "also
+    // bump the dep" consumed it, and the real answer then arrived to a
+    // transcript that had just been wiped. Reading it must not clear it.
+    workerLane();
+
+    await askUserQuestion.handler(ARGS);
+    const questionId = outbound()[0].id;
+
+    // Two reads standing in for two unrelated batches.
+    expect(lateAnswerExpectedFor()).toBe(questionId);
+    expect(lateAnswerExpectedFor()).toBe(questionId);
+
+    // Only the arrival of that answer ends it.
+    clearLateAnswerExpected();
+    expect(lateAnswerExpectedFor()).toBeNull();
   });
 
   it('does not ask for it when the orchestrator answered', async () => {
@@ -386,18 +410,21 @@ describe('a late answer must not land against an empty transcript', () => {
       });
     await pending;
 
-    expect(takeLateAnswerExpected()).toBe(false);
+    expect(lateAnswerExpectedFor()).toBeNull();
   });
 
-  it('protects one batch only', async () => {
+  it('stops protecting once the answer has been claimed', async () => {
     // A worker that timed out, got its answer, and later gets an unrelated
-    // task must start clean for that task.
+    // task must start clean for that task. The claim is what ends it now,
+    // rather than the mere passage of one batch.
     workerLane();
 
     await askUserQuestion.handler(ARGS);
+    expect(lateAnswerExpectedFor()).toBe(outbound()[0].id);
 
-    expect(takeLateAnswerExpected()).toBe(true);
-    expect(takeLateAnswerExpected()).toBe(false);
+    clearLateAnswerExpected();
+
+    expect(lateAnswerExpectedFor()).toBeNull();
   });
 
   it('does not ask for it on a channel lane, where no batch is wiped', async () => {
@@ -407,6 +434,6 @@ describe('a late answer must not land against an empty transcript', () => {
 
     await askUserQuestion.handler(ARGS);
 
-    expect(takeLateAnswerExpected()).toBe(false);
+    expect(lateAnswerExpectedFor()).toBeNull();
   });
 });

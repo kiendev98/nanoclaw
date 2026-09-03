@@ -724,6 +724,14 @@ export function getDeliveryAction(action: string): DeliveryActionHandler | undef
  * `options` travel with it because `pending_questions` requires both and this
  * lane has no card to read them from.
  *
+ * `expiresAt` travels for a sharper reason: the host cannot work it out. The
+ * tool's bound is caller-settable and its clock starts when it WROTE the row,
+ * which is at least one delivery poll before the `created_at` stamped here.
+ * Both gaps used to end with a `question_response` written for a tool that had
+ * stopped listening, which the poll loop drops by kind — a silently destroyed
+ * answer. Absent (an older container), the reader falls back to the historical
+ * bound; see migration 029.
+ *
  * `session` is the ASKER's, since deliverMessage is handed the session that
  * wrote the row. That is what makes the row resolvable later: `answer_worker`
  * looks up the open question by the asking agent group.
@@ -736,7 +744,7 @@ async function recordEscalatedQuestion(
   msg: { id: string; platformId: string | null; channelType: string | null; threadId: string | null },
   session: Session,
 ): Promise<void> {
-  const q = content.question as { id?: unknown; title?: unknown; options?: unknown } | undefined;
+  const q = content.question as { id?: unknown; title?: unknown; options?: unknown; expiresAt?: unknown } | undefined;
   if (!q || typeof q.id !== 'string' || typeof q.title !== 'string' || !Array.isArray(q.options)) return;
   // Guarded exactly like the channel path: without the interactive module the
   // table does not exist, and the question still reaches the orchestrator as
@@ -753,6 +761,11 @@ async function recordEscalatedQuestion(
     title: q.title,
     options: normalizeOptions(q.options as never),
     created_at: new Date().toISOString(),
+    // Validated rather than trusted: a non-string, or a string `new Date()`
+    // cannot parse, falls back to the historical bound instead of writing a
+    // deadline that reads as NaN and expires everything or nothing.
+    expires_at:
+      typeof q.expiresAt === 'string' && Number.isFinite(new Date(q.expiresAt).getTime()) ? q.expiresAt : null,
   });
   if (inserted) {
     log.info('Escalated question recorded', { questionId: q.id, sessionId: session.id });

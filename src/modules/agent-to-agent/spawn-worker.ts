@@ -143,7 +143,11 @@ async function refuseUngrantableChannels(sourceGroupId: string, channels: string
  * holds a map from its last wake, and without this its container answers
  * "unknown destination" for a channel the central DB says it holds.
  */
-async function grantChannels(sourceGroupId: string, workerGroupId: string, channels: string[]): Promise<string[]> {
+async function grantChannels(
+  sourceGroupId: string,
+  workerGroupId: string,
+  channels: string[],
+): Promise<{ added: string[]; refusal?: string }> {
   const now = new Date().toISOString();
   const added: string[] = [];
   for (const name of channels) {
@@ -151,8 +155,32 @@ async function grantChannels(sourceGroupId: string, workerGroupId: string, chann
     const source = await getDestinationByName(sourceGroupId, local);
     // Re-read rather than trusting the precheck: this runs after the worktree
     // checkout, and a destination revoked in between must not be granted.
-    if (!source || source.target_type !== 'channel') continue;
-    if (await getDestinationByName(workerGroupId, local)) continue;
+    //
+    // REFUSING, NOT SKIPPING. This used to `continue`, which reported success
+    // for a grant that did not happen — the ALL OR NOTHING contract above,
+    // broken by the code meant to honour it.
+    if (!source || source.target_type !== 'channel') {
+      return { added, refusal: `"${name}" is no longer a channel you can lend, so nothing was granted.` };
+    }
+
+    const held = await getDestinationByName(workerGroupId, local);
+    if (held) {
+      // Idempotent only when it is genuinely the same grant. The name-only
+      // check this replaces was a wrong-recipient bug waiting to happen:
+      // `provisionAgentGroup` gives every worker AGENT destinations called
+      // `parent` and `<localName>`, so lending a channel whose normalized name
+      // collided with one of those silently did nothing, and the worker's
+      // `resolveRouting` then resolved that name down the agent lane — posting
+      // to its orchestrator instead of to the channel, with no error anywhere.
+      if (held.target_type === 'channel' && held.target_id === source.target_id) continue;
+      return {
+        added,
+        refusal:
+          `"${name}" already names ${held.target_type === 'channel' ? 'a different channel' : 'an agent'} for ` +
+          `this worker, so nothing was granted. Rename the destination you are lending, or lend a different one.`,
+      };
+    }
+
     await createDestination({
       agent_group_id: workerGroupId,
       local_name: local,
@@ -163,12 +191,20 @@ async function grantChannels(sourceGroupId: string, workerGroupId: string, chann
     added.push(local);
   }
   if (added.length > 0) {
+    // Skip the CLOSED ones, rather than keeping only the active ones. The
+    // column is `TEXT DEFAULT 'active'` with no NOT NULL, so a row can carry
+    // null, and the two readings differ exactly there. Getting it wrong in the
+    // strict direction would silently skip a live session and reinstate the
+    // "unknown destination" failure this projection exists to prevent; getting
+    // it wrong in this direction costs one mailbox write against a session
+    // nobody reads. Only the second is recoverable, so bias to it.
     for (const session of await getSessionsByAgentGroup(workerGroupId)) {
+      if (session.status === 'closed') continue;
       await writeDestinations(workerGroupId, session.id);
     }
     log.info('Channel destinations lent to worker', { worker: workerGroupId, from: sourceGroupId, channels: added });
   }
-  return added;
+  return { added };
 }
 
 /**
@@ -452,7 +488,16 @@ export async function validateSpawnWorker(content: Record<string, unknown>, sess
       // the channel its task tells it to use. This is the reuse path that
       // actually fires — the branch in `spawnWorker` below only catches a
       // worker created concurrently between that lookup and this one.
-      await grantChannels(session.agent_group_id, existing.id, req.channels);
+      const lent = await grantChannels(session.agent_group_id, existing.id, req.channels);
+      if (lent.refusal) {
+        await respond(session, req, 'error', `spawn_worker failed: ${lent.refusal}`);
+        log.warn('spawn_worker could not lend a channel to a reused worker', {
+          repo: req.repo,
+          worker: existing.id,
+          refusal: lent.refusal,
+        });
+        return false;
+      }
       const delivery = await deliverBrief(session, existing.id, req.task);
       await respond(session, req, 'reused', briefedText(localName, req.repo, true, delivery));
       log.info('spawn_worker reused an existing worker', {
@@ -508,7 +553,11 @@ export async function spawnWorker(content: Record<string, unknown>, session: Ses
   const existing = await existingWorkerFor(repoPath, session.id);
   const reuseName = existing && (await reusableWorkerName(sourceGroup.id, existing));
   if (existing && reuseName) {
-    await grantChannels(sourceGroup.id, existing.id, req.channels);
+    const lent = await grantChannels(sourceGroup.id, existing.id, req.channels);
+    if (lent.refusal) {
+      await respond(session, req, 'error', `spawn_worker failed: ${lent.refusal}`);
+      return;
+    }
     const delivery = await deliverBrief(session, existing.id, req.task);
     await respond(session, req, 'reused', briefedText(reuseName, req.repo, true, delivery));
     log.info('spawn_worker reused an existing worker', {
@@ -553,7 +602,11 @@ export async function spawnWorker(content: Record<string, unknown>, session: Ses
     return;
   }
 
-  await grantChannels(sourceGroup.id, outcome.agentGroupId, req.channels);
+  const lent = await grantChannels(sourceGroup.id, outcome.agentGroupId, req.channels);
+  if (lent.refusal) {
+    await respond(session, req, 'error', `spawn_worker failed: ${lent.refusal}`);
+    return;
+  }
   const delivery = await deliverBrief(session, outcome.agentGroupId, req.task);
   await respond(session, req, 'created', briefedText(outcome.localName, req.repo, false, delivery));
   log.info('Worker created and briefed', {

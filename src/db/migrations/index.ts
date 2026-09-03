@@ -28,6 +28,7 @@ import { migration024 } from './024-host-coordination.js';
 import { migration025 } from './025-agent-group-workspace-path.js';
 import { migration026 } from './026-agent-group-origin-session.js';
 import { migration028 } from './028-session-thread-bindings.js';
+import { migration029 } from './029-pending-question-expires-at.js';
 
 interface MigrationBase {
   version: number;
@@ -97,6 +98,7 @@ export const migrations: Migration[] = [
   migration025,
   migration026,
   migration028,
+  migration029,
 ];
 
 /**

@@ -51,7 +51,7 @@ import { setMessagingGroupDeniedAt } from './db/messaging-groups.js';
 import { getUnregisteredSenders } from './db/dropped-messages.js';
 import { initChannelAdapters, registerChannelAdapter, teardownChannelAdapters } from './channels/channel-registry.js';
 import { inboundDbPath } from './mailbox/sqlite/paths.js';
-import { routeInbound } from './router.js';
+import { routeInbound, setSenderScopeGate } from './router.js';
 import type { ChannelAdapter, ChannelDefaults } from './channels/adapter.js';
 import type { MessagingGroupAgent } from './types.js';
 
@@ -237,6 +237,9 @@ beforeEach(async () => {
 afterEach(async () => {
   await teardownChannelAdapters();
   await closeDb();
+  // Module-level state, so a refusing gate would leak into the next test in
+  // this file and fail it for the wrong reason.
+  setSenderScopeGate(() => ({ allowed: true }));
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 
@@ -420,5 +423,74 @@ describe('a group the wired pass already served is skipped', () => {
     await inbound('m1', BOUND_THREAD, 'hello there');
 
     expect(inboundRows('ag-wired', WORKER_SESSION)).toHaveLength(1);
+  });
+});
+
+/**
+ * A WIRING'S REFUSAL IS FINAL, and this is where the pass stopped being
+ * additive.
+ *
+ * The bind hook in delivery.ts claims any session whose root post lands — not
+ * only a worker's. So an ordinary wired agent gets bound the first time it
+ * answers at top level, and from then on its own bound session is reachable by
+ * a pass that consults a strictly SMALLER set of gates than its wiring asked
+ * for. Every refusal that pass reversed was a policy bypass.
+ *
+ * Both cases below reach the second pass because the wired loop deliberately
+ * keeps a refusal OUT of any served set: an engaged-but-refused agent must not
+ * accumulate the message either.
+ */
+describe("a wired agent's own policy is not reopened by its binding", () => {
+  it('does not deliver an unmentioned reply to a `mention` agent', async () => {
+    // Otherwise an admin who required a literal mention every time silently
+    // gets mention-sticky, for the life of every thread the agent opens.
+    await activate();
+    await seedChat('mention');
+    await seedBoundWorker('ag-wired');
+
+    await inbound('m1', BOUND_THREAD, 'no mention here', false);
+
+    expect(inboundRows('ag-wired', WORKER_SESSION)).toHaveLength(0);
+    expect(sessionDirsFor('ag-wired')).toHaveLength(0);
+  });
+
+  it('still delivers when that same agent IS mentioned', async () => {
+    // The control. The refusal above must come from the engage policy, not
+    // from the pass having been disabled.
+    await activate();
+    await seedChat('mention');
+    await seedBoundWorker('ag-wired');
+
+    await inbound('m1', BOUND_THREAD, 'please look', true);
+
+    expect(inboundRows('ag-wired', WORKER_SESSION)).toHaveLength(1);
+  });
+
+  it('does not deliver to an agent whose sender_scope refused this sender', async () => {
+    // The scope gate is a decision about the PERSON. A thread the agent
+    // happens to have opened is not consent to hear from someone two gates
+    // just turned away.
+    setSenderScopeGate(() => ({ allowed: false, reason: 'sender out of scope' }));
+    await activate();
+    await seedChat('pattern');
+    await seedBoundWorker('ag-wired');
+
+    await inbound('m1', BOUND_THREAD, 'hello there');
+
+    expect(inboundRows('ag-wired', WORKER_SESSION)).toHaveLength(0);
+  });
+
+  it('still reaches a NOT-wired bound session while that gate refuses', async () => {
+    // The scope gate reads a `messaging_group_agents` row. A worker has none
+    // here, so there is no scope to apply and the grant still works — which is
+    // what keeps the fix a partition rather than a blanket shutdown.
+    setSenderScopeGate(() => ({ allowed: false, reason: 'sender out of scope' }));
+    await activate();
+    await seedChat('pattern');
+    await seedBoundWorker();
+
+    await inbound('m1', BOUND_THREAD, 'rework the migration');
+
+    expect(inboundRows('ag-worker', WORKER_SESSION)).toHaveLength(1);
   });
 });

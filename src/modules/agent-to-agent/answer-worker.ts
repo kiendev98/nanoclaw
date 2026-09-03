@@ -36,6 +36,7 @@
  * response with no tool waiting is discarded in silence.
  */
 import { getOpenQuestionForAgentGroup, deletePendingQuestion, getSession } from '../../db/sessions.js';
+import type { PendingQuestion } from '../../types.js';
 import { guard, GuardDenyError } from '../../guard/index.js';
 import { log } from '../../log.js';
 import { requestWake } from '../../request-wake.js';
@@ -46,18 +47,41 @@ import { callerStoppedWaiting, notifyAgent } from './blocking-request.js';
 import { a2aSend } from './guard.js';
 
 /**
- * How long a recorded question stays answerable.
+ * The bound used only for a row written before the deadline travelled.
  *
- * It mirrors `ESCALATED_TIMEOUT_S` in the container's interactive.ts, and the
- * two must move together: past the tool's own bound nothing is polling for a
- * `question_response`, so a row written then would be skipped by kind and lost.
- * Bounding the host on the same clock turns that loss into a plain message the
- * worker can still act on.
+ * IT IS NOT THE CONTRACT ANY MORE, and the reason is worth keeping. This
+ * number used to be the whole mechanism: a copy of the container's
+ * `ESCALATED_TIMEOUT_S`, applied to `created_at`, with a comment asking the
+ * two to move together. A comment cannot hold that. `ask_user_question` takes
+ * a caller-supplied `timeout`, so the pair could be broken per call with
+ * nothing wrong in either file — and even unbroken, the two clocks start at
+ * different moments, because `created_at` is stamped a delivery poll after the
+ * tool began waiting. Both gaps end the same way: the fast path writes a
+ * `question_response` for a tool that has stopped listening, and the poll loop
+ * drops it by kind.
  *
- * Derived from `created_at` rather than stored, so this needs no column and no
- * migration, and the number stays beside the reasoning instead of in a row.
+ * So the deadline now rides in the envelope and lands in `expires_at`
+ * (migration 029). This remains for rows an older container wrote, which
+ * carry no deadline and are still answerable — imprecisely, exactly as before.
  */
-const QUESTION_TTL_MS = 600_000;
+const LEGACY_QUESTION_TTL_MS = 600_000;
+
+/**
+ * Whether the tool that asked has stopped listening.
+ *
+ * Prefers the deadline the asking tool sent, because it is the only value that
+ * knows what that tool actually passed. Falls back to the old derivation for a
+ * pre-migration row rather than refusing it: those questions are real and a
+ * worker mid-upgrade would otherwise be stranded.
+ */
+function questionHasExpired(pq: PendingQuestion): boolean {
+  if (pq.expires_at) {
+    const at = new Date(pq.expires_at).getTime();
+    if (Number.isFinite(at)) return Date.now() >= at;
+  }
+  const age = Date.now() - new Date(pq.created_at).getTime();
+  return !Number.isFinite(age) || age > LEGACY_QUESTION_TTL_MS;
+}
 
 /** How the request ended, as the container tool reads it. */
 type AnswerStatus = 'answered' | 'delivered' | 'error';
@@ -139,13 +163,24 @@ export async function denyAnswerWorker(
  * outcome and the tool is told which one it got, so the orchestrator can say
  * something true to the human rather than assuming the worker resumed.
  */
-async function deliverAsMessage(session: Session, req: AnswerRequest, why: string): Promise<void> {
+async function deliverAsMessage(
+  session: Session,
+  req: AnswerRequest,
+  why: string,
+  answersQuestionId?: string,
+): Promise<void> {
   try {
     const outcome = await routeAgentMessage(
       {
         id: `answer-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         platform_id: req.worker,
-        content: JSON.stringify({ text: req.answer }),
+        // `answersQuestionId` rides along on the timed-out path only, and it
+        // survives routing because `prepareForwardedContent` returns the
+        // content string untouched when it names no files. The worker reads it
+        // to know THIS batch is the answer it stopped waiting for, which is
+        // what lets it clear its late-answer flag instead of having the flag
+        // taken by whatever unrelated message happened to arrive first.
+        content: JSON.stringify(answersQuestionId ? { text: req.answer, answersQuestionId } : { text: req.answer }),
         in_reply_to: null,
       },
       session,
@@ -171,21 +206,15 @@ async function deliverAsMessage(session: Session, req: AnswerRequest, why: strin
 export async function answerWorker(content: Record<string, unknown>, session: Session): Promise<void> {
   const req = parseRequest(content);
 
-  const pq = await getOpenQuestionForAgentGroup(req.worker);
-  if (!pq) {
-    await deliverAsMessage(session, req, 'no question is open');
-    return;
-  }
-
-  const age = Date.now() - new Date(pq.created_at).getTime();
-  if (!Number.isFinite(age) || age > QUESTION_TTL_MS) {
-    // Drop the stale row so it cannot capture a later, unrelated answer.
-    await deletePendingQuestion(pq.question_id);
-    await deliverAsMessage(session, req, 'its question timed out');
-    return;
-  }
-
-  // The same decision `routeAgentMessage` makes, with the same resource shape.
+  // AUTHORIZE BEFORE TOUCHING ANY ROW. `req.worker` is re-read from the
+  // container's payload on every entry, and the container is untrusted by
+  // design — it can name any agent group id it likes. An earlier order looked
+  // the question up and DELETED it on the expiry path before ever asking this,
+  // so a caller holding no destination for the named group could still destroy
+  // that group's pending question and only then be refused. The delete is not
+  // recoverable: the asking tool waits out its bound and the answer is gone.
+  //
+  // Same decision `routeAgentMessage` makes, with the same resource shape.
   // Consulted here only to learn whether the fast path is open; a deny or a
   // hold is handed to routeAgentMessage, which owns both outcomes.
   const decision = await guard(a2aSend, {
@@ -196,6 +225,20 @@ export async function answerWorker(content: Record<string, unknown>, session: Se
   });
   if (decision.effect !== 'allow') {
     await deliverAsMessage(session, req, `it cannot be answered directly (${decision.reason})`);
+    return;
+  }
+
+  const pq = await getOpenQuestionForAgentGroup(req.worker);
+  if (!pq) {
+    await deliverAsMessage(session, req, 'no question is open');
+    return;
+  }
+
+  if (questionHasExpired(pq)) {
+    // Drop the stale row so it cannot capture a later, unrelated answer. Safe
+    // to do here and not above: the caller is authorized for this group.
+    await deletePendingQuestion(pq.question_id);
+    await deliverAsMessage(session, req, 'its question timed out', pq.question_id);
     return;
   }
 

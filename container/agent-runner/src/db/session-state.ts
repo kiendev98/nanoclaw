@@ -161,8 +161,22 @@ export function getCurrentInReplyTo(): string | null {
  * question in front of it — the exact failure the session/thread binding
  * exists to prevent for humans, accepted for workers.
  *
- * Consumed on read, so it protects the NEXT batch only. A worker's durable
- * state is still its worktree; this preserves one transcript, not a policy.
+ * IT HOLDS THE QUESTION ID, AND IT IS NOT CONSUMED BY READING. Both of those
+ * are corrections to a version that stored only "yes" and cleared itself on
+ * the next batch, whichever batch that was. Any unrelated message in the
+ * window — an orchestrator's "also bump the dep", a second task reusing this
+ * worker — took the flag, and the real answer then arrived to a transcript
+ * that had just been wiped: a bare "use option B" with no question in front of
+ * it, the exact failure the flag exists to prevent, now reachable BY the flag.
+ *
+ * So the id is what clears it, and only the message carrying that id does.
+ * Until then the flag stays live and every batch keeps its transcript, which
+ * is the safe direction of the trade: keeping context costs tokens, losing the
+ * question costs the answer. In practice the window closes as soon as the
+ * answer lands, because the host tags a degraded late answer with the question
+ * it belongs to (`answersQuestionId`, modules/agent-to-agent/answer-worker.ts).
+ *
+ * The age bound is the backstop for the answer that never comes.
  */
 const LATE_ANSWER_KEY = 'late_answer_expected';
 
@@ -172,13 +186,16 @@ const LATE_ANSWER_KEY = 'late_answer_expected';
  */
 const LATE_ANSWER_MAX_AGE_MS = 60 * 60 * 1000;
 
-export function markLateAnswerExpected(): void {
-  setValue(LATE_ANSWER_KEY, new Date().toISOString());
+export function markLateAnswerExpected(questionId: string): void {
+  setValue(LATE_ANSWER_KEY, questionId);
 }
 
-/** True once per timed-out question, then false again. */
-export function takeLateAnswerExpected(): boolean {
-  const value = getFresh(LATE_ANSWER_KEY, LATE_ANSWER_MAX_AGE_MS);
+/** The question a late answer is still expected for, or null. Non-consuming. */
+export function lateAnswerExpectedFor(): string | null {
+  return getFresh(LATE_ANSWER_KEY, LATE_ANSWER_MAX_AGE_MS);
+}
+
+/** Called once the answer has arrived, or the wait is being abandoned. */
+export function clearLateAnswerExpected(): void {
   deleteValue(LATE_ANSWER_KEY);
-  return value !== null;
 }

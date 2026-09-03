@@ -255,6 +255,16 @@ export interface PendingQuestion {
   title: string;
   options: import('./channels/ask-question.js').NormalizedOption[];
   created_at: string;
+  /**
+   * When the tool that asked stops listening (ISO-8601 UTC), or null.
+   *
+   * Set only on the escalated lane, where the container sends its own deadline
+   * with the question — the host cannot derive it, because the tool's bound is
+   * caller-settable and its clock starts a poll earlier than `created_at`. A
+   * channel-lane card has no deadline at all: it waits for a person. See
+   * migration 029.
+   */
+  expires_at?: string | null;
 }
 
 // ── Pending approvals (central DB) ──

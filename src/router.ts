@@ -9,9 +9,17 @@
  * cannot see it. The wired pass asks `messaging_group_agents` who is wired to
  * this chat; the bound pass asks which session OPENED this thread, which is
  * how a message reaches an agent that is deliberately not wired here — a repo
- * worker granted one channel for one job. The second is strictly additive:
- * every wired agent is served first and identically, so nothing that worked
- * before this existed behaves differently now. See `deliverToBoundSession`.
+ * worker granted one channel for one job.
+ *
+ * THE TWO PASSES PARTITION THE AGENT GROUPS, they do not layer over each
+ * other. The bound pass skips every group this chat's wiring names, served or
+ * refused, so a wiring's own engage/scope/access decision is always final for
+ * the groups it covers. Anything weaker is a policy bypass rather than an
+ * addition: the bind hook in delivery.ts claims any session whose root post
+ * lands, wired or not, so an ordinary `mention` agent gets bound the first
+ * time it is mentioned — and a second pass that re-decided engagement for it
+ * would quietly turn `mention` into `mention-sticky`. See
+ * `deliverToBoundSession`.
  *
  * Two module hooks (registered by the permissions module):
  *   - `setSenderResolver` runs BEFORE agent resolution so user rows get
@@ -320,7 +328,8 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     const bound = await findBoundSessionFor(mg, event);
     if (bound) {
       const boundUserId = senderResolver ? await senderResolver(event) : null;
-      // `served` is empty on purpose: no wired agent ran, so none was served.
+      // Empty on purpose, and provably so: this branch runs only when
+      // `agentCount === 0`, so no wiring row names any group here.
       if (await deliverToBoundSession(mg, event, boundUserId, bound, new Set())) return;
     }
 
@@ -400,12 +409,17 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   let engagedCount = 0;
   let accumulatedCount = 0;
   let subscribed = false;
-  // Agent groups this chat's own wiring already handed the message to, either
-  // branch. Read by the bound-session pass below, which must not deliver a
-  // second copy to a group the loop has served — `messageIdForAgent`
-  // namespaces by agent group, so the two writes would collide on
-  // `messages_in.id` rather than merely duplicating.
-  const served = new Set<string>();
+  // EVERY agent group this chat's wiring names — not the ones the loop below
+  // ends up delivering to. The distinction is the whole point: a group that is
+  // wired here and was REFUSED (no mention, sender out of scope) has already
+  // had its answer decided by its own wiring, and the bound pass must not
+  // reopen the question. Taking the set from the wiring rather than from the
+  // loop's outcomes is what makes that true by construction.
+  //
+  // It also still covers the duplicate it replaced: a served group is wired by
+  // definition, and `messageIdForAgent` namespaces by agent group, so a second
+  // write would collide on `messages_in.id` rather than merely duplicate.
+  const wiredHere = new Set(agents.map((a) => a.agent_group_id));
 
   for (const agent of agents) {
     const agentGroup = await getAgentGroup(agent.agent_group_id);
@@ -434,7 +448,6 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     if (engages && accessOk && scopeOk) {
       await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, true);
       engagedCount++;
-      served.add(agent.agent_group_id);
 
       // Mention-sticky: ask the adapter to subscribe the thread so the
       // platform's subscribed-message path carries follow-ups without
@@ -467,7 +480,6 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       // gate is meant to prevent.
       await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, false);
       accumulatedCount++;
-      served.add(agent.agent_group_id);
     } else {
       log.debug('Message not engaged for agent (drop policy)', {
         agentGroupId: agent.agent_group_id,
@@ -488,7 +500,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   //    one job. It posts, a thread forms around its post, and a human replies
   //    in that thread expecting the thing they are replying to to hear them.
   const boundHere = await findBoundSessionFor(mg, event);
-  if (boundHere && (await deliverToBoundSession(mg, event, userId, boundHere, served))) engagedCount++;
+  if (boundHere && (await deliverToBoundSession(mg, event, userId, boundHere, wiredHere))) engagedCount++;
 
   if (engagedCount + accumulatedCount === 0) {
     await recordDroppedMessage({
@@ -559,10 +571,10 @@ async function findBoundSessionFor(mg: MessagingGroup, event: InboundEvent): Pro
  * moments: the unwired branch has to ask BEFORE it decides the channel is
  * uninteresting, and it resolves the sender only once a binding is found.
  *
- * @param served Agent groups the wired loop already delivered to, engaged or
- *   accumulated. A group in this set is skipped: it has the message, and a
- *   second write would collide on the namespaced `messages_in.id`. The unwired
- *   caller passes an empty set, because no wired agent ran there at all.
+ * @param wiredHere Every agent group this chat's wiring names. A group in
+ *   this set is skipped whatever the wired pass decided about it — see the
+ *   note on the check itself. The unwired caller passes an empty set, and it
+ *   is empty by construction there rather than by choice.
  * @returns Whether a delivery happened, so the caller neither records the
  *   message as dropped nor escalates the channel for registration.
  */
@@ -571,9 +583,28 @@ async function deliverToBoundSession(
   event: InboundEvent,
   userId: string | null,
   bound: Session,
-  served: Set<string>,
+  wiredHere: Set<string>,
 ): Promise<boolean> {
-  if (served.has(bound.agent_group_id)) return false;
+  // A WIRING'S DECISION IS FINAL, including its refusals. If this group is
+  // wired to this chat, the pass above already ran the full stack for it —
+  // engage_mode, the access gate, sender_scope — and either delivered or
+  // deliberately did not. Re-deciding here would consult a strictly smaller
+  // set of gates than the wiring asked for, so every refusal it reversed would
+  // be a bypass rather than a delivery:
+  //
+  //   - `engage_mode: 'mention'` with `drop`: the loop refuses an unmentioned
+  //     reply, and an admin who required a literal mention every time would
+  //     silently get mention-sticky for the life of the thread.
+  //   - `sender_scope` denying an unknown sender: the loop refuses, and the
+  //     refusal is deliberately kept OUT of any served set so accumulate
+  //     cannot store the message either. Delivering here would hand that
+  //     sender the reach two gates just denied.
+  //
+  // Both are reachable because the bind hook claims ANY session whose root
+  // post lands (delivery.ts), not only a worker's. So this check is what keeps
+  // the pass additive; without it the pass is a hole that widens with every
+  // thread an ordinary wired agent opens.
+  if (wiredHere.has(bound.agent_group_id)) return false;
 
   const agentGroup = await getAgentGroup(bound.agent_group_id);
   if (!agentGroup) return false;
@@ -581,8 +612,12 @@ async function deliverToBoundSession(
   // A binding grants reach into one thread. It does not grant an untrusted
   // sender past the access gate, which is a decision about the PERSON rather
   // than about the conversation — so it is asked here exactly as the wired
-  // loop asks it. `sender_scope` and `engage_mode` are not consulted, because
-  // both are columns on a wiring row that does not exist for this session.
+  // loop asks it.
+  //
+  // `sender_scope` and `engage_mode` are genuinely absent rather than skipped:
+  // both are columns on a `messaging_group_agents` row, and the check above
+  // guarantees this group has none for this chat. There is no policy here to
+  // consult, which is exactly why there must be no wired group here either.
   if (accessGate && !(await accessGate(event, userId, mg, bound.agent_group_id)).allowed) return false;
 
   // The reply address the session will answer on. `replyTo` is operator intent

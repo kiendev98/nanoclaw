@@ -13,6 +13,7 @@ import { findByName, getAllDestinations } from '../destinations.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
 import { getCurrentInReplyTo } from '../db/session-state.js';
 import { getSessionRouting } from '../db/session-routing.js';
+import { sessionOwnsAChannel } from '../session-lane.js';
 import { getAgentMailbox } from '../mailbox/index.js';
 import { AGENT_DIR, OUTBOX_DIR } from '../roots.js';
 import { registerTools } from './server.js';
@@ -38,19 +39,6 @@ function destinationList(): string {
   const all = getAllDestinations();
   if (all.length === 0) return '(none)';
   return all.map((d) => d.name).join(', ');
-}
-
-/**
- * Does this session have a channel of its own, or only an agent lane?
- *
- * `writeSessionRouting` (src/session-manager.ts) is the single discriminator:
- * a session belonging to a chat routes to that channel and thread, and a
- * session belonging to none routes down the agent lane as
- * `channel_type: 'agent'`. So this is not a test for "am I a worker" — it is
- * the test for "is any of this conversation mine to thread into".
- */
-function sessionOwnsAChannel(routing: { channel_type: string | null }): boolean {
-  return routing.channel_type !== null && routing.channel_type !== 'agent';
 }
 
 /**

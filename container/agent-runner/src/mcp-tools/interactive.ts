@@ -41,6 +41,7 @@ import { writeMessageOut } from '../db/messages-out.js';
 import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
 import { getSessionRouting } from '../db/session-routing.js';
 import { markLateAnswerExpected, getCurrentInReplyTo } from '../db/session-state.js';
+import { isAgentLane } from '../session-lane.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -220,6 +221,16 @@ async function askOrchestrator(
   r: Routing,
   timeout: number,
 ): Promise<ToolResult> {
+  // Computed BEFORE the write, so the instant the host stores is a little
+  // EARLIER than the one this tool truly waits until (`awaitAnswer` starts its
+  // clock after the write returns). That direction is deliberate. Expiring
+  // early degrades a late answer to an ordinary message while the tool is
+  // still listening — it arrives, as prose. Expiring late writes a
+  // `question_response` nothing is polling for, which the poll loop drops by
+  // kind: the answer is destroyed in silence. Given a choice of which way to
+  // be wrong, be wrong in the direction that still delivers.
+  const expiresAt = new Date(Date.now() + timeout).toISOString();
+
   await writeMessageOut({
     id: questionId,
     // Address the orchestrator SESSION that briefed this worker, not whichever
@@ -239,8 +250,10 @@ async function askOrchestrator(
       text: renderEscalatedQuestion(title, question, options),
       // Rides ALONGSIDE the prose, never instead of it. `title` and `options`
       // travel because `pending_questions` requires both, and the host has no
-      // other source for them on this lane.
-      question: { id: questionId, title, options },
+      // other source for them on this lane. `expiresAt` travels because the
+      // host cannot DERIVE it: `timeout` is caller-settable, so a copied
+      // constant on that side is wrong the moment anyone passes one.
+      question: { id: questionId, title, options, expiresAt },
     }),
   });
 
@@ -257,11 +270,11 @@ async function askOrchestrator(
   // leaving the model a bare "use option B" with no question in front of it.
   // Ask the next batch to keep it.
   //
-  // The host expires its pending row on the same bound, so a late
-  // `answer_worker` finds no open question and degrades to an ordinary
+  // The host expires its pending row on the deadline THIS call sent it, so a
+  // late `answer_worker` finds no open question and degrades to an ordinary
   // message. That degrade is deliberate: a `question_response` written with no
   // tool waiting would be skipped by kind and lost in silence.
-  markLateAnswerExpected();
+  markLateAnswerExpected(questionId);
   log(`ask_user_question (escalated) timeout: ${questionId}`);
   return err(
     `Your orchestrator did not answer within ${timeout / 1000}s. Do not ask again, a second question would ` +
@@ -323,8 +336,13 @@ export const askUserQuestion: McpToolDefinition = {
 
     const questionId = generateId();
     const r = routing();
-    const escalated = r.channel_type === 'agent' && Boolean(r.platform_id);
-    const timeout = ((args.timeout as number) || (escalated ? ESCALATED_TIMEOUT_S : CHANNEL_TIMEOUT_S)) * 1000;
+    const escalated = isAgentLane(r);
+    // `??`, not `||`: `timeout: 0` means "do not wait", and `0 || 600` turned
+    // that into a ten-minute block. Non-numbers and negatives fall back rather
+    // than producing a NaN deadline that never expires.
+    const requested =
+      typeof args.timeout === 'number' && Number.isFinite(args.timeout) && args.timeout >= 0 ? args.timeout : null;
+    const timeout = (requested ?? (escalated ? ESCALATED_TIMEOUT_S : CHANNEL_TIMEOUT_S)) * 1000;
 
     return escalated
       ? askOrchestrator(questionId, title, question, options, r, timeout)
@@ -359,7 +377,7 @@ export const sendCard: McpToolDefinition = {
     // rendered as `content.text`, which a card does not have, so it arrived as
     // an empty message. `fallbackText` is exactly what this case is for — and
     // when the caller supplied none, say so rather than send nothing at all.
-    const escalated = r.channel_type === 'agent' && Boolean(r.platform_id);
+    const escalated = isAgentLane(r);
     const text = fallbackText || 'A card was sent with no text fallback, so its contents cannot be shown here.';
 
     await writeMessageOut({
