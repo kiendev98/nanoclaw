@@ -17,7 +17,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../mailbox/sqlite/connection.js';
-import { setQuestionAnswer, getOpenQuestion } from '../db/session-state.js';
+import { setQuestionAnswer, getOpenQuestion, setCurrentInReplyTo, clearCurrentInReplyTo } from '../db/session-state.js';
 import { askUserQuestion, renderEscalatedQuestion, sendCard } from './interactive.js';
 
 function outbound(): Array<{ id: string; kind: string; channel_type: string | null; content: Record<string, unknown> }> {
@@ -26,6 +26,14 @@ function outbound(): Array<{ id: string; kind: string; channel_type: string | nu
       .prepare('SELECT id, kind, channel_type, content FROM messages_out ORDER BY seq')
       .all() as Array<{ id: string; kind: string; channel_type: string | null; content: string }>
   ).map((r) => ({ id: r.id, kind: r.kind, channel_type: r.channel_type, content: JSON.parse(r.content) }));
+}
+
+/** Read back the address on one outbound row — `outbound()` does not carry it. */
+function inReplyToOf(id: string): string | null {
+  const row = getOutboundDb().prepare('SELECT in_reply_to FROM messages_out WHERE id = ?').get(id) as
+    | { in_reply_to: string | null }
+    | undefined;
+  return row?.in_reply_to ?? null;
 }
 
 function seedSessionRouting(channelType: string | null, platformId: string | null, threadId: string | null): void {
@@ -239,5 +247,33 @@ describe('send_card on a lane with no renderer', () => {
     expect(msg.kind).toBe('chat-sdk');
     expect(msg.content.type).toBe('card');
     expect(msg.content.card).toEqual({ title: 'Build' });
+  });
+});
+
+describe('the question is addressed to the session that briefed this worker', () => {
+  it('stamps in_reply_to, so peer affinity does not pick the wrong session', async () => {
+    // `resolveTargetSession` falls back to "whichever of the orchestrator's
+    // sessions last spoke to this worker" when nothing is addressed.
+    // Destinations are group-scoped, so a scheduled task or a second thread
+    // can be that session — and it may hold a thread binding of its own, which
+    // would surface the question inside an unrelated human thread.
+    workerLane();
+    setCurrentInReplyTo('msg-the-brief');
+
+    await askUserQuestion.handler(ARGS);
+
+    expect(inReplyToOf(outbound()[0].id)).toBe('msg-the-brief');
+  });
+
+  it('sends unaddressed rather than not at all when there is no stamp', async () => {
+    // A question escalated outside a batch — the stamp aged out, or the tool
+    // ran from a wake with nothing to reply to. Peer affinity is then the only
+    // route there is, and it is usually right. Refusing to ask would be worse.
+    workerLane();
+    clearCurrentInReplyTo();
+
+    await askUserQuestion.handler(ARGS);
+
+    expect(inReplyToOf(outbound()[0].id)).toBeNull();
   });
 });

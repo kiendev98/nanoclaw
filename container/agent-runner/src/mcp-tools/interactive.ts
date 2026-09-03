@@ -40,7 +40,7 @@
 import { writeMessageOut } from '../db/messages-out.js';
 import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
 import { getSessionRouting } from '../db/session-routing.js';
-import { setOpenQuestion, clearOpenQuestion, takeQuestionAnswer } from '../db/session-state.js';
+import { setOpenQuestion, clearOpenQuestion, takeQuestionAnswer, getCurrentInReplyTo } from '../db/session-state.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -190,6 +190,14 @@ async function askOrchestrator(
 ): Promise<ToolResult> {
   await writeMessageOut({
     id: questionId,
+    // Address the orchestrator SESSION that briefed this worker, not whichever
+    // of its sessions spoke to the group most recently. `resolveTargetSession`
+    // falls back to peer affinity without this, and destinations are
+    // group-scoped — so a scheduled task or a second thread that messaged this
+    // worker since the brief would take the question instead. That wrong
+    // session may itself hold a thread binding, which would then surface the
+    // question inside an unrelated human thread.
+    in_reply_to: getCurrentInReplyTo(),
     // `chat`, not `chat-sdk`: on this lane it IS prose. Claiming a card no
     // renderer here can honour is what made the old failure invisible.
     kind: 'chat',
