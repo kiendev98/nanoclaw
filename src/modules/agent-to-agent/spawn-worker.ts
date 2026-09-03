@@ -47,7 +47,7 @@ import { writeSessionMessage } from '../../session-manager.js';
 import type { AgentGroup, Session } from '../../types.js';
 import { createWorktree, resolveRepo } from '../../worktree.js';
 import { routeAgentMessage } from './agent-route.js';
-import { callerStoppedWaiting, notifyAgent } from './blocking-request.js';
+import { respondToBlockingTool } from './blocking-request.js';
 import {
   createDestination,
   getDestinationByName,
@@ -208,33 +208,21 @@ async function grantChannels(
 }
 
 /**
- * Answer the blocking tool, and wake the requester when the tool has already
- * given up.
- *
- * The response row is `kind: 'system'` and non-triggering, exactly like
- * `canvas_read`'s: the tool polls for it by `requestId`, and the poll loop
- * filters system rows out of agent prompts, so it can never read as an
- * unanswered wake.
+ * Answer the blocking tool. The envelope is shared (blocking-request.ts); what
+ * is local here is the `type` and the `result`, which are this tool's contract.
  */
 async function respond(session: Session, req: WorkerRequest, status: WorkerStatus, message: string): Promise<void> {
-  if (req.requestId) {
-    await writeSessionMessage(session.agent_group_id, session.id, {
+  await respondToBlockingTool(
+    session,
+    req,
+    {
       id: `worker-resp-${req.requestId}`,
-      kind: 'system',
-      timestamp: new Date().toISOString(),
-      platformId: null,
-      channelType: null,
-      threadId: null,
-      content: JSON.stringify({
-        type: 'spawn_worker_response',
-        requestId: req.requestId,
-        status,
-        result: status === 'error' ? { error: message } : { name: req.name, repo: req.repo, message },
-      }),
-      trigger: false,
-    });
-  }
-  if (callerStoppedWaiting(req.waitUntil)) await notifyAgent(session, message);
+      type: 'spawn_worker_response',
+      status,
+      result: status === 'error' ? { error: message } : { name: req.name, repo: req.repo, message },
+    },
+    message,
+  );
 }
 
 /**

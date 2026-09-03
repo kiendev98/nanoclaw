@@ -35,7 +35,8 @@
  * `question_response` on spec: the poll loop skips system rows by kind, so a
  * response with no tool waiting is discarded in silence.
  */
-import { getOpenQuestionForAgentGroup, deletePendingQuestion, getSession } from '../../db/sessions.js';
+import { getOpenQuestionForAgentGroup, deletePendingQuestion } from '../../db/sessions.js';
+import { answerPendingQuestion } from '../interactive/answer.js';
 import type { PendingQuestion } from '../../types.js';
 import { guard, GuardDenyError } from '../../guard/index.js';
 import { log } from '../../log.js';
@@ -43,7 +44,7 @@ import { requestWake } from '../../request-wake.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import { routeAgentMessage } from './agent-route.js';
-import { callerStoppedWaiting, notifyAgent } from './blocking-request.js';
+import { respondToBlockingTool } from './blocking-request.js';
 import { a2aSend } from './guard.js';
 
 /**
@@ -107,30 +108,21 @@ function parseRequest(content: Record<string, unknown>): AnswerRequest {
 }
 
 /**
- * Answer the blocking tool, and wake the requester when it has already given
- * up. Same contract as `spawn_worker`'s response: `kind: 'system'` and
- * non-triggering, found by `requestId`, skipped by the poll loop's kind
- * filter so it can never read as an unanswered wake.
+ * Answer the blocking tool. The envelope is shared (blocking-request.ts); what
+ * is local here is the `type` and the `result`, which are this tool's contract.
  */
 async function respond(session: Session, req: AnswerRequest, status: AnswerStatus, message: string): Promise<void> {
-  if (req.requestId) {
-    await writeSessionMessage(session.agent_group_id, session.id, {
+  await respondToBlockingTool(
+    session,
+    req,
+    {
       id: `answer-resp-${req.requestId}`,
-      kind: 'system',
-      timestamp: new Date().toISOString(),
-      platformId: null,
-      channelType: null,
-      threadId: null,
-      content: JSON.stringify({
-        type: 'answer_worker_response',
-        requestId: req.requestId,
-        status,
-        result: status === 'error' ? { error: message } : { message },
-      }),
-      trigger: false,
-    });
-  }
-  if (callerStoppedWaiting(req.waitUntil)) await notifyAgent(session, message);
+      type: 'answer_worker_response',
+      status,
+      result: status === 'error' ? { error: message } : { message },
+    },
+    message,
+  );
 }
 
 /** Malformed payloads are answered without ever reaching the guard. */
@@ -242,41 +234,21 @@ export async function answerWorker(content: Record<string, unknown>, session: Se
     return;
   }
 
-  const target = await getSession(pq.session_id);
+  // The SAME writer a button click uses, not a copy of it. That identity is
+  // the seam: the blocked tool polls for one row shape and must not be able to
+  // tell which lane produced it. Two copies agreeing today is not the same
+  // property as one writer.
+  const target = await answerPendingQuestion(pq, req.answer, '');
   if (!target) {
-    await deletePendingQuestion(pq.question_id);
     await deliverAsMessage(session, req, 'the session that asked it is gone');
     return;
   }
-
-  // Byte-identical to what a button click produces (modules/interactive), so
-  // the waiting tool needs no second shape to recognise.
-  await writeSessionMessage(target.agent_group_id, target.id, {
-    id: `qr-${pq.question_id}-${Date.now()}`,
-    kind: 'system',
-    timestamp: new Date().toISOString(),
-    platformId: pq.platform_id,
-    channelType: pq.channel_type,
-    threadId: pq.thread_id,
-    content: JSON.stringify({
-      type: 'question_response',
-      questionId: pq.question_id,
-      selectedOption: req.answer,
-      userId: '',
-    }),
-  });
-  await deletePendingQuestion(pq.question_id);
 
   log.info('Worker question answered', {
     questionId: pq.question_id,
     from: session.agent_group_id,
     to: req.worker,
   });
-
-  // The worker is normally mid-poll and already awake. The wake is for the
-  // case it is not: a container reaped between the question and the answer
-  // still finds the response row on its first poll.
-  await requestWake(target, 'interactive');
 
   await respond(session, req, 'answered', `"${req.workerName}" was waiting on a question and is now unblocked.`);
 }

@@ -88,6 +88,35 @@ function err(text: string) {
   return { content: [{ type: 'text' as const, text: `Error: ${text}` }], isError: true };
 }
 
+/**
+ * Poll this session's inbound for the host's answer to one blocking request.
+ *
+ * BOTH BLOCKING TOOLS SHARE THIS, and they did not: the loop was written twice
+ * and had already drifted. `spawn_worker` clamped its sleep to the remaining
+ * wait and `answer_worker` did not, so the latter's last sleep overshot its own
+ * deadline by up to a poll interval — small, but it is the shape of the whole
+ * problem, since nothing made the second copy inherit a fix to the first.
+ *
+ * What stays with each caller is what differs: how to render the response, and
+ * what to say on timeout. Those are the tool's contract with the model.
+ *
+ * @returns The parsed response row, or null when the wait ran out. The row is
+ *   marked completed on the way past, so it cannot be read a second time.
+ */
+async function awaitBlockingResponse<T>(requestId: string, waitUntil: number): Promise<T | null> {
+  while (Date.now() < waitUntil) {
+    const response = findCliResponse(requestId);
+    if (response) {
+      markCompleted([response.id]);
+      return JSON.parse(response.content) as T;
+    }
+    // Never sleep past the deadline: the remaining wait is the real bound and
+    // a fixed interval walks over it on the last iteration.
+    await sleep(Math.min(POLL_INTERVAL_MS, Math.max(0, waitUntil - Date.now())));
+  }
+  return null;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -188,28 +217,22 @@ export const spawnWorker: McpToolDefinition = {
 
     log(`spawn_worker: ${requestId} → "${name}" in "${repo}"`);
 
-    const deadline = waitUntil;
-    while (Date.now() < deadline) {
-      const response = findCliResponse(requestId);
-      if (response) {
-        markCompleted([response.id]);
-        const parsed = JSON.parse(response.content) as WorkerResponse;
-        log(`spawn_worker response: ${requestId} → ${parsed.status}`);
-        if (parsed.status === 'error') {
-          // Say plainly that this is retryable. A refusal names what WOULD
-          // have worked (`resolveRepo` lists the resolvable repositories), so
-          // the useful next move is another call with a corrected argument —
-          // not an apology to the human, and not a silent abandonment of the
-          // delegation, which is what a bare error message tends to produce.
-          return err(
-            `${parsed.result?.error || `Could not create a worker for "${repo}".`} ` +
-              `Nothing was created, so this is safe to retry: correct the argument the message names and ` +
-              `call spawn_worker again. Ask the human only if the message gives you nothing to correct.`,
-          );
-        }
-        return ok(parsed.result?.message || `Worker "${name}" is ready in "${repo}".`);
+    const parsed = await awaitBlockingResponse<WorkerResponse>(requestId, waitUntil);
+    if (parsed) {
+      log(`spawn_worker response: ${requestId} → ${parsed.status}`);
+      if (parsed.status === 'error') {
+        // Say plainly that this is retryable. A refusal names what WOULD
+        // have worked (`resolveRepo` lists the resolvable repositories), so
+        // the useful next move is another call with a corrected argument —
+        // not an apology to the human, and not a silent abandonment of the
+        // delegation, which is what a bare error message tends to produce.
+        return err(
+          `${parsed.result?.error || `Could not create a worker for "${repo}".`} ` +
+            `Nothing was created, so this is safe to retry: correct the argument the message names and ` +
+            `call spawn_worker again. Ask the human only if the message gives you nothing to correct.`,
+        );
       }
-      await sleep(Math.min(POLL_INTERVAL_MS, bound));
+      return ok(parsed.result?.message || `Worker "${name}" is ready in "${repo}".`);
     }
 
     log(`spawn_worker timeout: ${requestId}`);
@@ -295,18 +318,13 @@ export const answerWorker: McpToolDefinition = {
 
     log(`answer_worker: ${requestId} -> "${worker}"`);
 
-    while (Date.now() < waitUntil) {
-      const response = findCliResponse(requestId);
-      if (response) {
-        markCompleted([response.id]);
-        const parsed = JSON.parse(response.content) as AnswerResponse;
-        log(`answer_worker response: ${requestId} -> ${parsed.status}`);
-        if (parsed.status === 'error') {
-          return err(parsed.result?.error || `Could not answer "${worker}".`);
-        }
-        return ok(parsed.result?.message || `Answer delivered to "${worker}".`);
+    const parsed = await awaitBlockingResponse<AnswerResponse>(requestId, waitUntil);
+    if (parsed) {
+      log(`answer_worker response: ${requestId} -> ${parsed.status}`);
+      if (parsed.status === 'error') {
+        return err(parsed.result?.error || `Could not answer "${worker}".`);
       }
-      await sleep(POLL_INTERVAL_MS);
+      return ok(parsed.result?.message || `Answer delivered to "${worker}".`);
     }
 
     log(`answer_worker timeout: ${requestId}`);

@@ -11,11 +11,10 @@
  * modularizing it adds more registry surface than it saves.
  */
 import { getDb, hasTable } from '../../db/connection.js';
-import { deletePendingQuestion, getPendingQuestion, getSession } from '../../db/sessions.js';
-import { requestWake } from '../../request-wake.js';
+import { getPendingQuestion } from '../../db/sessions.js';
 import { registerResponseHandler, type ResponsePayload } from '../../response-registry.js';
 import { log } from '../../log.js';
-import { writeSessionMessage } from '../../session-manager.js';
+import { answerPendingQuestion } from './answer.js';
 
 async function handleInteractiveResponse(payload: ResponsePayload): Promise<boolean> {
   if (!(await hasTable(getDb(), 'pending_questions'))) return false;
@@ -23,36 +22,16 @@ async function handleInteractiveResponse(payload: ResponsePayload): Promise<bool
   const pq = await getPendingQuestion(payload.questionId);
   if (!pq) return false;
 
-  const session = await getSession(pq.session_id);
-  if (!session) {
-    log.warn('Session not found for pending question', { questionId: payload.questionId, sessionId: pq.session_id });
-    await deletePendingQuestion(payload.questionId);
-    return true; // claimed — we owned this questionId even though the session is gone
-  }
+  const session = await answerPendingQuestion(pq, payload.value, payload.userId ?? '');
+  // Claimed either way: this questionId was ours, and a vanished session does
+  // not hand it back to another handler.
+  if (!session) return true;
 
-  await writeSessionMessage(session.agent_group_id, session.id, {
-    id: `qr-${payload.questionId}-${Date.now()}`,
-    kind: 'system',
-    timestamp: new Date().toISOString(),
-    platformId: pq.platform_id,
-    channelType: pq.channel_type,
-    threadId: pq.thread_id,
-    content: JSON.stringify({
-      type: 'question_response',
-      questionId: payload.questionId,
-      selectedOption: payload.value,
-      userId: payload.userId ?? '',
-    }),
-  });
-
-  await deletePendingQuestion(payload.questionId);
   log.info('Question response routed', {
     questionId: payload.questionId,
     selectedOption: payload.value,
     sessionId: session.id,
   });
-
-  await requestWake(session, 'interactive');
   return true;
 }
 
