@@ -145,19 +145,6 @@ async function reconcileActiveSession(session: Session): Promise<void> {
 
     if (!shouldWake) return;
 
-    // Repair a pruned/deleted worktree before handing this session a
-    // container — the same lazy hop handleRecurrence already uses, so this
-    // stays a dynamic import rather than a new static core→module dependency.
-    const { prepareDueWorkspace } = await import('./modules/scheduling/recurrence.js');
-    const prepared = await prepareDueWorkspace(session);
-    if (!prepared.ok) {
-      log.error('Cannot repair task workspace — skipping this wake', {
-        sessionId: session.id,
-        error: prepared.error,
-      });
-      return;
-    }
-
     // Waking refreshes routing through the mailbox. Keep it outside the
     // session transaction so serialized implementations do not re-enter
     // themselves while the sweep still owns the session.

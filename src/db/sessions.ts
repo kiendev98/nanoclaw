@@ -7,19 +7,9 @@ export const TASKS_SYSTEM_THREAD_ID = 'system:tasks';
 
 export async function createSession(session: Session): Promise<void> {
   await getDb().run(
-    `INSERT INTO sessions (id, agent_group_id, messaging_group_id, thread_id, agent_provider, status, container_status, last_active, created_at,
-                           workspace_path, bound_messaging_group_id, bound_root_message_id, pending_run_request)
-       VALUES (@id, @agent_group_id, @messaging_group_id, @thread_id, @agent_provider, @status, @container_status, @last_active, @created_at,
-               @workspace_path, @bound_messaging_group_id, @bound_root_message_id, @pending_run_request)`,
-    // Defaulted rather than required: every existing caller builds a Session
-    // literal, and required fields would make each one carry four nulls.
-    {
-      workspace_path: null,
-      bound_messaging_group_id: null,
-      bound_root_message_id: null,
-      pending_run_request: null,
-      ...session,
-    },
+    `INSERT INTO sessions (id, agent_group_id, messaging_group_id, thread_id, agent_provider, status, container_status, last_active, created_at)
+       VALUES (@id, @agent_group_id, @messaging_group_id, @thread_id, @agent_provider, @status, @container_status, @last_active, @created_at)`,
+    session,
   );
 }
 
@@ -100,64 +90,6 @@ export async function findSystemSession(agentGroupId: string, threadId: string):
   );
 }
 
-/**
- * The adapter's own message id, recovered from a composed thread id.
- *
- * A Slack thread id is `slack:<channel>:<ts>` — the platform id with the root
- * message's timestamp appended — while the id the adapter hands back at
- * delivery is the bare `<ts>`. Measured on a live install: a delivered id of
- * `1788370933.675069` against a thread id of
- * `slack:C0BU6RSGAGK:1788370925.613579`.
- *
- * PARSE, NEVER COMPOSE. Rebuilding `<platform_id>:<ts>` to compare would
- * reconstruct a format the Chat SDK owns and may change, and the failure of a
- * wrong guess is silent: the binding simply never matches and the thread mints
- * a fresh session, which is the bug this exists to prevent. Taking the last
- * segment relies only on the id being last, which is what makes it an id.
- */
-export function threadRootMessageId(threadId: string): string {
-  return threadId.slice(threadId.lastIndexOf(':') + 1);
-}
-
-/**
- * The inverse, used on the REPLY path only.
- *
- * Composing is avoidable when matching an inbound thread and unavoidable when
- * addressing an outbound one: the routing row has to name a thread the adapter
- * will accept. It is confined to this one caller because the two directions
- * fail differently. A wrong guess here posts at top level, which a human sees
- * immediately; a wrong guess on the matching side silently mints a second
- * session, which is the bug the binding exists to prevent.
- *
- * The shape is the same one `normalizeDmThreadId` completes for DM threads.
- */
-export function composeThreadId(platformId: string, rootMessageId: string): string {
-  return `${platformId}:${rootMessageId}`;
-}
-
-/**
- * The session that opened this thread, if one claimed it.
- *
- * Filtered on `status = 'active'`, which is what makes the binding expire by
- * itself: a closed task session stops matching, so its thread falls back to
- * ordinary routing with no cleanup job.
- */
-export async function findSessionBoundToThread(
-  messagingGroupId: string,
-  rootMessageId: string,
-): Promise<Session | undefined> {
-  return getDb().get<Session>(
-    `SELECT * FROM sessions
-       WHERE bound_messaging_group_id = ?
-         AND bound_root_message_id = ?
-         AND status = 'active'
-       ORDER BY created_at DESC
-       LIMIT 1`,
-    messagingGroupId,
-    rootMessageId,
-  );
-}
-
 /** Per-task session thread id for a scheduled task series. */
 export function taskThreadId(seriesId: string): string {
   return `${TASKS_SYSTEM_THREAD_ID}:${seriesId}`;
@@ -193,19 +125,7 @@ export async function getRunningSessions(): Promise<Session[]> {
 
 export async function updateSession(
   id: string,
-  updates: Partial<
-    Pick<
-      Session,
-      | 'status'
-      | 'container_status'
-      | 'last_active'
-      | 'agent_provider'
-      | 'workspace_path'
-      | 'bound_messaging_group_id'
-      | 'bound_root_message_id'
-      | 'pending_run_request'
-    >
-  >,
+  updates: Partial<Pick<Session, 'status' | 'container_status' | 'last_active' | 'agent_provider'>>,
 ): Promise<void> {
   const fields: string[] = [];
   const values: Record<string, unknown> = { id };

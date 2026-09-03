@@ -1,14 +1,17 @@
 /**
- * A session with no channel of its own gets no auto-delivery lane: an
- * unwrapped turn is always nudged, never silently delivered.
+ * A repo worker's reply is delivered BY CODE, not by the worker remembering
+ * to address a destination.
  *
- * This used to have an exception. A repo-worker session — the delivery
- * action that minted a separate agent group per (repo, thread) pair, since
- * removed — had the host write its session routing as an agent-to-agent lane
- * to its orchestrator, and an unwrapped turn went down that lane instead of
- * being nudged. That mechanism is gone along with the worker feature — every
- * session now keeps the nudge, where "which destination?" is a real question
- * the model has to answer.
+ * A worker has no channel of its own, so the host writes its session routing
+ * as the agent-to-agent lane to its orchestrator (see
+ * `src/session-manager.ts::writeSessionRouting`). This is the container half:
+ * a turn that ends in unwrapped text goes down that lane instead of being
+ * nudged, and everything WITH a channel keeps the nudge, where "which
+ * destination?" is a real question the model has to answer.
+ *
+ * The failure this closes is silent by construction. Unwrapped text in a
+ * channel-less session was scratchpad: nothing delivered, one nudge, and if
+ * the model did not re-wrap, the answer was gone with no error anywhere.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
@@ -18,6 +21,15 @@ import { categorizeMessage, type RoutingContext } from './formatter.js';
 import { processQuery } from './poll-loop.js';
 import type { AgentQuery, ProviderEvent } from './providers/types.js';
 import type { MessageInRow } from './db/messages-in.js';
+
+/** The routing a brief from the orchestrator arrives on. */
+const BRIEF_ROUTING: RoutingContext = {
+  platformId: 'ag-orch',
+  channelType: 'agent',
+  threadId: null,
+  inReplyTo: 'a2a-1',
+  taskRun: false,
+};
 
 const CHANNEL_ROUTING: RoutingContext = {
   platformId: 'chan-1',
@@ -77,6 +89,74 @@ afterEach(() => {
   closeSessionDb();
 });
 
+describe("a worker's plain output reaches its orchestrator", () => {
+  it('delivers unwrapped final text down the agent lane, with no send_message call', async () => {
+    seedSessionRouting('agent', 'ag-orch');
+    const { query, pushes } = makeStubQuery(bareTurn('The gates pass. Three files changed.'));
+
+    await processQuery(query, BRIEF_ROUTING, ['a2a-1'], 'claude', undefined, 'prompt', undefined, true);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].channel_type).toBe('agent');
+    expect(out[0].platform_id).toBe('ag-orch');
+    expect(JSON.parse(out[0].content).text).toBe('The gates pass. Three files changed.');
+    // Delivered, so there is nothing to nudge about.
+    expect(pushes).toHaveLength(0);
+  });
+
+  it('addresses the lane from the SESSION routing, not from whoever last wrote to it', async () => {
+    // The host fixes the lane at creation from `origin_session_id`. An inbound
+    // batch from anyone else must not redirect the worker's answer.
+    seedSessionRouting('agent', 'ag-orch');
+    const { query } = makeStubQuery(bareTurn('done'));
+
+    await processQuery(
+      query,
+      { ...BRIEF_ROUTING, platformId: 'ag-someone-else' },
+      ['a2a-1'],
+      'claude',
+      undefined,
+      'prompt',
+      undefined,
+      true,
+    );
+
+    expect(getUndeliveredMessages()[0].platform_id).toBe('ag-orch');
+  });
+
+  it('stamps in_reply_to so the answer lands in the session that asked', async () => {
+    seedSessionRouting('agent', 'ag-orch');
+    const { query } = makeStubQuery(bareTurn('done'));
+
+    await processQuery(query, BRIEF_ROUTING, ['a2a-1'], 'claude', undefined, 'prompt', undefined, true);
+
+    expect(getUndeliveredMessages()[0].in_reply_to).toBe('a2a-1');
+  });
+
+  it('leaves an addressed reply alone — one delivery, not two', async () => {
+    seedSessionRouting('agent', 'ag-orch');
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES ('parent', 'parent', 'agent', NULL, NULL, 'ag-orch')`,
+      )
+      .run();
+    const events = (async function* () {
+      yield { type: 'init', continuation: 's1' } as ProviderEvent;
+      yield { type: 'text', text: '<message to="parent">Explicitly addressed.</message>' } as ProviderEvent;
+      yield { type: 'result', text: 'Explicitly addressed.' } as ProviderEvent;
+    })();
+    const { query } = makeStubQuery(events);
+
+    await processQuery(query, BRIEF_ROUTING, ['a2a-1'], 'claude', undefined, 'prompt', undefined, true);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('Explicitly addressed.');
+  });
+});
+
 describe('sessions with a channel keep the nudge', () => {
   it('still nudges an unwrapped result and delivers nothing', async () => {
     seedSessionRouting('discord', 'chan-1');
@@ -102,13 +182,13 @@ describe('sessions with a channel keep the nudge', () => {
   });
 });
 
-describe('a slash-command brief survives an agent-to-agent hop', () => {
+describe('a slash-command brief survives the trip into the worker', () => {
   it('dispatches as a real command rather than arriving as prose', async () => {
-    // An a2a message delivers `task` as an ordinary chat row, and
+    // `spawn_worker` delivers `task` as an ordinary a2a chat row, and
     // `formatMessagesWithCommands` hands a passthrough command STRAIGHT to the
     // SDK. Wrap, quote or prefix it anywhere along the way and it silently
-    // degrades to prose — the receiving agent then improvises a plausible
-    // answer instead of running the command.
+    // degrades to prose — the worker then improvises a plausible answer
+    // instead of running the command.
     const brief = {
       id: 'a2a-1',
       kind: 'chat',

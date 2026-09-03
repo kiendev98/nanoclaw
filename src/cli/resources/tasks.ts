@@ -11,11 +11,9 @@ import {
   isTaskThread,
   taskThreadId,
   TASKS_SYSTEM_THREAD_ID,
-  updateSession,
 } from '../../db/sessions.js';
 import type { TaskUpdate } from '../../mailbox/index.js';
 import { parseTaskContent } from '../../modules/scheduling/task-content.js';
-import { prepareTaskWorkspace } from '../../modules/scheduling/task-workspace.js';
 import {
   createScheduledTask,
   enforceRecurrenceLimit,
@@ -120,7 +118,6 @@ function toOutput(session: ScopedSession, row: TaskRow) {
     recurrence: row.recurrence,
     prompt: content.prompt.length > 120 ? content.prompt.slice(0, 117) + '...' : content.prompt,
     has_script: content.script ? 1 : 0,
-    repo: content.repo,
     origin_session_id: content.originSessionId, // which session created the task (null for CLI-created)
     created_at: row.timestamp,
     tries: row.tries,
@@ -156,7 +153,6 @@ async function createTask(args: Record<string, unknown>, ctx: CallerContext) {
     script,
     dangerouslyOverrideRecurrenceLimit: bool(args.dangerously_override_recurrence_limit),
     timezone: await resolveGroupTimezone(group),
-    repo: normalizeNullableString(args.repo) ?? null,
   });
   const { session, row } = await createScheduledTask(group, prepared, {
     originSessionId: ctx.caller === 'agent' ? ctx.sessionId : null,
@@ -401,16 +397,6 @@ async function runTaskCommand(args: Record<string, unknown>, ctx: CallerContext)
       const row = selectTask(db, id);
       if (!row) return undefined;
       const seriesKey = row.seriesId ?? row.id;
-      // Re-prepared on every on-demand run, because the worktree can go
-      // missing between fires: `ncl worktrees prune` removes a clean one
-      // without touching the session row that points at it, and the spawn
-      // reads the row. Idempotent, so the healthy case costs one existsSync.
-      const repo = parseTaskContent(row.content).repo;
-      if (repo) {
-        const workspace = prepareTaskWorkspace(repo, seriesKey);
-        if (!workspace.ok) throw new Error(workspace.error);
-        await updateSession(session.id, { workspace_path: workspace.path });
-      }
       const rowId = makeTaskId(`${seriesKey}-run`);
       // recurrence=NULL is load-bearing: a run-now row must not be re-armed by
       // handleRecurrence into a phantom series.
@@ -454,14 +440,6 @@ registerResource({
     { name: 'recurrence', type: 'string', description: 'Optional cron expression.', updatable: true },
     { name: 'prompt', type: 'string', description: 'Task prompt.', required: true, updatable: true },
     { name: 'script', type: 'string', description: 'Optional pre-task bash script.', updatable: true },
-    {
-      name: 'repo',
-      type: 'string',
-      // Not updatable: the branch derives from the series, so re-pointing a
-      // live series at another repository would strand the first worktree's
-      // commits with nothing naming them.
-      description: 'Repository NAME from the operator allowlist. The series gets its own worktree and runs there.',
-    },
   ],
   operations: {},
   customOperations: {
@@ -552,12 +530,6 @@ registerResource({
           description: 'Pre-task gate script (bash) — see the --script contract above.',
         },
         {
-          name: 'repo',
-          type: 'string',
-          description:
-            'Repository NAME from the operator allowlist (never a path). The series gets its own git worktree on branch nanoclaw/<series-id> and every run of it starts there, so the run loads that repository’s CLAUDE.md and skills. Refused when the name does not resolve.',
-        },
-        {
           name: 'group',
           type: 'string',
           description: 'Agent group id (host callers; auto-filled to your own group inside a container).',
@@ -565,7 +537,6 @@ registerResource({
       ],
       examples: [
         `# Recurring — --recurrence alone is enough; the first run comes off the cron grid:\nncl tasks create --name "sales briefing" --prompt "Send the weekday sales briefing" --recurrence "0 9 * * 1-5"`,
-        `# In a repository — the series gets its own worktree and runs there:\nncl tasks create --name "pr review" --repo saber --prompt "Run /saber-code-review on the open PR" --process-after "in 1 minute"`,
         `# One-shot — --process-after required (UTC, offset, or naive-local in the instance TZ):\nncl tasks create --name "ping" --prompt "Remind me to call Dana" --process-after "tomorrow 18:00"`,
         `# Monitor — script gates the run; the agent wakes only when something matters:\nncl tasks create --name "alert watch" --recurrence "*/15 * * * *" \\\n  --prompt "Investigate the alerts in the script data and notify me if serious" \\\n  --script 'c=$(curl -sf https://example.com/api/alerts | jq length) || exit 0\necho "{\\"wakeAgent\\": $([ "$c" -gt 0 ] && echo true || echo false), \\"data\\": {\\"alerts\\": $c}}"'`,
       ],

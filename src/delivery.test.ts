@@ -27,7 +27,6 @@ vi.mock('./config.js', async () => {
 const TEST_DIR = '/tmp/nanoclaw-test-delivery';
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup } from './db/index.js';
-import { getSession } from './db/sessions.js';
 import { getDeliveredIds } from './mailbox/sqlite/session-db.js';
 import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
 import { resolveSession, resolveTaskSession, withMailboxSession } from './session-manager.js';
@@ -738,107 +737,5 @@ describe('deliverSessionMessages — post-delivery hooks', () => {
     const delivered = getDeliveredIds(openInboundDb('ag-1', session.id));
     expect(delivered.has('th-1')).toBe(true);
     expect(delivered.has('th-2')).toBe(true);
-  });
-});
-
-describe('deliverSessionMessages — bindOpenedThread guard', () => {
-  it('does not bind a real channel thread for an agent-shared companion session', async () => {
-    await seedAgentAndChannel();
-    // Authorize the send so it is delivered rather than refused — the bug
-    // this guards is reachable regardless of authorization, but only a
-    // successful delivery ever calls bindOpenedThread.
-    await createDestination({
-      agent_group_id: 'ag-1',
-      local_name: 'chat',
-      target_type: 'channel',
-      target_id: 'mg-1',
-      created_at: now(),
-    });
-
-    // Same shape the old guard mistook for a task session — no
-    // messaging_group_id, no bound root yet — but its thread_id is null,
-    // never `system:tasks:<series>`, so isTaskThread correctly says no.
-    const { session } = await resolveSession('ag-1', null, null, 'agent-shared');
-    expect(session.messaging_group_id).toBeNull();
-
-    insertOutbound('ag-1', session.id, 'as-root');
-    setDeliveryAdapter({
-      async deliver() {
-        return 'platform-root-1';
-      },
-    });
-
-    await deliverSessionMessages(session);
-
-    const fresh = await getSession(session.id);
-    expect(fresh?.bound_messaging_group_id).toBeNull();
-    expect(fresh?.bound_root_message_id).toBeNull();
-  });
-
-  it('still binds a task session to the thread it opens (unaffected by the guard)', async () => {
-    await seedAgentAndChannel();
-    await createDestination({
-      agent_group_id: 'ag-1',
-      local_name: 'chat',
-      target_type: 'channel',
-      target_id: 'mg-1',
-      created_at: now(),
-    });
-
-    const { session } = await resolveTaskSession('ag-1', 'bind-guard-series');
-    insertOutbound('ag-1', session.id, 'task-root');
-    setDeliveryAdapter({
-      async deliver() {
-        return 'platform-root-2';
-      },
-    });
-
-    await deliverSessionMessages(session);
-
-    const fresh = await getSession(session.id);
-    expect(fresh?.bound_messaging_group_id).toBe('mg-1');
-    expect(fresh?.bound_root_message_id).toBe('platform-root-2');
-  });
-});
-
-describe('deliverSessionMessages — first-claim-wins within one drained batch', () => {
-  it('does not let a second root post in the same batch overwrite the first binding', async () => {
-    await seedAgentAndChannel();
-    await createDestination({
-      agent_group_id: 'ag-1',
-      local_name: 'chat',
-      target_type: 'channel',
-      target_id: 'mg-1',
-      created_at: now(),
-    });
-
-    const { session } = await resolveTaskSession('ag-1', 'batch-bind-series');
-
-    const db = new Database(outboundDbPath('ag-1', session.id));
-    db.prepare(
-      `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
-       VALUES (?, ?, 'chat', 'telegram:123', 'telegram', ?)`,
-    ).run('bind-1', '2026-01-01T00:00:01.000Z', JSON.stringify({ text: 'first' }));
-    db.prepare(
-      `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
-       VALUES (?, ?, 'chat', 'telegram:123', 'telegram', ?)`,
-    ).run('bind-2', '2026-01-01T00:00:02.000Z', JSON.stringify({ text: 'second' }));
-    db.close();
-
-    // drainSession reuses one in-memory `session` for the whole batch — both
-    // rows are delivered off the same object, and only the first may bind.
-    const platformIds = ['root-1', 'root-2'];
-    let call = 0;
-    setDeliveryAdapter({
-      async deliver() {
-        return platformIds[call++];
-      },
-    });
-
-    await deliverSessionMessages(session);
-
-    const fresh = await getSession(session.id);
-    expect(fresh?.bound_messaging_group_id).toBe('mg-1');
-    expect(fresh?.bound_root_message_id).toBe('root-1');
   });
 });

@@ -2,12 +2,13 @@
  * Tests for `runGuarded`'s hold-with-no-requestHold branch.
  *
  * `DeliveryGuardSpec.requestHold` became optional so a guarded action can
- * define no admin-approval path at all — an action whose decide fn always
- * allows or denies has no hold branch to build a card for. Every registered
- * action today either takes that shape or supplies a requestHold, so this
- * path is unreachable from any registered action; it exists as a fail-closed
- * backstop against a future decide fn that returns hold with no hold handler
- * wired up. A synthetic guarded action is the only way to reach it directly.
+ * define no admin-approval path at all (workers.spawn — see
+ * src/modules/agent-to-agent/guard.ts). Every real action's own decide fn
+ * either always allows/denies (no hold branch) or supplies a requestHold, so
+ * this path is unreachable from any registered action today; it exists as a
+ * fail-closed backstop against a future decide fn that returns hold with no
+ * hold handler wired up. A synthetic guarded action is the only way to reach
+ * it directly.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
