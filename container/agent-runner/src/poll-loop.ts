@@ -16,6 +16,7 @@ import {
   clearContinuation,
   clearCurrentInReplyTo,
   isToolAwaitingInbound,
+  takeLateAnswerExpected,
   migrateLegacyContinuation,
   setContinuation,
   setCurrentInReplyTo,
@@ -163,10 +164,18 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     //
     // A worker's durable state is its worktree, which persists across tasks
     // either way. Its transcript is rebuildable from those files.
+    //
+    // ONE EXCEPTION: the last turn timed out waiting on an escalated question.
+    // The orchestrator's answer arrives as a new batch, and wiping here would
+    // hand the model a bare "use option B" with no question in front of it.
     if (continuation && config.freshSessionPerTask) {
-      log('Worker task — starting a fresh session rather than resuming');
-      continuation = undefined;
-      clearContinuation(config.providerName);
+      if (takeLateAnswerExpected()) {
+        log('Worker task — keeping the transcript: the last turn timed out waiting on an answer');
+      } else {
+        log('Worker task — starting a fresh session rather than resuming');
+        continuation = undefined;
+        clearContinuation(config.providerName);
+      }
     }
 
     // Command handling: the host router gates filtered and unauthorized

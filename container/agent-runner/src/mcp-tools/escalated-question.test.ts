@@ -17,7 +17,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../mailbox/sqlite/connection.js';
-import { isToolAwaitingInbound, setCurrentInReplyTo, clearCurrentInReplyTo } from '../db/session-state.js';
+import {
+  isToolAwaitingInbound,
+  takeLateAnswerExpected,
+  setCurrentInReplyTo,
+  clearCurrentInReplyTo,
+} from '../db/session-state.js';
 import { askUserQuestion, renderEscalatedQuestion, sendCard } from './interactive.js';
 
 function outbound(): Array<{ id: string; kind: string; channel_type: string | null; content: Record<string, unknown> }> {
@@ -324,5 +329,58 @@ describe('the question is addressed to the session that briefed this worker', ()
     await askUserQuestion.handler(ARGS);
 
     expect(inReplyToOf(outbound()[0].id)).toBeNull();
+  });
+});
+
+describe('a late answer must not land against an empty transcript', () => {
+  it('asks the next batch to keep the transcript when the question times out', async () => {
+    // `freshSessionPerTask` wipes a worker's transcript at the start of every
+    // batch. The orchestrator's answer arrives as a new batch, so without this
+    // the model reads "Delete it" with no question in front of it — the same
+    // failure the session/thread binding fixes for humans.
+    workerLane();
+
+    await askUserQuestion.handler(ARGS);
+
+    expect(takeLateAnswerExpected()).toBe(true);
+  });
+
+  it('does not ask for it when the orchestrator answered', async () => {
+    // Nothing is pending, so the next batch is an unrelated task and the wipe
+    // is the right behaviour.
+    workerLane();
+
+    const pending = askUserQuestion.handler({ ...ARGS, timeout: 5 });
+    await new Promise((r) => setTimeout(r, 10));
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, seq, kind, timestamp, status, content, channel_type, platform_id)
+         VALUES ('a2a-ok', 7, 'chat', $timestamp, 'pending', $content, 'agent', 'ag-orchestrator')`,
+      )
+      .run({ $timestamp: new Date().toISOString(), $content: JSON.stringify({ text: 'Delete it' }) });
+    await pending;
+
+    expect(takeLateAnswerExpected()).toBe(false);
+  });
+
+  it('protects one batch only', async () => {
+    // A worker that timed out, got its answer, and later gets an unrelated
+    // task must start clean for that task.
+    workerLane();
+
+    await askUserQuestion.handler(ARGS);
+
+    expect(takeLateAnswerExpected()).toBe(true);
+    expect(takeLateAnswerExpected()).toBe(false);
+  });
+
+  it('does not ask for it on a channel lane, where no batch is wiped', async () => {
+    // `freshSessionPerTask` is set from `workspace_path`, which only a worker
+    // carries — so an ordinary session has no transcript at risk.
+    channelLane();
+
+    await askUserQuestion.handler(ARGS);
+
+    expect(takeLateAnswerExpected()).toBe(false);
   });
 });

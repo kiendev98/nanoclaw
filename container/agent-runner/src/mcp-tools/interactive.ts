@@ -40,7 +40,12 @@
 import { writeMessageOut } from '../db/messages-out.js';
 import { findQuestionResponse, findEscalatedAnswers, markCompleted } from '../db/messages-in.js';
 import { getSessionRouting } from '../db/session-routing.js';
-import { markAwaitingInbound, clearAwaitingInbound, getCurrentInReplyTo } from '../db/session-state.js';
+import {
+  markAwaitingInbound,
+  clearAwaitingInbound,
+  markLateAnswerExpected,
+  getCurrentInReplyTo,
+} from '../db/session-state.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -261,6 +266,11 @@ async function askOrchestrator(
       await sleep(POLL_INTERVAL_MS);
     }
 
+    // The answer may still be coming, and it will arrive as a NEW batch —
+    // which `freshSessionPerTask` would otherwise start by wiping this
+    // transcript, leaving the model a bare "use option B" with no question in
+    // front of it. Ask the next batch to keep it.
+    markLateAnswerExpected();
     log(`ask_user_question (escalated) timeout: ${questionId}`);
     return err(
       `Your orchestrator did not answer within ${timeout / 1000}s. Do not ask again — a second question would ` +

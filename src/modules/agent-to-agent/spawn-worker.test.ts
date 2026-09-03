@@ -80,7 +80,14 @@ vi.mock('../../db/container-configs.js', () => ({
   ensureContainerConfig: () => {},
 }));
 vi.mock('../../db/agent-groups.js', () => ({
-  getAgentGroup: (id: string) => ({ id, name: id.toUpperCase(), folder: id, agent_provider: null, created_at: '' }),
+  getAgentGroup: (id: string) => ({
+    id,
+    name: id.toUpperCase(),
+    folder: id,
+    agent_provider: null,
+    created_at: '',
+    ...sourceGroupOverride.value,
+  }),
   getAgentGroupByFolder: () => undefined,
   createAgentGroup: (...a: unknown[]) => mockCreateAgentGroup(...a),
   updateAgentGroup: (...a: unknown[]) => mockUpdateAgentGroup(...a),
@@ -123,6 +130,11 @@ vi.mock('../../container-runner.js', () => ({
 // Mutable so one test can assert the docker refusal. `local` is this fork's
 // default and what every other test in this file assumes.
 const driverKind = { value: 'local' };
+
+/** Lets one test make the REQUESTING group a worker. Same lazy-reference
+ * pattern as `driverKind`: the mock factory is hoisted, but it only runs
+ * when a test calls it, by which time this has been initialised. */
+const sourceGroupOverride: { value: Record<string, unknown> } = { value: {} };
 vi.mock('../../drivers/index.js', () => ({
   getSessionDriver: () => ({ kind: driverKind.value }),
 }));
@@ -409,6 +421,42 @@ describe('spawn_worker — reuse for one (repo, thread) pair', () => {
   });
 });
 
+describe('spawn_worker — one level of delegation', () => {
+  // A sub-worker's escalated question cannot be answered. It waits 600s on its
+  // parent; if the parent must ask ITS orchestrator, that hop is also 600s and
+  // starts later, so the inner wait always expires first — every time, not
+  // occasionally. Both agents then report being blocked on a question that was
+  // being answered. Neither can shorten its bound, because neither can see how
+  // deep the chain is.
+  it('refuses a worker that tries to spawn a worker, and creates nothing', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    sourceGroupOverride.value = { origin_session_id: 'sess-the-orchestrator' };
+
+    try {
+      await runSpawnWorker(request());
+    } finally {
+      sourceGroupOverride.value = {};
+    }
+
+    const answer = response();
+    expect(answer?.status).toBe('error');
+    expect(answer?.result.error).toContain('is itself a worker');
+    // The refusal names the way forward, so the caller does not simply retry.
+    expect(answer?.result.error).toContain('report back to your orchestrator');
+    expect(mockCreateAgentGroup).not.toHaveBeenCalled();
+    expect(writes().filter(([, , message]) => message.kind === 'chat')).toEqual([]);
+  });
+
+  it('still allows an ordinary agent group to spawn one', async () => {
+    // The gate keys on `origin_session_id`, which only this action ever sets —
+    // so a normal orchestrator is unaffected.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+
+    await runSpawnWorker(request());
+
+    expect(response()?.status).toBe('created');
+  });
+});
 describe('spawn_worker — a driver that cannot reach a host worktree', () => {
   // A worktree lives on the host under WORKTREES_DIR and nothing mounts it into
   // a container — and nothing cheaply can, since a worktree's `.git` is a

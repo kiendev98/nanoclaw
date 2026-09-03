@@ -306,6 +306,35 @@ export async function validateSpawnWorker(content: Record<string, unknown>, sess
     return false;
   }
 
+  // ONE LEVEL OF DELEGATION. A worker may not spawn a worker.
+  //
+  // The bound on an escalated question makes depth 2 structurally unanswerable
+  // rather than merely slow. A sub-worker asks its parent and waits 600s; if
+  // the parent must ask ITS orchestrator, that hop is also 600s and it starts
+  // later — so the sub-worker's wait always expires first, every time, and the
+  // answer arrives for nobody. Both agents then report being blocked on a
+  // question that was in fact being answered.
+  //
+  // A shorter inner bound cannot fix it, because neither side can see how deep
+  // the chain is: a worker knows only that its own address is an agent lane,
+  // not whether the agent on the other end has a human behind it. Lifting this
+  // means carrying a hop count on the lane and deriving the bound from it, and
+  // that is worth building when a real depth-2 case turns up rather than now.
+  //
+  // `origin_session_id` is the marker, and it is set only by this action.
+  if (sourceGroup.origin_session_id) {
+    await respond(
+      session,
+      req,
+      'error',
+      `spawn_worker failed: "${sourceGroup.name}" is itself a worker, and a worker cannot spawn one. ` +
+        'Do the work in your own worktree, or report back to your orchestrator that it needs a second ' +
+        'worker for this — it can spawn one beside you.',
+    );
+    log.warn('spawn_worker refused: nested worker', { sourceGroup: sourceGroup.id, repo: req.repo });
+    return false;
+  }
+
   // Failure is loud and terminal: there is no fallback to the group folder,
   // because a worker silently created in the wrong directory looks exactly
   // like one created in the right one.

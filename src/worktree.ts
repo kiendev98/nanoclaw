@@ -166,6 +166,17 @@ const SUGGESTION_DEPTH = 2;
  * again, and an agent that guesses a repository name twice has burned two
  * turns to learn one fact. Naming what exists turns a dead end into a retry.
  *
+ * WHAT THIS DISCLOSES, DELIBERATELY. The refusal is relayed into the
+ * container and usually onward into chat, so every repository name under
+ * `NANOCLAW_PROJECT_ROOTS` becomes visible to anyone who can talk to the
+ * agent — which includes non-admin members of a group chat, since
+ * `spawn_worker` needs no approval. That is accepted: the allowlist is an
+ * operator's list of checkouts on their own machine, names only, no paths and
+ * no contents, and an agent that cannot name a repository cannot delegate at
+ * all. An install whose repository NAMES are themselves sensitive should keep
+ * those checkouts outside the allowlist, which also stops a worker standing
+ * in them.
+ *
  * Never throws: this runs while an error is already being built, and a second
  * failure here would replace a precise refusal with a stack trace. An
  * unreadable root contributes nothing and is skipped.

@@ -202,3 +202,36 @@ export function clearAwaitingInbound(): void {
 export function isToolAwaitingInbound(): boolean {
   return getFresh(AWAITING_INBOUND_KEY, AWAITING_INBOUND_MAX_AGE_MS) !== null;
 }
+
+/**
+ * That the last turn ended waiting on an escalated question nobody answered.
+ *
+ * `freshSessionPerTask` wipes a worker's transcript at the start of every
+ * batch, which is right for an unrelated second task and wrong for the one
+ * case this marks: the worker asked, timed out, reported what it was blocked
+ * on, and the orchestrator answered afterwards. That answer arrives as a new
+ * batch, so the wipe would hand the model a bare "use option B" with no
+ * question in front of it — the exact failure the session/thread binding
+ * exists to prevent for humans, accepted for workers.
+ *
+ * Consumed on read, so it protects the NEXT batch only. A worker's durable
+ * state is still its worktree; this preserves one transcript, not a policy.
+ */
+const LATE_ANSWER_KEY = 'late_answer_expected';
+
+/**
+ * Long enough for a human to be asked and to reply through the orchestrator,
+ * and bounded so a worker idle overnight starts clean.
+ */
+const LATE_ANSWER_MAX_AGE_MS = 60 * 60 * 1000;
+
+export function markLateAnswerExpected(): void {
+  setValue(LATE_ANSWER_KEY, new Date().toISOString());
+}
+
+/** True once per timed-out question, then false again. */
+export function takeLateAnswerExpected(): boolean {
+  const value = getFresh(LATE_ANSWER_KEY, LATE_ANSWER_MAX_AGE_MS);
+  deleteValue(LATE_ANSWER_KEY);
+  return value !== null;
+}
