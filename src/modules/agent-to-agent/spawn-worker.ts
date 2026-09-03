@@ -38,7 +38,7 @@
  */
 import { PROJECT_ROOTS } from '../../config.js';
 import { findWorkerForOrigin, getAgentGroup, updateAgentGroup } from '../../db/agent-groups.js';
-import { getSession } from '../../db/sessions.js';
+import { getSession, getSessionsByAgentGroup } from '../../db/sessions.js';
 import { getSessionDriver } from '../../drivers/index.js';
 import { requestWake } from '../../request-wake.js';
 import { GuardDenyError } from '../../guard/index.js';
@@ -47,26 +47,28 @@ import { writeSessionMessage } from '../../session-manager.js';
 import type { AgentGroup, Session } from '../../types.js';
 import { createWorktree, resolveRepo } from '../../worktree.js';
 import { routeAgentMessage } from './agent-route.js';
-import { getDestinationByTarget } from './db/agent-destinations.js';
+import { respondToBlockingTool } from './blocking-request.js';
+import {
+  createDestination,
+  getDestinationByName,
+  getDestinationByTarget,
+  getDestinations,
+  normalizeName,
+} from './db/agent-destinations.js';
 import { provisionAgentGroup } from './provision-agent.js';
+import { writeDestinations } from './write-destinations.js';
 import { workerBranch, workerWorkspace } from './worker-identity.js';
 
 /** How the request ended, as the container tool reads it. */
 type WorkerStatus = 'created' | 'reused' | 'error';
-
-/**
- * Grace on `waitUntil`. Inside the window the tool is still polling and the
- * response row alone reaches it; within this margin of the deadline the race
- * is unwinnable either way, so the requester is woken too. A duplicate wake
- * costs one turn; the other error costs the whole delegation, silently.
- */
-const LATE_MARGIN_MS = 5_000;
 
 interface WorkerRequest {
   requestId: string;
   repo: string;
   task: string;
   name: string;
+  /** Channel destinations the caller is lending the worker, by ITS OWN names. */
+  channels: string[];
   waitUntil: number | null;
 }
 
@@ -78,62 +80,149 @@ function parseRequest(content: Record<string, unknown>): WorkerRequest {
     repo: str('repo'),
     task: str('task'),
     name: str('name'),
+    channels: Array.isArray(content.channels)
+      ? content.channels.filter((c): c is string => typeof c === 'string' && c.trim() !== '').map((c) => c.trim())
+      : [],
     waitUntil: typeof content.waitUntil === 'number' ? content.waitUntil : null,
   };
 }
 
-/** Is the tool that asked still listening, or has its bounded wait run out? */
-function callerStoppedWaiting(req: WorkerRequest): boolean {
-  // An absent deadline means the payload did not come from the tool (a
-  // hand-written row, an older container). Treat it as no longer waiting:
-  // an extra wake is recoverable, a lost answer is not.
-  if (req.waitUntil === null) return true;
-  return Date.now() > req.waitUntil - LATE_MARGIN_MS;
+/**
+ * The caller's channel destinations, by the names it knows them as.
+ *
+ * Used only to write a refusal a caller can act on. A worker request names a
+ * channel the same way `send_message` does, so an unknown name is the ordinary
+ * typo and the useful answer lists what WOULD have worked — the same shape as
+ * `resolveRepo`'s refusal, and for the same reason: the caller is an agent
+ * that cannot list its own grants any other way.
+ */
+async function channelNames(agentGroupId: string): Promise<string[]> {
+  return (await getDestinations(agentGroupId)).filter((d) => d.target_type === 'channel').map((d) => d.local_name);
 }
 
 /**
- * Answer the blocking tool, and wake the requester when the tool has already
- * given up.
+ * ATTENUATED DELEGATION: you cannot lend what you do not hold.
  *
- * The response row is `kind: 'system'` and non-triggering, exactly like
- * `canvas_read`'s: the tool polls for it by `requestId`, and the poll loop
- * filters system rows out of agent prompts, so it can never read as an
- * unanswered wake.
+ * One lookup per requested name is the entire security model for a worker on
+ * a channel, and it is the right one. A worker runs code from ANOTHER
+ * repository — its own CLAUDE.md, its own skills, its own settings — so its
+ * instructions must never be able to widen its own reach. Every channel it can
+ * post to is one the orchestrator could already post to, copied across
+ * deliberately at spawn time.
+ *
+ * ALL OR NOTHING. A partial grant would hand back a worker that looks
+ * provisioned and then fails at its first post, which for a review workflow
+ * means the human never hears anything and nobody can see why.
+ *
+ * @returns undefined when every name checks out, or the agent-facing refusal.
  */
-async function respond(session: Session, req: WorkerRequest, status: WorkerStatus, message: string): Promise<void> {
-  if (req.requestId) {
-    await writeSessionMessage(session.agent_group_id, session.id, {
-      id: `worker-resp-${req.requestId}`,
-      kind: 'system',
-      timestamp: new Date().toISOString(),
-      platformId: null,
-      channelType: null,
-      threadId: null,
-      content: JSON.stringify({
-        type: 'spawn_worker_response',
-        requestId: req.requestId,
-        status,
-        result: status === 'error' ? { error: message } : { name: req.name, repo: req.repo, message },
-      }),
-      trigger: false,
-    });
+async function refuseUngrantableChannels(sourceGroupId: string, channels: string[]): Promise<string | undefined> {
+  for (const name of channels) {
+    const dest = await getDestinationByName(sourceGroupId, normalizeName(name));
+    if (!dest || dest.target_type !== 'channel') {
+      const known = await channelNames(sourceGroupId);
+      return (
+        `you have no channel destination named "${name}", and you cannot give a worker access you do not ` +
+        `have yourself. Channels you can lend: ${known.length ? known.join(', ') : '(none)'}.`
+      );
+    }
   }
-  if (callerStoppedWaiting(req)) await notifyAgent(session, message);
+  return undefined;
 }
 
-/** A renderable chat note that wakes the requester — the late-answer path. */
-async function notifyAgent(session: Session, text: string): Promise<void> {
-  await writeSessionMessage(session.agent_group_id, session.id, {
-    id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    kind: 'chat',
-    timestamp: new Date().toISOString(),
-    platformId: session.agent_group_id,
-    channelType: 'agent',
-    threadId: null,
-    content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
-  });
-  const fresh = await getSession(session.id);
-  if (fresh) await requestWake(fresh, 'agent-created');
+/**
+ * Copy the caller's channel rows onto the worker.
+ *
+ * Idempotent per name, because the reuse path runs this too: a second
+ * `spawn_worker` for the same (repo, thread) may name a channel the first did
+ * not, and the worker should gain it rather than silently keep the old set.
+ *
+ * The projection at the end is what a reused worker needs and a new one does
+ * not. `spawnContainer` writes the destination map on every wake, so a worker
+ * created here reads its grants when it starts; one that is ALREADY RUNNING
+ * holds a map from its last wake, and without this its container answers
+ * "unknown destination" for a channel the central DB says it holds.
+ */
+async function grantChannels(
+  sourceGroupId: string,
+  workerGroupId: string,
+  channels: string[],
+): Promise<{ added: string[]; refusal?: string }> {
+  const now = new Date().toISOString();
+  const added: string[] = [];
+  for (const name of channels) {
+    const local = normalizeName(name);
+    const source = await getDestinationByName(sourceGroupId, local);
+    // Re-read rather than trusting the precheck: this runs after the worktree
+    // checkout, and a destination revoked in between must not be granted.
+    //
+    // REFUSING, NOT SKIPPING. This used to `continue`, which reported success
+    // for a grant that did not happen — the ALL OR NOTHING contract above,
+    // broken by the code meant to honour it.
+    if (!source || source.target_type !== 'channel') {
+      return { added, refusal: `"${name}" is no longer a channel you can lend, so nothing was granted.` };
+    }
+
+    const held = await getDestinationByName(workerGroupId, local);
+    if (held) {
+      // Idempotent only when it is genuinely the same grant. The name-only
+      // check this replaces was a wrong-recipient bug waiting to happen:
+      // `provisionAgentGroup` gives every worker AGENT destinations called
+      // `parent` and `<localName>`, so lending a channel whose normalized name
+      // collided with one of those silently did nothing, and the worker's
+      // `resolveRouting` then resolved that name down the agent lane — posting
+      // to its orchestrator instead of to the channel, with no error anywhere.
+      if (held.target_type === 'channel' && held.target_id === source.target_id) continue;
+      return {
+        added,
+        refusal:
+          `"${name}" already names ${held.target_type === 'channel' ? 'a different channel' : 'an agent'} for ` +
+          `this worker, so nothing was granted. Rename the destination you are lending, or lend a different one.`,
+      };
+    }
+
+    await createDestination({
+      agent_group_id: workerGroupId,
+      local_name: local,
+      target_type: 'channel',
+      target_id: source.target_id,
+      created_at: now,
+    });
+    added.push(local);
+  }
+  if (added.length > 0) {
+    // Skip the CLOSED ones, rather than keeping only the active ones. The
+    // column is `TEXT DEFAULT 'active'` with no NOT NULL, so a row can carry
+    // null, and the two readings differ exactly there. Getting it wrong in the
+    // strict direction would silently skip a live session and reinstate the
+    // "unknown destination" failure this projection exists to prevent; getting
+    // it wrong in this direction costs one mailbox write against a session
+    // nobody reads. Only the second is recoverable, so bias to it.
+    for (const session of await getSessionsByAgentGroup(workerGroupId)) {
+      if (session.status === 'closed') continue;
+      await writeDestinations(workerGroupId, session.id);
+    }
+    log.info('Channel destinations lent to worker', { worker: workerGroupId, from: sourceGroupId, channels: added });
+  }
+  return { added };
+}
+
+/**
+ * Answer the blocking tool. The envelope is shared (blocking-request.ts); what
+ * is local here is the `type` and the `result`, which are this tool's contract.
+ */
+async function respond(session: Session, req: WorkerRequest, status: WorkerStatus, message: string): Promise<void> {
+  await respondToBlockingTool(
+    session,
+    req,
+    {
+      id: `worker-resp-${req.requestId}`,
+      type: 'spawn_worker_response',
+      status,
+      result: status === 'error' ? { error: message } : { name: req.name, repo: req.repo, message },
+    },
+    message,
+  );
 }
 
 /**
@@ -306,6 +395,48 @@ export async function validateSpawnWorker(content: Record<string, unknown>, sess
     return false;
   }
 
+  // Refused here, before the worktree checkout and before any central-DB
+  // write, because a refusal after provisioning would leave a worker standing
+  // in a repository with a brief it cannot carry out.
+  const ungrantable = await refuseUngrantableChannels(sourceGroup.id, req.channels);
+  if (ungrantable) {
+    await respond(session, req, 'error', `spawn_worker failed: ${ungrantable}`);
+    log.warn('spawn_worker refused: channel not held by the requester', {
+      sourceGroup: sourceGroup.id,
+      channels: req.channels,
+    });
+    return false;
+  }
+
+  // ONE LEVEL OF DELEGATION. A worker may not spawn a worker.
+  //
+  // The bound on an escalated question makes depth 2 structurally unanswerable
+  // rather than merely slow. A sub-worker asks its parent and waits 600s; if
+  // the parent must ask ITS orchestrator, that hop is also 600s and it starts
+  // later — so the sub-worker's wait always expires first, every time, and the
+  // answer arrives for nobody. Both agents then report being blocked on a
+  // question that was in fact being answered.
+  //
+  // A shorter inner bound cannot fix it, because neither side can see how deep
+  // the chain is: a worker knows only that its own address is an agent lane,
+  // not whether the agent on the other end has a human behind it. Lifting this
+  // means carrying a hop count on the lane and deriving the bound from it, and
+  // that is worth building when a real depth-2 case turns up rather than now.
+  //
+  // `origin_session_id` is the marker, and it is set only by this action.
+  if (sourceGroup.origin_session_id) {
+    await respond(
+      session,
+      req,
+      'error',
+      `spawn_worker failed: "${sourceGroup.name}" is itself a worker, and a worker cannot spawn one. ` +
+        'Do the work in your own worktree, or report back to your orchestrator that it needs a second ' +
+        'worker for this — it can spawn one beside you.',
+    );
+    log.warn('spawn_worker refused: nested worker', { sourceGroup: sourceGroup.id, repo: req.repo });
+    return false;
+  }
+
   // Failure is loud and terminal: there is no fallback to the group folder,
   // because a worker silently created in the wrong directory looks exactly
   // like one created in the right one.
@@ -319,47 +450,24 @@ export async function validateSpawnWorker(content: Record<string, unknown>, sess
     return false;
   }
 
-  const existing = await existingWorkerFor(repoPath, session.id);
-  if (existing) {
-    const localName = await reusableWorkerName(session.agent_group_id, existing);
-    if (localName) {
-      // The agent group outlives its directory. `ncl worktrees prune` removes a
-      // clean worktree without touching `agent_groups`, and a human can `rm -rf`
-      // one just as easily — so reuse must re-create it, or the brief is
-      // delivered and the spawn then chdirs into a path that is not there.
-      // Deliberately NOT fixed by clearing `workspace_path` on prune: the reuse
-      // lookup keys on that column, so clearing it mints a SECOND worker on a
-      // second branch for one thread, which is the duplicate this whole
-      // (repo, thread) identity exists to prevent.
-      const restored = await ensureWorktree(existing, repoPath, session.id);
-      if (!restored.ok) {
-        await respond(session, req, 'error', restored.error);
-        log.warn('spawn_worker could not restore a reused worker workspace', {
-          repo: req.repo,
-          worker: existing.id,
-          err: restored.error,
-        });
-        return false;
-      }
-      const delivery = await deliverBrief(session, existing.id, req.task);
-      await respond(session, req, 'reused', briefedText(localName, req.repo, true, delivery));
-      log.info('spawn_worker reused an existing worker', {
-        repo: req.repo,
-        localName,
-        worker: existing.id,
-        originSession: session.id,
-      });
-      return false;
-    }
-    // The worker exists but this requester cannot address it. Falling through
-    // creates a reachable one rather than naming a handle that does not
-    // resolve.
-    log.warn('spawn_worker: worker exists for this thread but the requester has no destination for it', {
-      repo: req.repo,
-      worker: existing.id,
-      originSession: session.id,
-    });
-  }
+  // REUSE IS NOT DECIDED HERE, deliberately, and it used to be.
+  //
+  // `runGuarded` is precheck -> guard -> handler, and a precheck returning
+  // false means "already answered" rather than "invalid" — so a precheck that
+  // COMPLETES the reuse case skips the guard entirely for it. That was the
+  // live path: a reused worker was granted channel destinations, briefed and
+  // answered without `workers.spawn` ever being consulted, while the create
+  // path went through it. A privilege grant on the ungated half of a
+  // guarded action is the wrong way round.
+  //
+  // Nothing was exploitable today, because `workersSpawn.decide` allows any
+  // agent actor. That is exactly why it had to be fixed on purpose: the bill
+  // falls on whoever first tightens that decision — a per-repo policy, a rate
+  // limit, an approval hold — and finds it silently inapplicable to the half
+  // of the traffic that reuses.
+  //
+  // So this function now only validates and refuses. Everything that WRITES
+  // lives in the handler, past the guard.
   return true;
 }
 
@@ -378,11 +486,12 @@ export async function spawnWorker(content: Record<string, unknown>, session: Ses
   const sourceGroup = await getAgentGroup(session.agent_group_id);
   if (!req.repo || !req.task || !sourceGroup) return; // precheck already answered the requester
 
-  // Resolved AGAIN here, and reuse re-checked, in case a concurrent
-  // spawn_worker call for the same (repo, thread) already created a worker
-  // between the precheck's lookup and this one. Creating anyway would put two
-  // agents on two branches of one repository in one conversation, which is
-  // the exact failure the (repo, thread) key exists to prevent.
+  // Resolved again here rather than carried from the precheck: this is the
+  // first point past the guard, and the precheck's copy is only a refusal.
+  //
+  // THIS IS THE REUSE PATH — the only one. It used to be a near-duplicate of a
+  // branch in the precheck that fired first and did the same work ungated;
+  // that branch is gone, and its worktree restore came with it.
   let repoPath: string;
   try {
     repoPath = resolveRepo(req.repo, PROJECT_ROOTS);
@@ -396,6 +505,36 @@ export async function spawnWorker(content: Record<string, unknown>, session: Ses
   const existing = await existingWorkerFor(repoPath, session.id);
   const reuseName = existing && (await reusableWorkerName(sourceGroup.id, existing));
   if (existing && reuseName) {
+    // The agent group outlives its directory. `ncl worktrees prune` removes a
+    // clean worktree without touching `agent_groups`, and a human can `rm -rf`
+    // one just as easily — so reuse must re-create it, or the brief is
+    // delivered and the spawn then chdirs into a path that is not there.
+    // Deliberately NOT fixed by clearing `workspace_path` on prune: the reuse
+    // lookup keys on that column, so clearing it mints a SECOND worker on a
+    // second branch for one thread, which is the duplicate this whole
+    // (repo, thread) identity exists to prevent.
+    const restored = await ensureWorktree(existing, repoPath, session.id);
+    if (!restored.ok) {
+      await respond(session, req, 'error', restored.error);
+      log.warn('spawn_worker could not restore a reused worker workspace', {
+        repo: req.repo,
+        worker: existing.id,
+        err: restored.error,
+      });
+      return;
+    }
+    // Lent BEFORE the brief, so the worker's very first turn already holds the
+    // channel its task tells it to use.
+    const lent = await grantChannels(sourceGroup.id, existing.id, req.channels);
+    if (lent.refusal) {
+      await respond(session, req, 'error', `spawn_worker failed: ${lent.refusal}`);
+      log.warn('spawn_worker could not lend a channel to a reused worker', {
+        repo: req.repo,
+        worker: existing.id,
+        refusal: lent.refusal,
+      });
+      return;
+    }
     const delivery = await deliverBrief(session, existing.id, req.task);
     await respond(session, req, 'reused', briefedText(reuseName, req.repo, true, delivery));
     log.info('spawn_worker reused an existing worker', {
@@ -405,6 +544,16 @@ export async function spawnWorker(content: Record<string, unknown>, session: Ses
       originSession: session.id,
     });
     return;
+  }
+  if (existing) {
+    // Exists for this thread, but this requester holds no destination for it.
+    // Falling through creates a reachable one rather than naming a handle that
+    // does not resolve.
+    log.warn('spawn_worker: worker exists for this thread but the requester has no destination for it', {
+      repo: req.repo,
+      worker: existing.id,
+      originSession: session.id,
+    });
   }
 
   // The worktree becomes the worker's cwd, which is the ONLY thing that makes
@@ -440,6 +589,11 @@ export async function spawnWorker(content: Record<string, unknown>, session: Ses
     return;
   }
 
+  const lent = await grantChannels(sourceGroup.id, outcome.agentGroupId, req.channels);
+  if (lent.refusal) {
+    await respond(session, req, 'error', `spawn_worker failed: ${lent.refusal}`);
+    return;
+  }
   const delivery = await deliverBrief(session, outcome.agentGroupId, req.task);
   await respond(session, req, 'created', briefedText(outcome.localName, req.repo, false, delivery));
   log.info('Worker created and briefed', {

@@ -94,6 +94,25 @@ export function setContinuation(providerName: string, id: string): void {
 export function clearContinuation(providerName: string): void {
   deleteValue(continuationKey(providerName));
 }
+/**
+ * Read a key, treating anything older than `maxAgeMs` as absent.
+ *
+ * Every key here is written by one process and read by another, and none of
+ * them survives the container that wrote it. A SIGKILL leaves whatever was set
+ * behind, so each reader needs an age bound — this is that bound, once,
+ * instead of once per key.
+ *
+ * @param maxAgeMs How recently the key must have been written to count.
+ * @returns The stored value, or null when the key is missing, unparseable, or
+ *   too old.
+ */
+function getFresh(key: string, maxAgeMs: number): string | null {
+  const row = getAgentMailbox().operations.getState(key);
+  if (!row) return null;
+  const age = Date.now() - new Date(row.updatedAt).getTime();
+  if (!Number.isFinite(age) || age > maxAgeMs) return null;
+  return row.value;
+}
 
 /**
  * The a2a reply stamp: the id of the first inbound message in the batch the
@@ -128,9 +147,55 @@ export function clearCurrentInReplyTo(): void {
 }
 
 export function getCurrentInReplyTo(): string | null {
-  const row = getAgentMailbox().operations.getState(IN_REPLY_TO_KEY);
-  if (!row) return null;
-  const age = Date.now() - new Date(row.updatedAt).getTime();
-  if (!Number.isFinite(age) || age > IN_REPLY_TO_MAX_AGE_MS) return null;
-  return row.value;
+  return getFresh(IN_REPLY_TO_KEY, IN_REPLY_TO_MAX_AGE_MS);
+}
+
+/**
+ * That the last turn ended waiting on an escalated question nobody answered.
+ *
+ * `freshSessionPerTask` wipes a worker's transcript at the start of every
+ * batch, which is right for an unrelated second task and wrong for the one
+ * case this marks: the worker asked, timed out, reported what it was blocked
+ * on, and the orchestrator answered afterwards. That answer arrives as a new
+ * batch, so the wipe would hand the model a bare "use option B" with no
+ * question in front of it — the exact failure the session/thread binding
+ * exists to prevent for humans, accepted for workers.
+ *
+ * IT HOLDS THE QUESTION ID, AND IT IS NOT CONSUMED BY READING. Both of those
+ * are corrections to a version that stored only "yes" and cleared itself on
+ * the next batch, whichever batch that was. Any unrelated message in the
+ * window — an orchestrator's "also bump the dep", a second task reusing this
+ * worker — took the flag, and the real answer then arrived to a transcript
+ * that had just been wiped: a bare "use option B" with no question in front of
+ * it, the exact failure the flag exists to prevent, now reachable BY the flag.
+ *
+ * So the id is what clears it, and only the message carrying that id does.
+ * Until then the flag stays live and every batch keeps its transcript, which
+ * is the safe direction of the trade: keeping context costs tokens, losing the
+ * question costs the answer. In practice the window closes as soon as the
+ * answer lands, because the host tags a degraded late answer with the question
+ * it belongs to (`answersQuestionId`, modules/agent-to-agent/answer-worker.ts).
+ *
+ * The age bound is the backstop for the answer that never comes.
+ */
+const LATE_ANSWER_KEY = 'late_answer_expected';
+
+/**
+ * Long enough for a human to be asked and to reply through the orchestrator,
+ * and bounded so a worker idle overnight starts clean.
+ */
+const LATE_ANSWER_MAX_AGE_MS = 60 * 60 * 1000;
+
+export function markLateAnswerExpected(questionId: string): void {
+  setValue(LATE_ANSWER_KEY, questionId);
+}
+
+/** The question a late answer is still expected for, or null. Non-consuming. */
+export function lateAnswerExpectedFor(): string | null {
+  return getFresh(LATE_ANSWER_KEY, LATE_ANSWER_MAX_AGE_MS);
+}
+
+/** Called once the answer has arrived, or the wait is being abandoned. */
+export function clearLateAnswerExpected(): void {
+  deleteValue(LATE_ANSWER_KEY);
 }

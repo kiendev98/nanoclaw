@@ -90,6 +90,100 @@ export async function findSystemSession(agentGroupId: string, threadId: string):
   );
 }
 
+// ── Thread bindings: the thread a session opened ──
+
+/**
+ * The root message id inside a channel thread id.
+ *
+ * A thread id is `<platform_id>:<root message id>` — `slack:C0ACWU…:17884…`
+ * — so the root is everything after the LAST colon, because a platform id
+ * carries colons of its own.
+ *
+ * Parsing rather than rebuilding is the point. The composed shape belongs to
+ * the Chat SDK and can change; a rebuilt guess that no longer matches fails
+ * SILENTLY, by never finding the binding, and the symptom is the second
+ * session this whole mechanism exists to prevent.
+ */
+export function threadRootMessageId(threadId: string): string {
+  return threadId.slice(threadId.lastIndexOf(':') + 1);
+}
+
+/**
+ * The inverse, and it is confined to the REPLY path on purpose.
+ *
+ * Composing is avoidable when matching an inbound thread and unavoidable
+ * when addressing an outbound one — the adapter has to be handed a thread id
+ * it accepts. Keeping it to that one caller keeps the risk asymmetric, which
+ * is what makes this safe: a wrong guess here posts at top level, which a
+ * human sees immediately, while a wrong guess on the matching side fails
+ * silently.
+ */
+export function composeThreadId(platformId: string, rootMessageId: string): string {
+  return `${platformId}:${rootMessageId}`;
+}
+
+/**
+ * Record that this session opened a thread. First binding wins.
+ *
+ * `WHERE bound_root_message_id IS NULL` is what makes it first-wins rather
+ * than last-wins, and the direction matters: a session's SECOND top-level
+ * post in another channel must not silently steal the binding from the
+ * thread people are already replying in. That second thread stays unbound —
+ * see the one-binding-per-session note on migration 028.
+ *
+ * @returns true when this call created the binding.
+ */
+export async function bindSessionToThread(
+  sessionId: string,
+  messagingGroupId: string,
+  rootMessageId: string,
+): Promise<boolean> {
+  const result = await getDb().run(
+    `UPDATE sessions
+        SET bound_messaging_group_id = @mg, bound_root_message_id = @root
+      WHERE id = @id AND bound_root_message_id IS NULL`,
+    { id: sessionId, mg: messagingGroupId, root: rootMessageId },
+  );
+  return result.changes > 0;
+}
+
+/**
+ * INBOUND: the session that opened this thread, if any.
+ *
+ * Scoped to `status = 'active'` so a closed session cannot capture a live
+ * conversation — the reply then falls through to ordinary resolution and
+ * gets a fresh session, which is the correct answer once the owner is gone.
+ */
+export async function findSessionBoundToThread(
+  messagingGroupId: string,
+  rootMessageId: string,
+): Promise<Session | undefined> {
+  return getDb().get<Session>(
+    `SELECT * FROM sessions
+      WHERE bound_messaging_group_id = ? AND bound_root_message_id = ? AND status = 'active'`,
+    messagingGroupId,
+    rootMessageId,
+  );
+}
+
+/*
+ * THERE IS DELIBERATELY NO OUTBOUND READER HERE.
+ *
+ * `findSessionThreadBinding(sessionId, messagingGroupId)` used to live at this
+ * spot, returning the root of the thread a session had opened so a later send
+ * could be threaded into it. It had no production caller — only tests and a
+ * migration docstring naming it — and its one plausible caller is the very
+ * thing delivery.ts:500 removed on purpose: redirecting a thread-less outbound
+ * into the bound thread captured every later question card and proactive post
+ * for the life of a `shared` session, because such a session's `thread_id` is
+ * always null and the binding is first-wins with nothing that clears it.
+ *
+ * An exported, tested, barrel-re-exported function is an invitation, and this
+ * one invited exactly the bug that was just paid for. Deleted rather than left
+ * unused. If a genuine outbound case appears, read the comment in delivery.ts
+ * first and then write the narrower thing that case needs.
+ */
+
 /** Per-task session thread id for a scheduled task series. */
 export function taskThreadId(seriesId: string): string {
   return `${TASKS_SYSTEM_THREAD_ID}:${seriesId}`;
@@ -155,8 +249,8 @@ export async function deleteSession(id: string): Promise<void> {
  */
 export async function createPendingQuestion(pq: PendingQuestion): Promise<boolean> {
   const result = await getDb().run(
-    `INSERT INTO pending_questions (question_id, session_id, message_out_id, platform_id, channel_type, thread_id, title, options_json, created_at)
-       VALUES (@question_id, @session_id, @message_out_id, @platform_id, @channel_type, @thread_id, @title, @options_json, @created_at)
+    `INSERT INTO pending_questions (question_id, session_id, message_out_id, platform_id, channel_type, thread_id, title, options_json, created_at, expires_at)
+       VALUES (@question_id, @session_id, @message_out_id, @platform_id, @channel_type, @thread_id, @title, @options_json, @created_at, @expires_at)
        ON CONFLICT (question_id) DO NOTHING`,
     {
       question_id: pq.question_id,
@@ -168,6 +262,7 @@ export async function createPendingQuestion(pq: PendingQuestion): Promise<boolea
       title: pq.title,
       options_json: JSON.stringify(pq.options),
       created_at: pq.created_at,
+      expires_at: pq.expires_at ?? null,
     },
   );
   return result.changes > 0;
@@ -177,6 +272,55 @@ export async function getPendingQuestion(questionId: string): Promise<PendingQue
   const row = await getDb().get<Omit<PendingQuestion, 'options'> & { options_json: string }>(
     'SELECT * FROM pending_questions WHERE question_id = ?',
     questionId,
+  );
+  if (!row) return undefined;
+  const { options_json, ...rest } = row;
+  return { ...rest, options: JSON.parse(options_json) };
+}
+
+/**
+ * The newest ESCALATED question any live session of `agentGroupId` is still
+ * waiting on — a question with no human at the other end.
+ *
+ * Asked by agent group rather than by session because the caller knows only
+ * the group: an orchestrator names its worker by destination, and a
+ * destination resolves to a group.
+ *
+ * THE LANE FILTER IS LOAD-BEARING, NOT TIDINESS. `pending_questions` holds
+ * both lanes: the escalated path writes `channel_type = 'agent'`
+ * (`recordEscalatedQuestion`) and the ordinary path writes a real channel when
+ * a card goes to a person. Without the filter, `answer_worker` reaches a row
+ * whose answer belongs to a HUMAN — it writes the `question_response`, the
+ * asking agent unblocks as though the button had been clicked, and the person
+ * who then clicks the live card finds the row gone and their click silently
+ * unclaimed. Filtering here makes the two lifecycles disjoint at the only
+ * place both can be seen.
+ *
+ * `status = 'active'` for the same reason `findSessionBoundToThread` has it: a
+ * closed session's row can still be newest, and answering into a dead session
+ * writes a response nothing will ever read.
+ *
+ * "NEWEST" IS STILL A CHOICE, and a group can hold more than one open question
+ * — a2a mints a session per peer, and each can block on its own. Within the
+ * escalated lane the wrong pick degrades safely: the answer reaches one
+ * waiting caller and the other times out into an ordinary message. Across
+ * lanes it did not, which is what the filter above fixes.
+ *
+ * FRESHNESS IS THE CALLER'S. This returns the row and says nothing about
+ * whether the tool that wrote it is still listening; the caller compares
+ * `expires_at` against now. Keeping the clock out of the query is what lets
+ * the bound stay owned by the side that actually does the waiting.
+ */
+export async function getOpenQuestionForAgentGroup(agentGroupId: string): Promise<PendingQuestion | undefined> {
+  const row = await getDb().get<Omit<PendingQuestion, 'options'> & { options_json: string }>(
+    `SELECT pq.* FROM pending_questions pq
+       JOIN sessions s ON s.id = pq.session_id
+      WHERE s.agent_group_id = ?
+        AND s.status = 'active'
+        AND pq.channel_type = 'agent'
+      ORDER BY pq.created_at DESC
+      LIMIT 1`,
+    agentGroupId,
   );
   if (!row) return undefined;
   const { options_json, ...rest } = row;

@@ -5,6 +5,22 @@
  * resolve/pick agent → access gate → resolve/create session → write
  * messages_in → wake container.
  *
+ * Fan-out runs in two passes, and the second one exists because the first
+ * cannot see it. The wired pass asks `messaging_group_agents` who is wired to
+ * this chat; the bound pass asks which session OPENED this thread, which is
+ * how a message reaches an agent that is deliberately not wired here — a repo
+ * worker granted one channel for one job.
+ *
+ * THE TWO PASSES PARTITION THE AGENT GROUPS, they do not layer over each
+ * other. The bound pass skips every group this chat's wiring names, served or
+ * refused, so a wiring's own engage/scope/access decision is always final for
+ * the groups it covers. Anything weaker is a policy bypass rather than an
+ * addition: the bind hook in delivery.ts claims any session whose root post
+ * lands, wired or not, so an ordinary `mention` agent gets bound the first
+ * time it is mentioned — and a second pass that re-decided engagement for it
+ * would quietly turn `mention` into `mention-sticky`. See
+ * `deliverToBoundSession`.
+ *
  * Two module hooks (registered by the permissions module):
  *   - `setSenderResolver` runs BEFORE agent resolution so user rows get
  *     upserted even if the message ends up dropped by agent wiring.
@@ -20,6 +36,7 @@
 import { getChannelAdapter, getChannelDefaults } from './channels/channel-registry.js';
 import { resolveThreadPolicy, resolveUnknownSenderPolicy } from './channels/channel-defaults.js';
 import { gateCommand } from './command-gate.js';
+import { deliverToBoundSession, findBoundSessionFor, messageIdForAgent } from './router-bound-session.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { recordDroppedMessage } from './db/dropped-messages.js';
 import {
@@ -27,7 +44,7 @@ import {
   getMessagingGroupAgents,
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
-import { findSessionForAgent } from './db/sessions.js';
+import { findSessionBoundToThread, findSessionForAgent, threadRootMessageId } from './db/sessions.js';
 import { backfillNewSession, fanInboundMessage } from './modules/cross-session-context/index.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
@@ -297,6 +314,29 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   // 1b. No wirings — either silent drop (plain chatter / denied channel) or
   //     escalate to owner for channel-registration approval.
   if (agentCount === 0) {
+    // A BINDING IS REACH THIS COUNT CANNOT SEE. `agentCount` counts
+    // `messaging_group_agents` rows, and a bound session deliberately has
+    // none — that absence is what makes a lent channel die with the session
+    // instead of leaving a wiring row behind. So a worker lent a channel no
+    // other agent uses would have its replies dropped here, ~160 lines before
+    // the fan-out that would have delivered them, with the post it was
+    // replying to having gone out perfectly well.
+    //
+    // The lookup runs first and the sender is resolved only once it hits, so
+    // the short-circuit this block exists for still costs one indexed read on
+    // an ordinary unwired channel — no auto-create, no sender resolution, no
+    // log spam, exactly as before.
+    const bound = await findBoundSessionFor(mg, event);
+    if (bound) {
+      const boundUserId = senderResolver ? await senderResolver(event) : null;
+      // Empty on purpose, and provably so: this branch runs only when
+      // `agentCount === 0`, so no wiring row names any group here.
+      if (await deliverToBoundSession(mg, event, boundUserId, bound, new Set(), accessGate)) return;
+    }
+
+    // A thread reply is engaged by its binding, not by a mention — but with no
+    // binding this is an ordinary unwired channel again, and the mention rule
+    // decides as it always did.
     if (!isMention) return;
     if (mg.denied_at) {
       log.debug('Message dropped — channel was denied by owner', {
@@ -370,6 +410,17 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   let engagedCount = 0;
   let accumulatedCount = 0;
   let subscribed = false;
+  // EVERY agent group this chat's wiring names — not the ones the loop below
+  // ends up delivering to. The distinction is the whole point: a group that is
+  // wired here and was REFUSED (no mention, sender out of scope) has already
+  // had its answer decided by its own wiring, and the bound pass must not
+  // reopen the question. Taking the set from the wiring rather than from the
+  // loop's outcomes is what makes that true by construction.
+  //
+  // It also still covers the duplicate it replaced: a served group is wired by
+  // definition, and `messageIdForAgent` namespaces by agent group, so a second
+  // write would collide on `messages_in.id` rather than merely duplicate.
+  const wiredHere = new Set(agents.map((a) => a.agent_group_id));
 
   for (const agent of agents) {
     const agentGroup = await getAgentGroup(agent.agent_group_id);
@@ -440,6 +491,17 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       });
     }
   }
+
+  // 5. Second pass: a reply inside a thread that some session OPENED, whose
+  //    agent group this chat's wiring does not mention.
+  //
+  //    The wired fan-out above cannot find it. `getMessagingGroupAgents`
+  //    answers "who is wired here", and the case this exists for is an agent
+  //    that is deliberately NOT wired — a repo worker granted one channel for
+  //    one job. It posts, a thread forms around its post, and a human replies
+  //    in that thread expecting the thing they are replying to to hear them.
+  const boundHere = await findBoundSessionFor(mg, event);
+  if (boundHere && (await deliverToBoundSession(mg, event, userId, boundHere, wiredHere, accessGate))) engagedCount++;
 
   if (engagedCount + accumulatedCount === 0) {
     await recordDroppedMessage({
@@ -663,15 +725,4 @@ async function deliverToAgent(
       if (!woke) stopTypingRefresh(freshSession.id);
     }
   }
-}
-
-/**
- * When fanning out, the same inbound message lands in multiple per-agent
- * session DBs. messages_in.id is PRIMARY KEY, so reuse of the raw id would
- * collide across sessions (or, more subtly, within one session if re-routed
- * after a retry). Namespace by agent_group_id to keep ids unique per session.
- */
-function messageIdForAgent(baseId: string | undefined, agentGroupId: string): string {
-  const id = baseId && baseId.length > 0 ? baseId : generateId();
-  return `${id}:${agentGroupId}`;
 }

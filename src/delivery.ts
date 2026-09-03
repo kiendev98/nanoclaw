@@ -4,6 +4,7 @@
  * host-owned inbound state; other implementations preserve that ownership.
  */
 import {
+  bindSessionToThread,
   getRunningSessions,
   getActiveSessions,
   createPendingQuestion,
@@ -369,6 +370,7 @@ async function deliverMessage(
     if (!(await hasTable(getDb(), 'agent_destinations'))) {
       throw new Error(`agent-to-agent module not installed — cannot route message ${msg.id}`);
     }
+    await recordEscalatedQuestion(content, msg, session);
     const { routeAgentMessage } = await import('./modules/agent-to-agent/agent-route.js');
     await routeAgentMessage(
       {
@@ -399,6 +401,7 @@ async function deliverMessage(
   // (instead of marking it delivered when nothing was actually delivered,
   // which was the pre-refactor bug).
   let deliverInstance: string | undefined;
+  let deliverMg: { id: string; platformId: string } | undefined;
   if (msg.channelType && msg.platformId) {
     // Resolve the messaging group ORIGIN-SESSION-FIRST: when the message
     // targets the session's own chat address, the origin row wins even if
@@ -445,6 +448,10 @@ async function deliverMessage(
       }
     }
     deliverInstance = mg.instance;
+    // Carried out of this block for the thread-binding hooks below, which
+    // need the messaging group's identity — `msg.platformId` alone cannot
+    // stand in for it, since sibling instances share a platform address.
+    deliverMg = { id: mg.id, platformId: mg.platform_id };
   }
 
   // Track pending questions for ask_user_question flow.
@@ -490,15 +497,67 @@ async function deliverMessage(
       ? readOutboxFiles(session.agent_group_id, session.id, msg.id, content.files as string[])
       : undefined;
 
+  // There is deliberately NO outbound counterpart to the binding below.
+  //
+  // An earlier revision redirected every thread-less send into the session's
+  // bound thread. That is wrong, and it is wrong for ordinary chat sessions
+  // rather than for workers: a `shared`-mode session's `thread_id` is always
+  // null (session-manager.ts), every MCP tool copies that null onto its
+  // outbound, and the binding is first-wins with nothing that clears it. So
+  // the first thread such a session ever opened captured every later question
+  // card and proactive post for the life of the session — a daily digest
+  // threading under day one, a question surfacing in a week-old thread nobody
+  // is watching.
+  //
+  // Nothing is lost by leaving it out. A reply to a human's thread reply
+  // already resolves through `getLatestInboundRoute` in the container, with no
+  // binding involved. The only case the redirect uniquely covered was the
+  // proactive send with no preceding inbound — which is exactly the case where
+  // threading it into an old conversation is the wrong answer.
+  const deliverThreadId = msg.threadId;
+
   const platformMsgId = await deliveryAdapter.deliver(
     msg.channelType,
     msg.platformId,
-    msg.threadId,
+    deliverThreadId,
     msg.kind,
     msg.content,
     files,
     deliverInstance,
   );
+
+  // This post OPENED a thread, so claim it — the inbound half is in
+  // `resolveSession`, which reads the binding back to route a human's reply
+  // into the session that spoke.
+  //
+  // `deliverThreadId === null` is precisely the condition: the message named
+  // no thread, so the channel had nowhere to put it but top level, and its own
+  // id is now that thread's root.
+  //
+  // ONLY A ROOT POST BINDS. A reply carries its own message id, which names
+  // no thread — measured on a live install, a reply delivered into the thread
+  // rooted at `…925.613579` came back as `1788370933.675069`. Binding on
+  // every delivery would store a key no inbound thread can ever match, and it
+  // would fail silently.
+  //
+  // Non-fatal: the binding is a convenience on top of a delivery that is
+  // otherwise correct, so a failure here costs a future inbound its session,
+  // not this message. Placed after a SUCCESSFUL send, so nothing is claimed on
+  // behalf of a message the channel refused.
+  if (deliverThreadId === null && platformMsgId && deliverMg) {
+    try {
+      const bound = await bindSessionToThread(session.id, deliverMg.id, platformMsgId);
+      if (bound) {
+        log.info('Session bound to the thread it opened', {
+          sessionId: session.id,
+          messagingGroupId: deliverMg.id,
+          rootMessageId: platformMsgId,
+        });
+      }
+    } catch (err) {
+      log.warn('Could not bind the opened thread', { id: msg.id, sessionId: session.id, err });
+    }
+  }
   log.info('Message delivered', {
     id: msg.id,
     channelType: msg.channelType,
@@ -650,6 +709,69 @@ export function getDeliveryAction(action: string): DeliveryActionHandler | undef
  * These are written to messages_out because the container can't write to inbound.db.
  * The host applies them to inbound.db here.
  */
+/**
+ * Persist a question a worker escalated to its orchestrator.
+ *
+ * THE SYMMETRIC TWIN of the `ask_question` block further down, and it has to
+ * live up here because that block is unreachable on this lane: the
+ * `channel_type === 'agent'` branch returns before it. That early return is
+ * exactly why an escalated question used to leave no row anywhere, so no
+ * button existed and nothing could answer it.
+ *
+ * The envelope rides ALONGSIDE the prose rather than replacing it —
+ * `performAgentRoute` renders `content.text` and nothing else, so a structured
+ * payload on its own reaches the orchestrator as an empty message. `title` and
+ * `options` travel with it because `pending_questions` requires both and this
+ * lane has no card to read them from.
+ *
+ * `expiresAt` travels for a sharper reason: the host cannot work it out. The
+ * tool's bound is caller-settable and its clock starts when it WROTE the row,
+ * which is at least one delivery poll before the `created_at` stamped here.
+ * Both gaps used to end with a `question_response` written for a tool that had
+ * stopped listening, which the poll loop drops by kind — a silently destroyed
+ * answer. Absent (an older container), the reader falls back to the historical
+ * bound; see migration 029.
+ *
+ * `session` is the ASKER's, since deliverMessage is handed the session that
+ * wrote the row. That is what makes the row resolvable later: `answer_worker`
+ * looks up the open question by the asking agent group.
+ *
+ * Silent on a malformed or absent envelope, because an ordinary agent-to-agent
+ * message carries no `question` field and must not be logged as a fault.
+ */
+async function recordEscalatedQuestion(
+  content: Record<string, unknown>,
+  msg: { id: string; platformId: string | null; channelType: string | null; threadId: string | null },
+  session: Session,
+): Promise<void> {
+  const q = content.question as { id?: unknown; title?: unknown; options?: unknown; expiresAt?: unknown } | undefined;
+  if (!q || typeof q.id !== 'string' || typeof q.title !== 'string' || !Array.isArray(q.options)) return;
+  // Guarded exactly like the channel path: without the interactive module the
+  // table does not exist, and the question still reaches the orchestrator as
+  // prose — it simply cannot be answered by tool.
+  if (!(await hasTable(getDb(), 'pending_questions'))) return;
+
+  const inserted = await createPendingQuestion({
+    question_id: q.id,
+    session_id: session.id,
+    message_out_id: msg.id,
+    platform_id: msg.platformId,
+    channel_type: msg.channelType,
+    thread_id: msg.threadId,
+    title: q.title,
+    options: normalizeOptions(q.options as never),
+    created_at: new Date().toISOString(),
+    // Validated rather than trusted: a non-string, or a string `new Date()`
+    // cannot parse, falls back to the historical bound instead of writing a
+    // deadline that reads as NaN and expires everything or nothing.
+    expires_at:
+      typeof q.expiresAt === 'string' && Number.isFinite(new Date(q.expiresAt).getTime()) ? q.expiresAt : null,
+  });
+  if (inserted) {
+    log.info('Escalated question recorded', { questionId: q.id, sessionId: session.id });
+  }
+}
+
 async function handleSystemAction(content: Record<string, unknown>, session: Session): Promise<void> {
   const action = content.action as string;
   log.info('System action from agent', { sessionId: session.id, action });

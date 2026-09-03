@@ -48,6 +48,10 @@ const {
   mockSessionWrite,
   mockFindWorkerForOrigin,
   mockGetDestinationByTarget,
+  mockGetDestinationByName,
+  mockGetSessionsByAgentGroup,
+  mockGetDestinations,
+  mockCreateDestination,
   mockGetMessagePolicy,
   mockHasDestination,
   liveApprovals,
@@ -62,6 +66,10 @@ const {
   mockSessionWrite: vi.fn(),
   mockFindWorkerForOrigin: vi.fn().mockResolvedValue(undefined),
   mockGetDestinationByTarget: vi.fn().mockResolvedValue(undefined),
+  mockGetDestinationByName: vi.fn().mockResolvedValue(undefined),
+  mockGetSessionsByAgentGroup: vi.fn().mockResolvedValue([]),
+  mockGetDestinations: vi.fn().mockResolvedValue([]),
+  mockCreateDestination: vi.fn(),
   mockGetMessagePolicy: vi.fn().mockResolvedValue(undefined),
   mockHasDestination: vi.fn().mockResolvedValue(true),
   liveApprovals: new Map<string, import('../../types.js').PendingApproval>(),
@@ -80,7 +88,14 @@ vi.mock('../../db/container-configs.js', () => ({
   ensureContainerConfig: () => {},
 }));
 vi.mock('../../db/agent-groups.js', () => ({
-  getAgentGroup: (id: string) => ({ id, name: id.toUpperCase(), folder: id, agent_provider: null, created_at: '' }),
+  getAgentGroup: (id: string) => ({
+    id,
+    name: id.toUpperCase(),
+    folder: id,
+    agent_provider: null,
+    created_at: '',
+    ...sourceGroupOverride.value,
+  }),
   getAgentGroupByFolder: () => undefined,
   createAgentGroup: (...a: unknown[]) => mockCreateAgentGroup(...a),
   updateAgentGroup: (...a: unknown[]) => mockUpdateAgentGroup(...a),
@@ -93,9 +108,10 @@ vi.mock('./write-destinations.js', () => ({
   writeDestinations: (...a: unknown[]) => mockWriteDestinations(...a),
 }));
 vi.mock('./db/agent-destinations.js', () => ({
-  getDestinationByName: () => undefined,
+  getDestinationByName: (...a: unknown[]) => mockGetDestinationByName(...a),
   getDestinationByTarget: (...a: unknown[]) => mockGetDestinationByTarget(...a),
-  createDestination: vi.fn(),
+  getDestinations: (...a: unknown[]) => mockGetDestinations(...a),
+  createDestination: (...a: unknown[]) => mockCreateDestination(...a),
   hasDestination: (...a: unknown[]) => mockHasDestination(...a),
   normalizeName: (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
 }));
@@ -123,6 +139,11 @@ vi.mock('../../container-runner.js', () => ({
 // Mutable so one test can assert the docker refusal. `local` is this fork's
 // default and what every other test in this file assumes.
 const driverKind = { value: 'local' };
+
+/** Lets one test make the REQUESTING group a worker. Same lazy-reference
+ * pattern as `driverKind`: the mock factory is hoisted, but it only runs
+ * when a test calls it, by which time this has been initialised. */
+const sourceGroupOverride: { value: Record<string, unknown> } = { value: {} };
 vi.mock('../../drivers/index.js', () => ({
   getSessionDriver: () => ({ kind: driverKind.value }),
 }));
@@ -131,6 +152,7 @@ vi.mock('../../db/sessions.js', () => ({
   getPendingApproval: (id: string) => liveApprovals.get(id),
   getRunningSessions: () => [],
   getActiveSessions: () => [],
+  getSessionsByAgentGroup: (...a: unknown[]) => mockGetSessionsByAgentGroup(...a),
   createPendingQuestion: vi.fn(),
 }));
 
@@ -138,6 +160,7 @@ vi.mock('../../db/sessions.js', () => ({
 // delivery actions — the only reachable path to the body under test.
 import './index.js';
 import { getDeliveryAction } from '../../delivery.js';
+import { validateSpawnWorker } from './spawn-worker.js';
 import { workerWorkspace } from './worker-identity.js';
 
 const SESSION = { id: 'sess-1', agent_group_id: 'ag-1' } as Session;
@@ -234,6 +257,9 @@ beforeEach(() => {
   liveApprovals.clear();
   mockFindWorkerForOrigin.mockResolvedValue(undefined);
   mockGetDestinationByTarget.mockResolvedValue(undefined);
+  mockGetDestinationByName.mockResolvedValue(undefined);
+  mockGetDestinations.mockResolvedValue([]);
+  mockGetSessionsByAgentGroup.mockResolvedValue([]);
   mockGetMessagePolicy.mockResolvedValue(undefined);
   mockHasDestination.mockResolvedValue(true);
   makeRepo();
@@ -316,6 +342,63 @@ describe('spawn_worker — the task is delivered verbatim', () => {
 
     const group = mockCreateAgentGroup.mock.calls[0][0] as { id: string };
     expect(briefsTo(group.id)).toEqual(['/blueprint FMTA-343']);
+  });
+});
+
+/**
+ * `runGuarded` is precheck -> guard -> handler, and a precheck returning false
+ * means "already answered", not "invalid". So a precheck that COMPLETES a case
+ * skips the guard for it — which is what reuse used to do, while the create
+ * path went through it. A privilege grant (the channel lending) sat on the
+ * ungated half of a guarded action.
+ *
+ * Nothing was exploitable, because `workersSpawn.decide` allows any agent
+ * actor. That is why this is pinned structurally rather than by making the
+ * guard deny: the property that matters is that the precheck does no WORK, so
+ * whoever first tightens that decision gets it applied to all of the traffic
+ * rather than half.
+ */
+describe('the precheck decides nothing that the guard should decide', () => {
+  const EXISTING_REUSABLE = {
+    id: 'ag-worker-1',
+    name: 'Scout',
+    folder: 'scout',
+    agent_provider: null,
+    created_at: '',
+    workspace_path: WORKTREE,
+    origin_session_id: SESSION.id,
+  };
+
+  beforeEach(() => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    mockFindWorkerForOrigin.mockResolvedValue(EXISTING_REUSABLE);
+    mockGetDestinationByTarget.mockResolvedValue({ local_name: 'scout' });
+  });
+
+  it('lets a reusable worker through to the guard instead of answering it', async () => {
+    expect(await validateSpawnWorker(request(), SESSION)).toBe(true);
+  });
+
+  it('grants no channel and briefs nobody while still in the precheck', async () => {
+    // The requester genuinely holds the channel, so the only thing that can
+    // stop the grant here is the precheck declining to make it.
+    mockGetDestinationByName.mockImplementation(async (agentGroupId: string, localName: string) =>
+      agentGroupId === 'ag-1' && localName === 'team-chat'
+        ? { agent_group_id: 'ag-1', local_name: 'team-chat', target_type: 'channel', target_id: 'mg-team-chat' }
+        : undefined,
+    );
+
+    await validateSpawnWorker(request({ channels: ['team-chat'] }), SESSION);
+
+    expect(mockCreateDestination).not.toHaveBeenCalled();
+    expect(response()).toBeUndefined();
+  });
+
+  it('still refuses a malformed request without reaching the guard', async () => {
+    // The other half of the contract: real refusals stay in the precheck, so
+    // an invalid request is answered without a guard consult at all.
+    expect(await validateSpawnWorker(request({ repo: '' }), SESSION)).toBe(false);
+    expect(response()?.status).toBe('error');
   });
 });
 
@@ -409,6 +492,42 @@ describe('spawn_worker — reuse for one (repo, thread) pair', () => {
   });
 });
 
+describe('spawn_worker — one level of delegation', () => {
+  // A sub-worker's escalated question cannot be answered. It waits 600s on its
+  // parent; if the parent must ask ITS orchestrator, that hop is also 600s and
+  // starts later, so the inner wait always expires first — every time, not
+  // occasionally. Both agents then report being blocked on a question that was
+  // being answered. Neither can shorten its bound, because neither can see how
+  // deep the chain is.
+  it('refuses a worker that tries to spawn a worker, and creates nothing', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    sourceGroupOverride.value = { origin_session_id: 'sess-the-orchestrator' };
+
+    try {
+      await runSpawnWorker(request());
+    } finally {
+      sourceGroupOverride.value = {};
+    }
+
+    const answer = response();
+    expect(answer?.status).toBe('error');
+    expect(answer?.result.error).toContain('is itself a worker');
+    // The refusal names the way forward, so the caller does not simply retry.
+    expect(answer?.result.error).toContain('report back to your orchestrator');
+    expect(mockCreateAgentGroup).not.toHaveBeenCalled();
+    expect(writes().filter(([, , message]) => message.kind === 'chat')).toEqual([]);
+  });
+
+  it('still allows an ordinary agent group to spawn one', async () => {
+    // The gate keys on `origin_session_id`, which only this action ever sets —
+    // so a normal orchestrator is unaffected.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+
+    await runSpawnWorker(request());
+
+    expect(response()?.status).toBe('created');
+  });
+});
 describe('spawn_worker — a driver that cannot reach a host worktree', () => {
   // A worktree lives on the host under WORKTREES_DIR and nothing mounts it into
   // a container — and nothing cheaply can, since a worktree's `.git` is a
@@ -502,6 +621,138 @@ describe('spawn_worker — no approval gate, for any cli_scope', () => {
     const answer = response();
     expect(answer?.status).toBe('created');
     expect(answer?.status).not.toBe('pending');
+  });
+});
+
+describe('spawn_worker — lending a worker a channel', () => {
+  /**
+   * The requester holds `team-chat`, and nothing else.
+   *
+   * `getDestinationByName` is asked about both groups: the requester's own
+   * map, which is what attenuation reads, and the worker's, which is what
+   * makes the copy idempotent. Answering only for the requester is what a
+   * fresh worker actually looks like.
+   */
+  function requesterHoldsTheChannel(): void {
+    mockGetDestinationByName.mockImplementation(async (agentGroupId: string, localName: string) =>
+      agentGroupId === 'ag-1' && localName === 'team-chat'
+        ? {
+            agent_group_id: 'ag-1',
+            local_name: 'team-chat',
+            target_type: 'channel',
+            target_id: 'mg-team-chat',
+            created_at: '',
+          }
+        : undefined,
+    );
+    mockGetDestinations.mockResolvedValue([
+      {
+        agent_group_id: 'ag-1',
+        local_name: 'team-chat',
+        target_type: 'channel',
+        target_id: 'mg-team-chat',
+        created_at: '',
+      },
+    ]);
+  }
+
+  /** The channel rows written onto some group other than the requester. */
+  function lentRows(): Array<Record<string, unknown>> {
+    return (mockCreateDestination.mock.calls as Array<[Record<string, unknown>]>)
+      .map(([row]) => row)
+      .filter((row) => row.target_type === 'channel');
+  }
+
+  it('copies a channel the requester holds onto the new worker', async () => {
+    // Attenuated delegation: the worker ends up with a row pointing at the
+    // same messaging group, under the same name the requester uses.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    requesterHoldsTheChannel();
+
+    await runSpawnWorker(request({ channels: ['team-chat'] }));
+
+    const [row] = lentRows();
+    expect(row).toBeDefined();
+    expect(row.local_name).toBe('team-chat');
+    expect(row.target_id).toBe('mg-team-chat');
+    expect(row.agent_group_id).not.toBe('ag-1');
+  });
+
+  it('refuses the whole call when the requester does not hold the channel', async () => {
+    // You cannot lend what you do not hold. A worker runs code from another
+    // repository, so its own instructions must never widen its reach.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    requesterHoldsTheChannel();
+
+    await runSpawnWorker(request({ channels: ['team-chat', 'engineering'] }));
+
+    expect(response()?.status).toBe('error');
+    expect(response()?.result.error).toContain('no channel destination named "engineering"');
+  });
+
+  it('names what could have been lent, so the caller can correct itself', async () => {
+    // The caller is an agent and cannot list its own grants any other way —
+    // the same reason `resolveRepo`'s refusal lists the resolvable repos.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    requesterHoldsTheChannel();
+
+    await runSpawnWorker(request({ channels: ['engineering'] }));
+
+    expect(response()?.result.error).toContain('team-chat');
+  });
+
+  it('creates nothing at all when a channel is refused', async () => {
+    // Refused in the precheck, before the worktree and before any central-DB
+    // write: a partial grant hands back a worker that looks provisioned and
+    // then fails at its first post.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    requesterHoldsTheChannel();
+
+    await runSpawnWorker(request({ channels: ['engineering'] }));
+
+    expect(mockCreateAgentGroup).not.toHaveBeenCalled();
+    expect(fs.existsSync(WORKTREE)).toBe(false);
+  });
+
+  it('lends nothing when no channel is asked for', async () => {
+    // The ordinary case. A worker reports to its orchestrator, and the
+    // orchestrator is the one that speaks to the human.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    requesterHoldsTheChannel();
+
+    await runSpawnWorker(request());
+
+    expect(lentRows()).toHaveLength(0);
+  });
+
+  it('lends a channel to a worker that already exists', async () => {
+    // A second call for the same (repo, thread) may name a channel the first
+    // did not, and the worker should gain it rather than keep the old set.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    requesterHoldsTheChannel();
+    mockFindWorkerForOrigin.mockResolvedValue({ id: 'ag-worker', name: 'Scout', workspace_path: WORKTREE });
+    mockGetDestinationByTarget.mockResolvedValue({ local_name: 'scout' });
+
+    await runSpawnWorker(request({ channels: ['team-chat'] }));
+
+    expect(response()?.status).toBe('reused');
+    expect(lentRows().map((r) => r.agent_group_id)).toContain('ag-worker');
+  });
+
+  it('re-projects the map so a RUNNING worker can resolve the new name', async () => {
+    // `spawnContainer` writes the destination map on every wake, so a worker
+    // created now reads its grants when it starts. One already running holds
+    // the map from its last wake, and without this its container answers
+    // "unknown destination" for a channel the central DB says it holds.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    requesterHoldsTheChannel();
+    mockFindWorkerForOrigin.mockResolvedValue({ id: 'ag-worker', name: 'Scout', workspace_path: WORKTREE });
+    mockGetDestinationByTarget.mockResolvedValue({ local_name: 'scout' });
+    mockGetSessionsByAgentGroup.mockResolvedValue([{ id: 'sess-worker', agent_group_id: 'ag-worker' }]);
+
+    await runSpawnWorker(request({ channels: ['team-chat'] }));
+
+    expect(mockWriteDestinations).toHaveBeenCalledWith('ag-worker', 'sess-worker');
   });
 });
 

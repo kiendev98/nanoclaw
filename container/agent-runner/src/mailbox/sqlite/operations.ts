@@ -113,7 +113,6 @@ export function sqliteFindQuestionResponse(questionId: string): MessageInRow | u
     inbound.close();
   }
 }
-
 export function sqliteFindCliResponse(requestId: string): MessageInRow | undefined {
   const inbound = openInboundDb();
   try {

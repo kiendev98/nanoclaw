@@ -102,6 +102,54 @@ describe('resolveGroupTimezone', () => {
   });
 });
 
+describe('a spawned worker gets the built-in skills', () => {
+  /**
+   * A worker is provisioned mid-run by `spawn_worker`, which reaches
+   * `ensureContainerConfig` through `initGroupFilesystem`. That insert names
+   * three columns and `skills` is not one of them, so the whole guarantee
+   * rests on the column DEFAULT in migration 014 surviving — and a default is
+   * exactly the kind of thing a later migration rewrites without anyone
+   * noticing, because every existing row already carries a value.
+   *
+   * The failure it guards against is silent in the worst way: the composed
+   * project document still NAMES the shared skills, so the worker is told it
+   * has tools it cannot invoke, and reports the resulting confusion as its own.
+   */
+  const WORKER: AgentGroup = {
+    id: 'ag-worker-skills',
+    name: 'scout',
+    folder: 'scout',
+    agent_provider: null,
+    origin_session_id: 'sess-1',
+    created_at: new Date().toISOString(),
+  };
+
+  beforeEach(async () => {
+    await runMigrations(await initTestDb());
+    await createAgentGroup(WORKER);
+    // Exactly what provisioning does — provider only, no skill selection.
+    await ensureContainerConfig(WORKER.id, 'claude');
+  });
+  afterEach(async () => {
+    await closeDb();
+  });
+
+  it("resolves to 'all', not an empty selection", async () => {
+    const row = (await getContainerConfig(WORKER.id))!;
+    expect(configFromDb(row, WORKER).skills).toBe('all');
+  });
+
+  it("materializes 'all' into the container config the runner reads", async () => {
+    // `stageSkillsPlugin` turns 'all' into one symlink per directory under
+    // container/skills/. An empty array here would stage a plugin with no
+    // skills in it and warn about nothing.
+    const row = (await getContainerConfig(WORKER.id))!;
+    const config = configFromDb(row, WORKER);
+    expect(Array.isArray(config.skills)).toBe(false);
+    expect(config.skills).toBe('all');
+  });
+});
+
 describe('parseMcpServerConfig', () => {
   it('preserves stdio config and accepts HTTPS Streamable HTTP config', () => {
     expect(parseMcpServerConfig({ command: 'pnpm', args: ['dlx', 'server'], env: { TOKEN: 'stub' } })).toEqual({

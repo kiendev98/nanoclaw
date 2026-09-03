@@ -237,7 +237,7 @@ describe('extendTool — fixture extension of spawn_worker (end to end)', () => 
     });
 
     const props = schemaProps(spawnWorker);
-    expect(Object.keys(props).sort()).toEqual(['name', 'purpose', 'repo', 'task']);
+    expect(Object.keys(props).sort()).toEqual(['channels', 'name', 'purpose', 'repo', 'task']);
     expect(spawnWorker.tool.description?.endsWith('The purpose line is shown publicly.')).toBe(true);
 
     await spawnWorker.handler({ repo: 'saber', task: 'audit the gates', purpose: 'Deep research' });

@@ -1,5 +1,5 @@
 /**
- * Repo worker MCP tool: spawn_worker.
+ * Repo worker MCP tools: spawn_worker, answer_worker.
  *
  * A worker is not a companion agent. It is a delegate that stands inside
  * ANOTHER repository — its own process, its own working directory, a git
@@ -23,7 +23,26 @@
  * there is no hold to answer inline. The only thing that can still outrun the
  * bound is the worktree checkout itself: on timeout the tool reports that
  * creation is still running, and the host wakes the caller when it finishes.
+ *
+ * `channels` LENDS the worker a conversation. A worker has no channel of its
+ * own, which is right for the ordinary case — it reports to its orchestrator
+ * and the orchestrator speaks to the human. It is wrong for a workflow the
+ * worker must DRIVE, such as a review loop with a human reviewer. Lending is
+ * attenuated on the host: the caller must already hold each named channel, so
+ * a worker's own instructions can never widen its reach.
+ *
+ * `answer_worker` closes the other half of the loop. A worker has no channel,
+ * so `ask_user_question` sends its question up this same lane and BLOCKS. The
+ * problem that makes a second verb necessary is that no existing door carries
+ * intent: `send_message` and a reused `spawn_worker` both end in
+ * `routeAgentMessage` and write a byte-identical `kind: 'chat'` row, so a
+ * blocked worker could only guess which message was its answer. It guessed by
+ * order, and a second instruction sent during the same turn was silently
+ * relabelled as the decision. This tool writes a `question_response` instead —
+ * the same row a button click produces — so the answer reaches the waiting
+ * call and an ordinary message reaches the model, each by its own door.
  */
+import { findByName, getAllDestinations } from '../destinations.js';
 import { findCliResponse, markCompleted } from '../db/messages-in.js';
 import { writeMessageOut } from '../db/messages-out.js';
 import { registerTools } from './server.js';
@@ -52,6 +71,11 @@ function log(msg: string): void {
   console.error(`[mcp-tools] ${msg}`);
 }
 
+function destinationList(): string {
+  const all = getAllDestinations();
+  return all.length === 0 ? '(none)' : all.map((d) => d.name).join(', ');
+}
+
 function generateId(): string {
   return `worker-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -62,6 +86,35 @@ function ok(text: string) {
 
 function err(text: string) {
   return { content: [{ type: 'text' as const, text: `Error: ${text}` }], isError: true };
+}
+
+/**
+ * Poll this session's inbound for the host's answer to one blocking request.
+ *
+ * BOTH BLOCKING TOOLS SHARE THIS, and they did not: the loop was written twice
+ * and had already drifted. `spawn_worker` clamped its sleep to the remaining
+ * wait and `answer_worker` did not, so the latter's last sleep overshot its own
+ * deadline by up to a poll interval — small, but it is the shape of the whole
+ * problem, since nothing made the second copy inherit a fix to the first.
+ *
+ * What stays with each caller is what differs: how to render the response, and
+ * what to say on timeout. Those are the tool's contract with the model.
+ *
+ * @returns The parsed response row, or null when the wait ran out. The row is
+ *   marked completed on the way past, so it cannot be read a second time.
+ */
+async function awaitBlockingResponse<T>(requestId: string, waitUntil: number): Promise<T | null> {
+  while (Date.now() < waitUntil) {
+    const response = findCliResponse(requestId);
+    if (response) {
+      markCompleted([response.id]);
+      return JSON.parse(response.content) as T;
+    }
+    // Never sleep past the deadline: the remaining wait is the real bound and
+    // a fixed interval walks over it on the last iteration.
+    await sleep(Math.min(POLL_INTERVAL_MS, Math.max(0, waitUntil - Date.now())));
+  }
+  return null;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -114,6 +167,12 @@ export const spawnWorker: McpToolDefinition = {
           description:
             'Optional name for the worker, which also becomes your destination name for it. Defaults to a name derived from the repository.',
         },
+        channels: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Optional channels to LEND the worker, named exactly as you know them. Only for a task the worker must hold a conversation for — a code review it drives with a human reviewer, say. You can only lend a channel you can already post to yourself, and naming one you do not hold fails the whole call. Leave it out otherwise: a worker reports back to you, and you are the one who speaks to the human.',
+        },
       },
       required: ['repo', 'task'],
     },
@@ -124,6 +183,12 @@ export const spawnWorker: McpToolDefinition = {
     if (!repo) return err('repo is required — the NAME of the repository the worker must stand in.');
     if (!task) return err('task is required — the brief the worker starts from.');
     const name = ((args.name as string) || '').trim() || defaultWorkerName(repo);
+    // Passed through as given. The host resolves each name against the
+    // destinations THIS agent group actually holds and refuses the call
+    // outright on any miss, so nothing is gained by filtering here.
+    const channels = Array.isArray(args.channels)
+      ? (args.channels as unknown[]).filter((c): c is string => typeof c === 'string')
+      : [];
 
     const requestId = generateId();
     // waitUntil is the host's only way to know whether this call is still
@@ -146,24 +211,28 @@ export const spawnWorker: McpToolDefinition = {
         repo,
         task,
         name,
+        channels,
       }),
     });
 
     log(`spawn_worker: ${requestId} → "${name}" in "${repo}"`);
 
-    const deadline = waitUntil;
-    while (Date.now() < deadline) {
-      const response = findCliResponse(requestId);
-      if (response) {
-        markCompleted([response.id]);
-        const parsed = JSON.parse(response.content) as WorkerResponse;
-        log(`spawn_worker response: ${requestId} → ${parsed.status}`);
-        if (parsed.status === 'error') {
-          return err(parsed.result?.error || `Could not create a worker for "${repo}".`);
-        }
-        return ok(parsed.result?.message || `Worker "${name}" is ready in "${repo}".`);
+    const parsed = await awaitBlockingResponse<WorkerResponse>(requestId, waitUntil);
+    if (parsed) {
+      log(`spawn_worker response: ${requestId} → ${parsed.status}`);
+      if (parsed.status === 'error') {
+        // Say plainly that this is retryable. A refusal names what WOULD
+        // have worked (`resolveRepo` lists the resolvable repositories), so
+        // the useful next move is another call with a corrected argument —
+        // not an apology to the human, and not a silent abandonment of the
+        // delegation, which is what a bare error message tends to produce.
+        return err(
+          `${parsed.result?.error || `Could not create a worker for "${repo}".`} ` +
+            `Nothing was created, so this is safe to retry: correct the argument the message names and ` +
+            `call spawn_worker again. Ask the human only if the message gives you nothing to correct.`,
+        );
       }
-      await sleep(Math.min(POLL_INTERVAL_MS, bound));
+      return ok(parsed.result?.message || `Worker "${name}" is ready in "${repo}".`);
     }
 
     log(`spawn_worker timeout: ${requestId}`);
@@ -174,4 +243,96 @@ export const spawnWorker: McpToolDefinition = {
   },
 };
 
-registerTools([spawnWorker]);
+/**
+ * How long `answer_worker` waits for the host to say what became of the
+ * answer. Short, because the host does no real work here: it looks up one row
+ * and writes another. Anything longer is waiting on delivery polling, not on
+ * the operation.
+ */
+const ANSWER_WAIT_MS = 30_000;
+
+/** The host's answer to `answer_worker`, as it arrives on the inbound row. */
+interface AnswerResponse {
+  status?: string;
+  result?: { message?: string; error?: string };
+}
+
+export const answerWorker: McpToolDefinition = {
+  tool: {
+    name: 'answer_worker',
+    description:
+      'Answer a worker that is BLOCKED waiting on a question it asked you. Use this and nothing else to reply to such a question. ' +
+      'A worker has no channel of its own, so when it needs a decision it asks you, and it stops until you answer. ' +
+      'WHY THIS IS NOT send_message: an ordinary message reaches the worker as NEW WORK, arriving beside the question rather than in place of it, and the worker stays blocked until it gives up. ' +
+      'This tool unblocks the waiting call, so the worker continues mid-thought with its full context intact. ' +
+      "Answer from what you already know when you can. When the decision is the human's, ask them through your own channel first, then relay their answer here. " +
+      'Send the ANSWER ITSELF, not an acknowledgement — "let me check with them" is a decision the worker cannot act on.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        worker: {
+          type: 'string',
+          description: 'The worker to answer, by the destination name you know it as (the name spawn_worker returned).',
+        },
+        answer: {
+          type: 'string',
+          description:
+            'The decision, stated plainly. Prefer one of the options the worker offered; any text is accepted, since a worker often asks an open question.',
+        },
+      },
+      required: ['worker', 'answer'],
+    },
+  },
+  async handler(args) {
+    const worker = ((args.worker as string) || '').trim();
+    const answer = ((args.answer as string) || '').trim();
+    if (!worker) return err(`worker is required. Options: ${destinationList()}`);
+    if (!answer) return err('answer is required — the decision the worker is waiting on.');
+
+    // Resolved here, against the map the host projected into this session, for
+    // the same reason `send_message` resolves it here: the map only ever holds
+    // destinations this agent group legitimately has. The host re-checks the
+    // destination anyway before it delivers anything.
+    const dest = findByName(worker);
+    if (!dest) return err(`Unknown destination "${worker}". Known: ${destinationList()}`);
+    if (dest.type !== 'agent') {
+      return err(
+        `"${worker}" is a channel, not an agent. answer_worker replies to a worker that asked you a question.`,
+      );
+    }
+
+    const requestId = generateId();
+    const waitUntil = Date.now() + ANSWER_WAIT_MS;
+    await writeMessageOut({
+      id: requestId,
+      kind: 'system',
+      content: JSON.stringify({
+        action: 'answer_worker',
+        requestId,
+        waitUntil,
+        worker: dest.agentGroupId,
+        workerName: worker,
+        answer,
+      }),
+    });
+
+    log(`answer_worker: ${requestId} -> "${worker}"`);
+
+    const parsed = await awaitBlockingResponse<AnswerResponse>(requestId, waitUntil);
+    if (parsed) {
+      log(`answer_worker response: ${requestId} -> ${parsed.status}`);
+      if (parsed.status === 'error') {
+        return err(parsed.result?.error || `Could not answer "${worker}".`);
+      }
+      return ok(parsed.result?.message || `Answer delivered to "${worker}".`);
+    }
+
+    log(`answer_worker timeout: ${requestId}`);
+    return ok(
+      `The answer for "${worker}" was sent and is still being delivered. Do not send it again — a second copy ` +
+        `would reach the worker as new work.`,
+    );
+  },
+};
+
+registerTools([spawnWorker, answerWorker]);
