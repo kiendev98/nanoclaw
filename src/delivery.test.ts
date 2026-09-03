@@ -799,6 +799,50 @@ describe('deliverSessionMessages — bindOpenedThread guard', () => {
     expect(fresh?.bound_messaging_group_id).toBe('mg-1');
     expect(fresh?.bound_root_message_id).toBe('platform-root-2');
   });
+
+  /**
+   * The session row being right is NOT the property that matters here, and
+   * asserting it is what let this ship broken. The container never reads that
+   * row — it reads `session_routing` out of its own inbound.db, and that
+   * snapshot was written by `spawnContainer` BEFORE this session had anything
+   * to bind. So the binding landed, inbound replies routed back correctly, and
+   * every reply the container sent still went to top level, because its own
+   * copy of the route said "no channel".
+   */
+  it('refreshes the routing the container reads, not just the session row', async () => {
+    await seedAgentAndChannel();
+    await createDestination({
+      agent_group_id: 'ag-1',
+      local_name: 'chat',
+      target_type: 'channel',
+      target_id: 'mg-1',
+      created_at: now(),
+    });
+
+    const { session } = await resolveTaskSession('ag-1', 'routing-refresh-series');
+    insertOutbound('ag-1', session.id, 'task-root');
+    setDeliveryAdapter({
+      async deliver() {
+        return 'root-ts-1';
+      },
+    });
+
+    await deliverSessionMessages(session);
+
+    const db = new Database(inboundDbPath('ag-1', session.id), { readonly: true });
+    const routing = db.prepare('SELECT channel_type, platform_id, thread_id FROM session_routing').get() as {
+      channel_type: string | null;
+      platform_id: string | null;
+      thread_id: string | null;
+    };
+    db.close();
+
+    expect(routing.channel_type).toBe('telegram');
+    expect(routing.platform_id).toBe('telegram:123');
+    // The composed thread id, so `resolveRouting` answers INTO the thread the
+    // task just opened instead of starting a second one.
+    expect(routing.thread_id).toBe('telegram:123:root-ts-1');
+  });
 });
 
 describe('deliverSessionMessages — first-claim-wins within one drained batch', () => {
