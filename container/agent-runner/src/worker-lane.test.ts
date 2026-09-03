@@ -216,3 +216,76 @@ describe('a slash-command brief survives the trip into the worker', () => {
     expect(categorizeMessage(brief).category).toBe('none');
   });
 });
+
+/**
+ * A `result` event is a TURN boundary, not a completion — a pause, a
+ * compaction and a limit stop all produce one, and the query stays open
+ * across them. Delivering each sent the orchestrator a running commentary in
+ * which the answer was indistinguishable from a progress note.
+ */
+describe('a worker reports its FINAL turn, not every turn', () => {
+  /** A stream that ends several turns, as a pause or a limit stop produces. */
+  function manyTurns(...texts: string[]): AsyncGenerator<ProviderEvent> {
+    return (async function* () {
+      yield { type: 'init', continuation: 's1' } as ProviderEvent;
+      for (const text of texts) yield { type: 'result', text } as ProviderEvent;
+    })();
+  }
+
+  it('sends one message for a run that ended three turns', async () => {
+    seedSessionRouting('agent', 'ag-orch');
+    const { query } = makeStubQuery(
+      manyTurns('Reading the diff now.', 'Tests are running.', 'Done: 3 files changed, gates pass.'),
+    );
+
+    await processQuery(query, BRIEF_ROUTING, ['a2a-1'], 'claude', undefined, 'prompt', undefined, true);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('Done: 3 files changed, gates pass.');
+  });
+
+  it('keeps the lane and the return path on the message it finally sends', async () => {
+    seedSessionRouting('agent', 'ag-orch');
+    const { query } = makeStubQuery(manyTurns('working', 'finished'));
+
+    await processQuery(query, BRIEF_ROUTING, ['a2a-1'], 'claude', undefined, 'prompt', undefined, true);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].channel_type).toBe('agent');
+    expect(out[0].platform_id).toBe('ag-orch');
+    expect(out[0].in_reply_to).toBe('a2a-1');
+  });
+
+  it('still reports how far it got when the stream dies mid-run', async () => {
+    // The buffered text is the only account of the work. Dropping it on error
+    // would leave the orchestrator an error notice with no context.
+    seedSessionRouting('agent', 'ag-orch');
+    const events = (async function* () {
+      yield { type: 'init', continuation: 's1' } as ProviderEvent;
+      yield { type: 'result', text: 'Applied the migration.' } as ProviderEvent;
+      throw new Error('stream closed unexpectedly');
+    })();
+    const { query } = makeStubQuery(events);
+
+    await expect(
+      processQuery(query, BRIEF_ROUTING, ['a2a-1'], 'claude', undefined, 'prompt', undefined, true),
+    ).rejects.toThrow('stream closed unexpectedly');
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('Applied the migration.');
+  });
+
+  it('changes nothing for a session with a channel — still nudged, still nothing sent', async () => {
+    seedSessionRouting('discord', 'chan-1');
+    seedChannelDestination();
+    const { query, pushes } = makeStubQuery(manyTurns('one', 'two'));
+
+    await processQuery(query, CHANNEL_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true);
+
+    expect(getUndeliveredMessages()).toHaveLength(0);
+    expect(pushes.length).toBeGreaterThan(0);
+  });
+});
