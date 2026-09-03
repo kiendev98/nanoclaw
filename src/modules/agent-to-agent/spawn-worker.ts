@@ -450,61 +450,24 @@ export async function validateSpawnWorker(content: Record<string, unknown>, sess
     return false;
   }
 
-  const existing = await existingWorkerFor(repoPath, session.id);
-  if (existing) {
-    const localName = await reusableWorkerName(session.agent_group_id, existing);
-    if (localName) {
-      // The agent group outlives its directory. `ncl worktrees prune` removes a
-      // clean worktree without touching `agent_groups`, and a human can `rm -rf`
-      // one just as easily — so reuse must re-create it, or the brief is
-      // delivered and the spawn then chdirs into a path that is not there.
-      // Deliberately NOT fixed by clearing `workspace_path` on prune: the reuse
-      // lookup keys on that column, so clearing it mints a SECOND worker on a
-      // second branch for one thread, which is the duplicate this whole
-      // (repo, thread) identity exists to prevent.
-      const restored = await ensureWorktree(existing, repoPath, session.id);
-      if (!restored.ok) {
-        await respond(session, req, 'error', restored.error);
-        log.warn('spawn_worker could not restore a reused worker workspace', {
-          repo: req.repo,
-          worker: existing.id,
-          err: restored.error,
-        });
-        return false;
-      }
-      // Lent BEFORE the brief, so the worker's very first turn already holds
-      // the channel its task tells it to use. This is the reuse path that
-      // actually fires — the branch in `spawnWorker` below only catches a
-      // worker created concurrently between that lookup and this one.
-      const lent = await grantChannels(session.agent_group_id, existing.id, req.channels);
-      if (lent.refusal) {
-        await respond(session, req, 'error', `spawn_worker failed: ${lent.refusal}`);
-        log.warn('spawn_worker could not lend a channel to a reused worker', {
-          repo: req.repo,
-          worker: existing.id,
-          refusal: lent.refusal,
-        });
-        return false;
-      }
-      const delivery = await deliverBrief(session, existing.id, req.task);
-      await respond(session, req, 'reused', briefedText(localName, req.repo, true, delivery));
-      log.info('spawn_worker reused an existing worker', {
-        repo: req.repo,
-        localName,
-        worker: existing.id,
-        originSession: session.id,
-      });
-      return false;
-    }
-    // The worker exists but this requester cannot address it. Falling through
-    // creates a reachable one rather than naming a handle that does not
-    // resolve.
-    log.warn('spawn_worker: worker exists for this thread but the requester has no destination for it', {
-      repo: req.repo,
-      worker: existing.id,
-      originSession: session.id,
-    });
-  }
+  // REUSE IS NOT DECIDED HERE, deliberately, and it used to be.
+  //
+  // `runGuarded` is precheck -> guard -> handler, and a precheck returning
+  // false means "already answered" rather than "invalid" — so a precheck that
+  // COMPLETES the reuse case skips the guard entirely for it. That was the
+  // live path: a reused worker was granted channel destinations, briefed and
+  // answered without `workers.spawn` ever being consulted, while the create
+  // path went through it. A privilege grant on the ungated half of a
+  // guarded action is the wrong way round.
+  //
+  // Nothing was exploitable today, because `workersSpawn.decide` allows any
+  // agent actor. That is exactly why it had to be fixed on purpose: the bill
+  // falls on whoever first tightens that decision — a per-repo policy, a rate
+  // limit, an approval hold — and finds it silently inapplicable to the half
+  // of the traffic that reuses.
+  //
+  // So this function now only validates and refuses. Everything that WRITES
+  // lives in the handler, past the guard.
   return true;
 }
 
@@ -523,11 +486,12 @@ export async function spawnWorker(content: Record<string, unknown>, session: Ses
   const sourceGroup = await getAgentGroup(session.agent_group_id);
   if (!req.repo || !req.task || !sourceGroup) return; // precheck already answered the requester
 
-  // Resolved AGAIN here, and reuse re-checked, in case a concurrent
-  // spawn_worker call for the same (repo, thread) already created a worker
-  // between the precheck's lookup and this one. Creating anyway would put two
-  // agents on two branches of one repository in one conversation, which is
-  // the exact failure the (repo, thread) key exists to prevent.
+  // Resolved again here rather than carried from the precheck: this is the
+  // first point past the guard, and the precheck's copy is only a refusal.
+  //
+  // THIS IS THE REUSE PATH — the only one. It used to be a near-duplicate of a
+  // branch in the precheck that fired first and did the same work ungated;
+  // that branch is gone, and its worktree restore came with it.
   let repoPath: string;
   try {
     repoPath = resolveRepo(req.repo, PROJECT_ROOTS);
@@ -541,9 +505,34 @@ export async function spawnWorker(content: Record<string, unknown>, session: Ses
   const existing = await existingWorkerFor(repoPath, session.id);
   const reuseName = existing && (await reusableWorkerName(sourceGroup.id, existing));
   if (existing && reuseName) {
+    // The agent group outlives its directory. `ncl worktrees prune` removes a
+    // clean worktree without touching `agent_groups`, and a human can `rm -rf`
+    // one just as easily — so reuse must re-create it, or the brief is
+    // delivered and the spawn then chdirs into a path that is not there.
+    // Deliberately NOT fixed by clearing `workspace_path` on prune: the reuse
+    // lookup keys on that column, so clearing it mints a SECOND worker on a
+    // second branch for one thread, which is the duplicate this whole
+    // (repo, thread) identity exists to prevent.
+    const restored = await ensureWorktree(existing, repoPath, session.id);
+    if (!restored.ok) {
+      await respond(session, req, 'error', restored.error);
+      log.warn('spawn_worker could not restore a reused worker workspace', {
+        repo: req.repo,
+        worker: existing.id,
+        err: restored.error,
+      });
+      return;
+    }
+    // Lent BEFORE the brief, so the worker's very first turn already holds the
+    // channel its task tells it to use.
     const lent = await grantChannels(sourceGroup.id, existing.id, req.channels);
     if (lent.refusal) {
       await respond(session, req, 'error', `spawn_worker failed: ${lent.refusal}`);
+      log.warn('spawn_worker could not lend a channel to a reused worker', {
+        repo: req.repo,
+        worker: existing.id,
+        refusal: lent.refusal,
+      });
       return;
     }
     const delivery = await deliverBrief(session, existing.id, req.task);
@@ -555,6 +544,16 @@ export async function spawnWorker(content: Record<string, unknown>, session: Ses
       originSession: session.id,
     });
     return;
+  }
+  if (existing) {
+    // Exists for this thread, but this requester holds no destination for it.
+    // Falling through creates a reachable one rather than naming a handle that
+    // does not resolve.
+    log.warn('spawn_worker: worker exists for this thread but the requester has no destination for it', {
+      repo: req.repo,
+      worker: existing.id,
+      originSession: session.id,
+    });
   }
 
   // The worktree becomes the worker's cwd, which is the ONLY thing that makes

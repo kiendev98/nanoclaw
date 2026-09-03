@@ -27,8 +27,8 @@ import {
 import type { Session } from '../types.js';
 
 const AG = 'ag-orch';
-const MG = 'mg-ai-anya';
-const OTHER_MG = 'mg-anya-and-saber';
+const MG = 'mg-team-chat';
+const OTHER_MG = 'mg-team-chat-and-ops';
 const ROOT = '1788411969.598739';
 
 function session(id: string, agentGroupId = AG): Session {
@@ -61,7 +61,7 @@ beforeEach(async () => {
     id: OTHER_MG,
     channel_type: 'slack',
     platform_id: 'slack:C0BU6RSGAGK',
-    name: 'anya-and-saber',
+    name: 'team-chat-and-ops',
     is_group: 1,
     unknown_sender_policy: 'strict',
     created_at: new Date().toISOString(),
@@ -70,7 +70,7 @@ beforeEach(async () => {
     id: MG,
     channel_type: 'slack',
     platform_id: 'slack:C0ACWUFB44F',
-    name: 'ai-anya',
+    name: 'team-chat',
     is_group: 1,
     unknown_sender_policy: 'strict',
     created_at: new Date().toISOString(),

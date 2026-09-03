@@ -208,7 +208,6 @@ export async function deliverToBoundSession(
   return true;
 }
 
-
 /**
  * When fanning out, the same inbound message lands in multiple per-agent
  * session DBs. messages_in.id is PRIMARY KEY, so reuse of the raw id would

@@ -30,7 +30,7 @@ import {
 
 const AG = 'ag-orch';
 const OTHER_AG = 'ag-someone-else';
-const MG = 'mg-ai-anya';
+const MG = 'mg-team-chat';
 const PLATFORM = 'slack:C0ACWUFB44F';
 const ROOT = '1788411969.598739';
 /** What the router hands `resolveSession` when a human replies inside the thread. */
@@ -50,7 +50,7 @@ beforeEach(async () => {
     id: MG,
     channel_type: 'slack',
     platform_id: PLATFORM,
-    name: 'ai-anya',
+    name: 'team-chat',
     is_group: 1,
     unknown_sender_policy: 'strict',
     created_at: new Date().toISOString(),

@@ -151,10 +151,10 @@ describe('send_message MCP tool — which thread a channel reply lands in', () =
     // The worker opened the thread and Anya replied in it, so that reply is
     // the latest inbound from this channel and names the thread to answer in.
     workerLane();
-    seedChannelDestination('ai-anya', CHANNEL);
+    seedChannelDestination('team-chat', CHANNEL);
     seedInbound(CHANNEL, THREAD, 'in-1', 2);
 
-    await sendMessage.handler({ to: 'ai-anya', text: 'on it' });
+    await sendMessage.handler({ to: 'team-chat', text: 'on it' });
 
     expect(sentThreadId()).toBe(THREAD);
   });
@@ -163,20 +163,20 @@ describe('send_message MCP tool — which thread a channel reply lands in', () =
     // The first post of all. There is no thread to join, and inventing one
     // would address a conversation that does not exist.
     workerLane();
-    seedChannelDestination('ai-anya', CHANNEL);
+    seedChannelDestination('team-chat', CHANNEL);
 
-    await sendMessage.handler({ to: 'ai-anya', text: 'PR #42 is ready for review' });
+    await sendMessage.handler({ to: 'team-chat', text: 'PR #42 is ready for review' });
 
     expect(sentThreadId()).toBeNull();
   });
 
   it('follows the newest inbound when that channel has said several things', async () => {
     workerLane();
-    seedChannelDestination('ai-anya', CHANNEL);
+    seedChannelDestination('team-chat', CHANNEL);
     seedInbound(CHANNEL, OTHER_THREAD, 'in-1', 2);
     seedInbound(CHANNEL, THREAD, 'in-2', 4);
 
-    await sendMessage.handler({ to: 'ai-anya', text: 'on it' });
+    await sendMessage.handler({ to: 'team-chat', text: 'on it' });
 
     expect(sentThreadId()).toBe(THREAD);
   });
@@ -185,9 +185,9 @@ describe('send_message MCP tool — which thread a channel reply lands in', () =
     // Unchanged behaviour for an ordinary chat session replying to its own
     // conversation.
     seedSessionRouting('slack', CHANNEL, THREAD);
-    seedChannelDestination('ai-anya', CHANNEL);
+    seedChannelDestination('team-chat', CHANNEL);
 
-    await sendMessage.handler({ to: 'ai-anya', text: 'here you go' });
+    await sendMessage.handler({ to: 'team-chat', text: 'here you go' });
 
     expect(sentThreadId()).toBe(THREAD);
   });

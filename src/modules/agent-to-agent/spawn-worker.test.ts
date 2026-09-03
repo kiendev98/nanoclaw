@@ -160,6 +160,7 @@ vi.mock('../../db/sessions.js', () => ({
 // delivery actions — the only reachable path to the body under test.
 import './index.js';
 import { getDeliveryAction } from '../../delivery.js';
+import { validateSpawnWorker } from './spawn-worker.js';
 import { workerWorkspace } from './worker-identity.js';
 
 const SESSION = { id: 'sess-1', agent_group_id: 'ag-1' } as Session;
@@ -341,6 +342,63 @@ describe('spawn_worker — the task is delivered verbatim', () => {
 
     const group = mockCreateAgentGroup.mock.calls[0][0] as { id: string };
     expect(briefsTo(group.id)).toEqual(['/blueprint FMTA-343']);
+  });
+});
+
+/**
+ * `runGuarded` is precheck -> guard -> handler, and a precheck returning false
+ * means "already answered", not "invalid". So a precheck that COMPLETES a case
+ * skips the guard for it — which is what reuse used to do, while the create
+ * path went through it. A privilege grant (the channel lending) sat on the
+ * ungated half of a guarded action.
+ *
+ * Nothing was exploitable, because `workersSpawn.decide` allows any agent
+ * actor. That is why this is pinned structurally rather than by making the
+ * guard deny: the property that matters is that the precheck does no WORK, so
+ * whoever first tightens that decision gets it applied to all of the traffic
+ * rather than half.
+ */
+describe('the precheck decides nothing that the guard should decide', () => {
+  const EXISTING_REUSABLE = {
+    id: 'ag-worker-1',
+    name: 'Scout',
+    folder: 'scout',
+    agent_provider: null,
+    created_at: '',
+    workspace_path: WORKTREE,
+    origin_session_id: SESSION.id,
+  };
+
+  beforeEach(() => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    mockFindWorkerForOrigin.mockResolvedValue(EXISTING_REUSABLE);
+    mockGetDestinationByTarget.mockResolvedValue({ local_name: 'scout' });
+  });
+
+  it('lets a reusable worker through to the guard instead of answering it', async () => {
+    expect(await validateSpawnWorker(request(), SESSION)).toBe(true);
+  });
+
+  it('grants no channel and briefs nobody while still in the precheck', async () => {
+    // The requester genuinely holds the channel, so the only thing that can
+    // stop the grant here is the precheck declining to make it.
+    mockGetDestinationByName.mockImplementation(async (agentGroupId: string, localName: string) =>
+      agentGroupId === 'ag-1' && localName === 'team-chat'
+        ? { agent_group_id: 'ag-1', local_name: 'team-chat', target_type: 'channel', target_id: 'mg-team-chat' }
+        : undefined,
+    );
+
+    await validateSpawnWorker(request({ channels: ['team-chat'] }), SESSION);
+
+    expect(mockCreateDestination).not.toHaveBeenCalled();
+    expect(response()).toBeUndefined();
+  });
+
+  it('still refuses a malformed request without reaching the guard', async () => {
+    // The other half of the contract: real refusals stay in the precheck, so
+    // an invalid request is answered without a guard consult at all.
+    expect(await validateSpawnWorker(request({ repo: '' }), SESSION)).toBe(false);
+    expect(response()?.status).toBe('error');
   });
 });
 
@@ -568,27 +626,33 @@ describe('spawn_worker — no approval gate, for any cli_scope', () => {
 
 describe('spawn_worker — lending a worker a channel', () => {
   /**
-   * The requester holds `ai-anya`, and nothing else.
+   * The requester holds `team-chat`, and nothing else.
    *
    * `getDestinationByName` is asked about both groups: the requester's own
    * map, which is what attenuation reads, and the worker's, which is what
    * makes the copy idempotent. Answering only for the requester is what a
    * fresh worker actually looks like.
    */
-  function requesterHoldsAiAnya(): void {
+  function requesterHoldsTheChannel(): void {
     mockGetDestinationByName.mockImplementation(async (agentGroupId: string, localName: string) =>
-      agentGroupId === 'ag-1' && localName === 'ai-anya'
+      agentGroupId === 'ag-1' && localName === 'team-chat'
         ? {
             agent_group_id: 'ag-1',
-            local_name: 'ai-anya',
+            local_name: 'team-chat',
             target_type: 'channel',
-            target_id: 'mg-anya',
+            target_id: 'mg-team-chat',
             created_at: '',
           }
         : undefined,
     );
     mockGetDestinations.mockResolvedValue([
-      { agent_group_id: 'ag-1', local_name: 'ai-anya', target_type: 'channel', target_id: 'mg-anya', created_at: '' },
+      {
+        agent_group_id: 'ag-1',
+        local_name: 'team-chat',
+        target_type: 'channel',
+        target_id: 'mg-team-chat',
+        created_at: '',
+      },
     ]);
   }
 
@@ -603,14 +667,14 @@ describe('spawn_worker — lending a worker a channel', () => {
     // Attenuated delegation: the worker ends up with a row pointing at the
     // same messaging group, under the same name the requester uses.
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
-    requesterHoldsAiAnya();
+    requesterHoldsTheChannel();
 
-    await runSpawnWorker(request({ channels: ['ai-anya'] }));
+    await runSpawnWorker(request({ channels: ['team-chat'] }));
 
     const [row] = lentRows();
     expect(row).toBeDefined();
-    expect(row.local_name).toBe('ai-anya');
-    expect(row.target_id).toBe('mg-anya');
+    expect(row.local_name).toBe('team-chat');
+    expect(row.target_id).toBe('mg-team-chat');
     expect(row.agent_group_id).not.toBe('ag-1');
   });
 
@@ -618,9 +682,9 @@ describe('spawn_worker — lending a worker a channel', () => {
     // You cannot lend what you do not hold. A worker runs code from another
     // repository, so its own instructions must never widen its reach.
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
-    requesterHoldsAiAnya();
+    requesterHoldsTheChannel();
 
-    await runSpawnWorker(request({ channels: ['ai-anya', 'engineering'] }));
+    await runSpawnWorker(request({ channels: ['team-chat', 'engineering'] }));
 
     expect(response()?.status).toBe('error');
     expect(response()?.result.error).toContain('no channel destination named "engineering"');
@@ -630,11 +694,11 @@ describe('spawn_worker — lending a worker a channel', () => {
     // The caller is an agent and cannot list its own grants any other way —
     // the same reason `resolveRepo`'s refusal lists the resolvable repos.
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
-    requesterHoldsAiAnya();
+    requesterHoldsTheChannel();
 
     await runSpawnWorker(request({ channels: ['engineering'] }));
 
-    expect(response()?.result.error).toContain('ai-anya');
+    expect(response()?.result.error).toContain('team-chat');
   });
 
   it('creates nothing at all when a channel is refused', async () => {
@@ -642,7 +706,7 @@ describe('spawn_worker — lending a worker a channel', () => {
     // write: a partial grant hands back a worker that looks provisioned and
     // then fails at its first post.
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
-    requesterHoldsAiAnya();
+    requesterHoldsTheChannel();
 
     await runSpawnWorker(request({ channels: ['engineering'] }));
 
@@ -654,7 +718,7 @@ describe('spawn_worker — lending a worker a channel', () => {
     // The ordinary case. A worker reports to its orchestrator, and the
     // orchestrator is the one that speaks to the human.
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
-    requesterHoldsAiAnya();
+    requesterHoldsTheChannel();
 
     await runSpawnWorker(request());
 
@@ -665,11 +729,11 @@ describe('spawn_worker — lending a worker a channel', () => {
     // A second call for the same (repo, thread) may name a channel the first
     // did not, and the worker should gain it rather than keep the old set.
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
-    requesterHoldsAiAnya();
+    requesterHoldsTheChannel();
     mockFindWorkerForOrigin.mockResolvedValue({ id: 'ag-worker', name: 'Scout', workspace_path: WORKTREE });
     mockGetDestinationByTarget.mockResolvedValue({ local_name: 'scout' });
 
-    await runSpawnWorker(request({ channels: ['ai-anya'] }));
+    await runSpawnWorker(request({ channels: ['team-chat'] }));
 
     expect(response()?.status).toBe('reused');
     expect(lentRows().map((r) => r.agent_group_id)).toContain('ag-worker');
@@ -681,12 +745,12 @@ describe('spawn_worker — lending a worker a channel', () => {
     // the map from its last wake, and without this its container answers
     // "unknown destination" for a channel the central DB says it holds.
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
-    requesterHoldsAiAnya();
+    requesterHoldsTheChannel();
     mockFindWorkerForOrigin.mockResolvedValue({ id: 'ag-worker', name: 'Scout', workspace_path: WORKTREE });
     mockGetDestinationByTarget.mockResolvedValue({ local_name: 'scout' });
     mockGetSessionsByAgentGroup.mockResolvedValue([{ id: 'sess-worker', agent_group_id: 'ag-worker' }]);
 
-    await runSpawnWorker(request({ channels: ['ai-anya'] }));
+    await runSpawnWorker(request({ channels: ['team-chat'] }));
 
     expect(mockWriteDestinations).toHaveBeenCalledWith('ag-worker', 'sess-worker');
   });
