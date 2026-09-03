@@ -90,6 +90,103 @@ export async function findSystemSession(agentGroupId: string, threadId: string):
   );
 }
 
+// ── Thread bindings: the thread a session opened ──
+
+/**
+ * The root message id inside a channel thread id.
+ *
+ * A thread id is `<platform_id>:<root message id>` — `slack:C0ACWU…:17884…`
+ * — so the root is everything after the LAST colon, because a platform id
+ * carries colons of its own.
+ *
+ * Parsing rather than rebuilding is the point. The composed shape belongs to
+ * the Chat SDK and can change; a rebuilt guess that no longer matches fails
+ * SILENTLY, by never finding the binding, and the symptom is the second
+ * session this whole mechanism exists to prevent.
+ */
+export function threadRootMessageId(threadId: string): string {
+  return threadId.slice(threadId.lastIndexOf(':') + 1);
+}
+
+/**
+ * The inverse, and it is confined to the REPLY path on purpose.
+ *
+ * Composing is avoidable when matching an inbound thread and unavoidable
+ * when addressing an outbound one — the adapter has to be handed a thread id
+ * it accepts. Keeping it to that one caller keeps the risk asymmetric, which
+ * is what makes this safe: a wrong guess here posts at top level, which a
+ * human sees immediately, while a wrong guess on the matching side fails
+ * silently.
+ */
+export function composeThreadId(platformId: string, rootMessageId: string): string {
+  return `${platformId}:${rootMessageId}`;
+}
+
+/**
+ * Record that this session opened a thread. First binding wins.
+ *
+ * `WHERE bound_root_message_id IS NULL` is what makes it first-wins rather
+ * than last-wins, and the direction matters: a session's SECOND top-level
+ * post in another channel must not silently steal the binding from the
+ * thread people are already replying in. That second thread stays unbound —
+ * see the one-binding-per-session note on migration 028.
+ *
+ * @returns true when this call created the binding.
+ */
+export async function bindSessionToThread(
+  sessionId: string,
+  messagingGroupId: string,
+  rootMessageId: string,
+): Promise<boolean> {
+  const result = await getDb().run(
+    `UPDATE sessions
+        SET bound_messaging_group_id = @mg, bound_root_message_id = @root
+      WHERE id = @id AND bound_root_message_id IS NULL`,
+    { id: sessionId, mg: messagingGroupId, root: rootMessageId },
+  );
+  return result.changes > 0;
+}
+
+/**
+ * INBOUND: the session that opened this thread, if any.
+ *
+ * Scoped to `status = 'active'` so a closed session cannot capture a live
+ * conversation — the reply then falls through to ordinary resolution and
+ * gets a fresh session, which is the correct answer once the owner is gone.
+ */
+export async function findSessionBoundToThread(
+  messagingGroupId: string,
+  rootMessageId: string,
+): Promise<Session | undefined> {
+  return getDb().get<Session>(
+    `SELECT * FROM sessions
+      WHERE bound_messaging_group_id = ? AND bound_root_message_id = ? AND status = 'active'`,
+    messagingGroupId,
+    rootMessageId,
+  );
+}
+
+/**
+ * OUTBOUND: the root of the thread this session opened in this channel.
+ *
+ * Read fresh from the row rather than from a `Session` the caller is holding.
+ * A drain loads its session once and then delivers several messages; the
+ * message that CREATES the binding is often in that same batch, so an
+ * in-memory copy is stale exactly when this matters.
+ */
+export async function findSessionThreadBinding(
+  sessionId: string,
+  messagingGroupId: string,
+): Promise<string | undefined> {
+  const row = await getDb().get<{ bound_root_message_id: string | null }>(
+    `SELECT bound_root_message_id FROM sessions
+      WHERE id = ? AND bound_messaging_group_id = ?`,
+    sessionId,
+    messagingGroupId,
+  );
+  return row?.bound_root_message_id ?? undefined;
+}
+
 /** Per-task session thread id for a scheduled task series. */
 export function taskThreadId(seriesId: string): string {
   return `${TASKS_SYSTEM_THREAD_ID}:${seriesId}`;

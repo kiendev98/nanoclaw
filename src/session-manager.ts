@@ -16,11 +16,13 @@ import { getMessagingGroup } from './db/messaging-groups.js';
 import { isUniqueViolation } from './db/errors.js';
 import {
   createSession,
+  findSessionBoundToThread,
   findSystemSession,
   findSessionByAgentGroup,
   findSessionForAgent,
   getSession,
   taskThreadId,
+  threadRootMessageId,
   updateSession,
 } from './db/sessions.js';
 import { log } from './log.js';
@@ -110,6 +112,30 @@ export async function resolveSession(
 ): Promise<{ session: Session; created: boolean }> {
   const key = sessionCreationKey(agentGroupId, messagingGroupId, threadId, sessionMode);
   return withSessionCreationLock(key, async () => {
+    // A reply in a thread THIS agent opened belongs to the session that
+    // opened it.
+    //
+    // Checked before every other lookup, because none of them can find it.
+    // The thread was created by the channel a moment ago in response to our
+    // own top-level post, so `findSessionForAgent` has never seen it and the
+    // ordinary key misses — producing a new session with an empty transcript,
+    // answering people who are replying to something it never said, while the
+    // session that did say it is never told.
+    //
+    // The binding is (messaging group, root message id), so a reply is matched
+    // by parsing the root out of the inbound thread id rather than by
+    // rebuilding the composed form. See `threadRootMessageId`.
+    //
+    // The agent-group check is the authorization: a thread's root is only a
+    // key within the agent group that owns the binding, so fan-out to two
+    // agents in one chat can never hand one agent the other's session.
+    if (messagingGroupId && threadId) {
+      const bound = await findSessionBoundToThread(messagingGroupId, threadRootMessageId(threadId));
+      if (bound && bound.agent_group_id === agentGroupId) {
+        return { session: bound, created: false };
+      }
+    }
+
     // agent-shared: single session per agent group, regardless of messaging group
     if (sessionMode === 'agent-shared') {
       const existing = await findSessionByAgentGroup(agentGroupId);

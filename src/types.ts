@@ -193,6 +193,20 @@ export interface Session {
   container_status: 'running' | 'idle' | 'stopped';
   last_active: string | null;
   created_at: string;
+  /**
+   * The thread this session OPENED, as (messaging group, root message id).
+   *
+   * Set when a delivery with no `thread_id` lands on a channel — that post
+   * is what created the thread, so its own message id is the thread's root.
+   * A reply arriving on that root resolves back to this session instead of
+   * minting a new one (`findSessionBoundToThread`).
+   *
+   * Both NULL for a session that has never opened a thread, which is most of
+   * them. Read through `SELECT *`; deliberately absent from `createSession`'s
+   * column list, because a session is never born bound.
+   */
+  bound_messaging_group_id?: string | null;
+  bound_root_message_id?: string | null;
 }
 
 // ── Session DB entities ──
