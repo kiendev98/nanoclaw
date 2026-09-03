@@ -1,7 +1,8 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { CronExpressionParser } from 'cron-parser';
 
 import { TIMEZONE } from '../../config.js';
+import { findSystemSession, taskThreadId, updateSession } from '../../db/sessions.js';
 import type { TaskRecord } from '../../mailbox/index.js';
 import { resolveTaskSession, withMailboxSession } from '../../session-manager.js';
 import { parseZonedToUtc } from '../../timezone.js';
@@ -132,13 +133,91 @@ export function prepareScheduledTask(input: {
   return { name: input.name, prompt: input.prompt, recurrence, script, processAfter, repo: input.repo ?? null };
 }
 
+/**
+ * The series id for one conversation's workspace.
+ *
+ * DERIVED, NEVER MINTED — this is what `makeTaskId` cannot be, because it
+ * appends random hex. Identity has to be recomputable from the request alone,
+ * or a repeated call cannot find the workspace it made last time and forks a
+ * second branch instead. That is the divergence a repo-scoped agent's identity
+ * has always existed to prevent.
+ *
+ * The pair is (repository, calling session), which is the same key the deleted
+ * `spawn_worker` used. The repository slug is kept in front of the digest so a
+ * stray worktree is still identifiable in `git branch` months later.
+ *
+ * A null repository is its own lane rather than an error: the run gets a
+ * separate session in the group folder — its own container and transcript,
+ * running alongside this conversation instead of inside it. `home-` names it,
+ * and it cannot collide with a repository slug because the digest differs.
+ */
+export function workspaceSeriesId(repo: string | null, callerSessionId: string): string {
+  // A separator no repository name can contain, so (repo, session) cannot be
+  // spelled two ways and hash to one id.
+  const digest = createHash('sha256')
+    .update(`${repo ?? ''}\n${callerSessionId}`)
+    .digest('hex')
+    .slice(0, 8);
+  return `${(repo && taskNameSlug(repo)) || 'home'}-${digest}`;
+}
+
+/**
+ * Find or create the workspace a run happens in.
+ *
+ * The "create" half of the two-step a caller sees; `queueRun` is the "run"
+ * half. Everything the lookup needs is inside here rather than spread across
+ * the caller, because find-or-create is the ONLY reason this is more than one
+ * call — the CLI never does it, which is why `ncl tasks create` always mints a
+ * new series and makes you read the id back before `ncl tasks run`.
+ *
+ * CREATED PAUSED, ALWAYS. The series row defines a place; it must never fire
+ * on its own, or a caller that queues its own run would get two runs of one
+ * instruction. `countDueMessages` requires `status = 'pending'`, so a paused
+ * row can never become due.
+ *
+ * Idempotent: safe to call repeatedly, and safe to retry after a crash. An
+ * existing workspace has its worktree adopted or repaired rather than replaced.
+ */
+export async function ensureTaskSeries(
+  agentGroupId: string,
+  opts: { id: string; repo: string | null; prompt: string },
+): Promise<{ sessionId: string; created: boolean }> {
+  const existing = await findSystemSession(agentGroupId, taskThreadId(opts.id));
+  if (existing) {
+    // `ncl worktrees prune` removes a clean worktree without touching the row
+    // that points at it, and a human can `rm -rf` one just as easily — so the
+    // path is re-prepared on every run, not only at creation. With no
+    // repository there is no worktree, and cwd stays the group folder.
+    if (opts.repo) {
+      const workspace = prepareTaskWorkspace(opts.repo, opts.id);
+      if (!workspace.ok) throw new Error(workspace.error);
+      await updateSession(existing.id, { workspace_path: workspace.path });
+    }
+    return { sessionId: existing.id, created: false };
+  }
+
+  const prepared = prepareScheduledTask({
+    name: opts.id,
+    prompt: opts.prompt,
+    // Required for a one-shot, and inert here: the row is paused, so this is
+    // never a time anything fires at.
+    processAfter: new Date().toISOString(),
+    repo: opts.repo,
+  });
+  const { session } = await createScheduledTask(agentGroupId, prepared, { id: opts.id, status: 'paused' });
+  return { sessionId: session.id, created: true };
+}
+
 /** Persist a prepared task through NanoClaw's single task/session representation. */
 export async function createScheduledTask(
   agentGroupId: string,
   task: PreparedScheduledTask,
-  options?: { status?: 'pending' | 'paused'; originSessionId?: string | null },
+  options?: { status?: 'pending' | 'paused'; originSessionId?: string | null; id?: string },
 ): Promise<{ session: { id: string; agent_group_id: string }; row: ScheduledTaskRow }> {
-  const id = makeTaskId(task.name);
+  // A caller that DERIVES its series id supplies it, so the same request twice
+  // converges on one series instead of minting a second one — which would mean
+  // a second branch and a second worktree for one piece of work.
+  const id = options?.id ?? makeTaskId(task.name);
   // Prepared BEFORE the session is resolved, so an unresolvable repository
   // aborts the create rather than leaving a scheduled task that fails at its
   // first fire, hours later, in a log nobody is reading.

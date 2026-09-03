@@ -30,16 +30,29 @@ Pass `--repo <name>` on create. The series gets its own git worktree on branch `
 
 The branch belongs to the series, not to a run, so all runs of one series share a worktree and its uncommitted work.
 
-## `run_task` — run one now and get the result back
+## `run_task` — hand work to a separate session
 
-`ncl tasks run <id>` fires a run and returns. Use the `run_task` tool instead when you need to know how the run ended, because a CLI call cannot hand a result back later.
+One call. It creates or reuses the workspace and queues the instruction; there is no `ncl tasks create` step first.
 
 ```
-run_task({ series: "pr-review-a25c" })                  fire and forget
-run_task({ series: "pr-review-a25c", notify: true })     result wakes you later
-run_task({ series: "pr-review-a25c", wait_ms: 60000 })   wait, then fall back to the wake
+run_task({ instruction: "..." })                                own workspace, fire and forget
+run_task({ repo: "saber", instruction: "..." })                 in a repository
+run_task({ repo: "saber", instruction: "...", notify: true })   the result wakes you
 ```
 
-A task run is a whole agent turn in another session, so prefer `notify` for anything long — a large `wait_ms` mostly means sitting idle. Nothing is lost when the bound expires: the result arrives by wake instead.
+`repo` is optional, and it decides what the run gets:
 
-You cannot `run_task` the series you are currently running as. Waiting on your own session waits for a container that cannot start until your turn ends.
+| | Where it runs | Use it for |
+|---|---|---|
+| with `repo` | a git worktree of that repository, loading its CLAUDE.md and skills | work in a **different** repository |
+| without `repo` | your own workspace, cwd unchanged | long work that must not hold up this turn |
+
+Either way it is a **separate session** — its own container and transcript, running alongside this conversation.
+
+For work in your own repository that you need answered **in this turn**, use `Task` instead: it shares your working directory and costs nothing. `Task` cannot change directory, so pointing it at another repository reads your files while reporting on that one — and the answer looks correct.
+
+The workspace is the pair (repository, this conversation), so calling twice the same way reuses the same worktree and branch, and the second run sees the first run's work. That is why there is no workspace argument to pass.
+
+`instruction` is the run's entire context. It cannot read this conversation, so expand every reference — what to do, in which files, and what the result must be.
+
+There is no blocking mode. A run is a whole agent turn, so `notify` is the way to get the result; end your turn after the call.

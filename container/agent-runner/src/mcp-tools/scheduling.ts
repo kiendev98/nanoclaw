@@ -1,51 +1,41 @@
 /**
- * Task scheduling MCP tool: run_task.
+ * Delegation MCP tool: run_task.
  *
- * Everything else about tasks is `ncl tasks` — create, list, pause, cancel,
- * and `ncl tasks run` to fire one now. This tool exists for the one thing a
- * CLI cannot do: hand the RESULT back. A CLI call returns and is over, so it
- * can start a run but can never tell you how the run ended.
+ * Runs an instruction in a SEPARATE session — its own container, its own
+ * transcript, alongside this conversation rather than inside it.
  *
- * WHY RUN A TASK AT ALL RATHER THAN DOING THE WORK. A task series owns a
- * session, and a session can own things this one cannot: a git worktree of
- * another repository (`ncl tasks create --repo`), its own memory, and a Slack
- * thread it opened. Running in that session is how work reaches another
- * repository's CLAUDE.md, skills and settings — the thing `Task` cannot do,
- * because `Task` shares your working directory.
+ * With `repo` that session also stands in a git worktree of that repository,
+ * so it loads that repository's `CLAUDE.md`, `.claude/skills/` and
+ * `.claude/settings.json`. That is the one thing a `Task` subagent cannot do,
+ * because `Task` shares the caller's cwd. Without `repo` there is no worktree
+ * and cwd stays the group folder — what the call buys then is the separate
+ * session itself: long work that must not hold up this turn.
  *
- * THREE MODES, AND THE ARGUMENTS PICK ONE:
+ * ONE CALL DOES EVERYTHING. The host resolves the repository, adopts or
+ * creates the workspace, and queues the run. There is no `ncl tasks create`
+ * step and no generated id to read back first.
  *
- *   run_task({ series })                 fire and forget — no answer, ever
- *   run_task({ series, notify: true })   returns now; the answer wakes you
- *   run_task({ series, wait_ms: 60000 }) waits, then degrades to the wake
+ * IDENTITY IS DERIVED, NOT PASSED. The workspace is the pair (repository,
+ * this session), so calling twice for one repository in one conversation
+ * reuses the first workspace and its branch. That is why there is no
+ * workspace or series argument: naming it would let two calls disagree about
+ * which one they meant.
  *
- * The mechanism is `requestId`: minted only when an answer was asked for, and
- * the host writes nothing without one. `wait_ms` cannot lose a result — when
- * the bound expires the host takes the wake path instead, so a too-short wait
- * degrades rather than drops.
+ * TWO DELIVERY MODES, decided by `notify`, and the mechanism is `requestId`:
+ * minted only when an answer was asked for, and the host writes nothing
+ * without one.
+ *
+ *   run_task({ instruction })                       fire and forget, own workspace
+ *   run_task({ repo, instruction })                 fire and forget, in a repository
+ *   run_task({ repo, instruction, notify: true })   the result wakes you
+ *
+ * There is deliberately no blocking mode. A run is a whole agent turn in
+ * another session, so a bounded wait would mostly burn this caller's turn
+ * sitting idle; `notify` costs one turn and loses nothing.
  */
-import { findCliResponse, markCompleted } from '../db/messages-in.js';
 import { writeMessageOut } from '../db/messages-out.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
-
-/**
- * Ceiling on `wait_ms`. A task run is a whole agent turn in another session,
- * so it can take minutes; blocking this call for minutes would burn the
- * caller's turn doing nothing. Past the ceiling the answer arrives by wake,
- * which costs one turn and loses nothing.
- */
-const MAX_WAIT_MS = 300_000;
-const POLL_INTERVAL_MS = 500;
-
-/**
- * The bound actually used, in milliseconds.
- *
- * Mutable so a test can drive the timeout path in milliseconds. Deliberately
- * NOT an environment variable: this is a property of the test run, never of an
- * install. Nothing in production writes to it.
- */
-export const runTaskWaitCeiling = { ms: MAX_WAIT_MS };
 
 function log(msg: string): void {
   console.error(`[mcp-tools] ${msg}`);
@@ -63,68 +53,51 @@ function err(text: string) {
   return { content: [{ type: 'text' as const, text: `Error: ${text}` }], isError: true };
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** The host's answer, as it arrives on the inbound row. */
-interface RunTaskResponse {
-  status?: string;
-  result?: { message?: string; error?: string };
-}
-
-/**
- * How long to poll, and whether an answer was asked for at all.
- *
- * `wait_ms` implies `notify`, because a bounded wait that expires has to hand
- * off to something. Only the bare call — neither argument — is silent.
- */
-function resolveMode(args: Record<string, unknown>): { wants: boolean; waitMs: number } {
-  const raw = typeof args.wait_ms === 'number' && Number.isFinite(args.wait_ms) ? Math.trunc(args.wait_ms) : 0;
-  const waitMs = Math.max(0, Math.min(raw, runTaskWaitCeiling.ms));
-  return { wants: waitMs > 0 || args.notify === true, waitMs };
-}
-
 export const runTask: McpToolDefinition = {
   tool: {
     name: 'run_task',
     description:
-      'Run an EXISTING task series once, now, without changing its schedule. The run happens in that series\' own session — which may stand in another repository\'s git worktree, with that repository\'s CLAUDE.md and skills loaded — so this is how you hand work to another working directory. ' +
-      'CHOOSING BETWEEN THIS AND THE Task TOOL: same repository and no separate session needed — use Task, it costs nothing. Another repository, or work that must keep its own memory or its own Slack thread — use this. ' +
-      'THE SERIES MUST ALREADY EXIST: create it with `ncl tasks create` (add --repo to give it a worktree), then name it here. `ncl tasks list` shows the ids. ' +
-      'THREE MODES. Neither argument: fire and forget, you are never told how it went. notify: true — returns immediately and the run\'s result arrives later as a message that wakes you, so end your turn. wait_ms: N — waits up to N milliseconds for the result; if the run outlasts that, it falls back to waking you, so nothing is lost. ' +
-      'Prefer notify or a plain call for anything long. A task run is a whole agent turn, so a large wait_ms mostly means sitting idle.',
+      "Run an instruction in a SEPARATE session, alongside this conversation rather than inside it. With repo it stands in a git worktree of that repository, so it loads that repository's CLAUDE.md, skills and settings; without repo it runs in your own workspace. " +
+      'CHOOSING BETWEEN THIS AND THE Task TOOL: compare the repository you need against the one you are standing in. ' +
+      'Same repository, and you want the answer in this turn — use Task. It shares your working directory and costs nothing. ' +
+      'Different repository — use this with repo. Task CANNOT change directory, so pointing it at another repository reads YOUR files while reporting on that one, and the answer looks correct. ' +
+      'Same repository but long-running — use this without repo, so the work proceeds in its own session instead of holding up this turn. ' +
+      'ONE CALL DOES EVERYTHING: the workspace is created or reused AND the instruction is queued — do not follow this with anything else. ' +
+      'CALLING IT TWICE THE SAME WAY reuses the same workspace and branch, so follow-up work sees the earlier work. ' +
+      'THE RESULT IS ASYNCHRONOUS: with notify it arrives later as a message that wakes you, so end your turn after the call. ' +
+      'Only name a repository the user named; an unknown repository fails rather than guessing.',
     inputSchema: {
       type: 'object' as const,
       properties: {
-        series: {
+        repo: {
           type: 'string',
-          description: 'Task series id, as `ncl tasks list` shows it (e.g. "pr-review-a25c").',
+          description:
+            'Repository NAME, e.g. "saber" or "wego/saber" — resolved host-side against the operator allowlist. Never a path, never absolute. OMIT IT to run in your own workspace instead: still a separate session with its own transcript, running alongside this conversation, but no repository and no worktree.',
+        },
+        instruction: {
+          type: 'string',
+          description:
+            'What to do, delivered as the run\'s entire brief. The run starts with an empty context and cannot read this conversation, so expand every reference ("this bug", "as discussed") into explicit text: what to do, in which files, and what the result must be. May instead begin with a slash command, which is dispatched as a command in the run\'s own session.',
         },
         notify: {
           type: 'boolean',
           description:
-            'Ask to be woken with the result when the run finishes. Returns immediately. Ignored when wait_ms is set, which already implies it.',
-        },
-        wait_ms: {
-          type: 'number',
-          description:
-            'Block up to this many milliseconds for the result. Capped at 300000. On expiry the result arrives by wake instead.',
+            "Wake me with the run's result when it finishes. Without it the run still happens, but you are never told how it went.",
         },
       },
-      required: ['series'],
+      required: ['instruction'],
     },
   },
   async handler(args) {
-    const series = ((args.series as string) || '').trim();
-    if (!series) return err('series is required — the id of an existing task series, from `ncl tasks list`.');
+    const repo = ((args.repo as string) || '').trim();
+    const instruction = ((args.instruction as string) || '').trim();
+    if (!instruction) return err('instruction is required — the brief the run starts from.');
 
-    const { wants, waitMs } = resolveMode(args);
     // No requestId means the host writes no answer and sends no wake. That is
     // the fire-and-forget contract, expressed as an absent field rather than a
     // flag the host would have to interpret.
+    const wants = args.notify === true;
     const requestId = wants ? generateId() : '';
-    const waitUntil = waitMs > 0 ? Date.now() + waitMs : null;
 
     await writeMessageOut({
       id: requestId || generateId(),
@@ -132,44 +105,29 @@ export const runTask: McpToolDefinition = {
       content: JSON.stringify({
         action: 'run_task',
         requestId,
-        waitUntil,
-        // Passed through unvalidated ON PURPOSE: the host resolves the series
-        // inside the caller's own agent group and refuses anything else.
-        series,
+        // Never polls: this tool has no blocking mode, so the host always
+        // takes the wake path when there is a requestId at all.
+        waitUntil: null,
+        // Passed through unvalidated ON PURPOSE. This container cannot be
+        // relied on to gate itself, so the host resolves the name against its
+        // own allowlist and refuses everything else.
+        repo,
+        instruction,
       }),
     });
 
-    log(`run_task: ${series} (requestId=${requestId || 'none'}, waitMs=${waitMs})`);
+    const where = repo ? `"${repo}"` : 'a separate session in your own workspace';
+    log(`run_task: ${repo || '(no repo)'} (requestId=${requestId || 'none'})`);
 
     if (!requestId) {
       return ok(
-        `Queued one run of "${series}". You asked for no result, so nothing further will arrive — ` +
-          `re-run with notify: true if you need to know how it went.`,
+        `Queued in ${where}. You asked for no result, so nothing further will arrive — ` +
+          `pass notify: true if you need to know how it went.`,
       );
     }
-
-    if (waitUntil === null) {
-      return ok(
-        `Queued one run of "${series}". Its result will arrive later as a message that wakes you — end your turn now.`,
-      );
-    }
-
-    while (Date.now() < waitUntil) {
-      const response = findCliResponse(requestId);
-      if (response) {
-        markCompleted([response.id]);
-        const parsed = JSON.parse(response.content) as RunTaskResponse;
-        log(`run_task response: ${requestId} → ${parsed.status}`);
-        if (parsed.status === 'error') return err(parsed.result?.error || `Could not run "${series}".`);
-        return ok(parsed.result?.message || `Run of "${series}" finished.`);
-      }
-      await sleep(Math.min(POLL_INTERVAL_MS, waitMs));
-    }
-
-    log(`run_task timeout: ${requestId}`);
     return ok(
-      `"${series}" is still running — it outlasted the ${waitMs}ms wait. ` +
-        `You will be woken with its result when it finishes. Tell the human you are waiting rather than going silent.`,
+      `Queued in ${where}. The result will arrive later as a message that wakes you — end your turn now. ` +
+        `Tell the human you are waiting rather than going silent.`,
     );
   },
 };

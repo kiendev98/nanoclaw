@@ -9,16 +9,15 @@
  * mechanism covers the motivating case: an installed module adding params
  * that must land in the payload the host reads from outbound.db.
  *
- * `run_task` blocks on the host's answer, which never comes here, so these
- * cases pin the wait ceiling to a millisecond and read the row it wrote
- * before degrading. What the payload carries is the whole point; how long it
- * waited is another file's subject.
+ * `run_task` never blocks — it writes its outbound row and returns — so these
+ * cases simply read the row it wrote. What the payload carries is the whole
+ * point.
  */
 import { describe, it, expect, afterAll, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages, writeMessageOut } from '../db/messages-out.js';
-import { runTask, runTaskWaitCeiling } from './scheduling.js';
+import { runTask } from './scheduling.js';
 import { extendTool, registerTools, resetToolExtensions } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -209,11 +208,9 @@ describe('extendTool — passthrough keys land in the written payload', () => {
 describe('extendTool — fixture extension of run_task (end to end)', () => {
   beforeEach(() => {
     initTestSessionDb();
-    runTaskWaitCeiling.ms = 1;
   });
 
   afterEach(() => {
-    runTaskWaitCeiling.ms = 300_000;
     closeSessionDb();
   });
 
@@ -237,24 +234,24 @@ describe('extendTool — fixture extension of run_task (end to end)', () => {
     });
 
     const props = schemaProps(runTask);
-    expect(Object.keys(props).sort()).toEqual(['notify', 'purpose', 'series', 'wait_ms']);
+    expect(Object.keys(props).sort()).toEqual(['instruction', 'notify', 'purpose', 'repo']);
     expect(runTask.tool.description?.endsWith('The purpose line is shown publicly.')).toBe(true);
 
-    await runTask.handler({ series: 'demo-series', wait_ms: 1000, purpose: 'Deep research' });
+    await runTask.handler({ repo: 'saber', instruction: 'Do the thing', purpose: 'Deep research' });
 
     const payload = lastPayload();
     expect(payload.action).toBe('run_task');
-    expect(payload.series).toBe('demo-series');
+    expect(payload.repo).toBe('saber');
     expect(payload.purpose).toBe('Deep research');
   });
 
   it('omits extension keys from the payload when the caller does not pass them', async () => {
     // run_task is already extended by the previous test (module state is
     // process-wide); a call without the param must stay byte-identical to base.
-    await runTask.handler({ series: 'demo-series', wait_ms: 1000 });
+    await runTask.handler({ repo: 'saber', instruction: 'Do the thing' });
 
     const payload = lastPayload();
-    expect(payload.series).toBe('demo-series');
+    expect(payload.repo).toBe('saber');
     expect(payload).not.toHaveProperty('purpose');
   });
 });

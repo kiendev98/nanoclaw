@@ -9,6 +9,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
+import { workspaceSeriesId } from './create.js';
 import { prepareTaskWorkspace, taskBranch, taskWorkspace } from './task-workspace.js';
 
 const REPO = '/tmp/nanoclaw-test-repo';
@@ -54,5 +55,37 @@ describe('prepareTaskWorkspace', () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toMatch(/Cannot prepare a workspace/);
+  });
+});
+
+describe('workspaceSeriesId', () => {
+  it('is derived, so the same request twice finds the same workspace', () => {
+    // The whole reason it cannot use `makeTaskId`: random hex would make a
+    // repeated call mint a second series, a second branch, a second worktree.
+    expect(workspaceSeriesId('saber', 'sess-1')).toBe(workspaceSeriesId('saber', 'sess-1'));
+  });
+
+  it('separates two conversations working in one repository', () => {
+    expect(workspaceSeriesId('saber', 'sess-1')).not.toBe(workspaceSeriesId('saber', 'sess-2'));
+  });
+
+  it('separates two repositories in one conversation', () => {
+    expect(workspaceSeriesId('saber', 'sess-1')).not.toBe(workspaceSeriesId('nanoclaw', 'sess-1'));
+  });
+
+  it('keeps the repository readable in front, so a stray worktree is identifiable', () => {
+    expect(workspaceSeriesId('wego/saber', 'sess-1').startsWith('wego-saber-')).toBe(true);
+  });
+
+  it('gives a repo-less run its own lane rather than failing', () => {
+    expect(workspaceSeriesId(null, 'sess-1').startsWith('home-')).toBe(true);
+  });
+
+  it('does not collide a repo-less lane with a repository named home', () => {
+    expect(workspaceSeriesId(null, 'sess-1')).not.toBe(workspaceSeriesId('home', 'sess-1'));
+  });
+
+  it('stays safe as a thread suffix, filename and branch segment', () => {
+    expect(workspaceSeriesId('wego/saber', 'sess-1')).toMatch(/^[a-z0-9-]+$/);
   });
 });
