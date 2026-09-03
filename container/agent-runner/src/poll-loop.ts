@@ -19,7 +19,7 @@ import {
   setContinuation,
   setCurrentInReplyTo,
 } from './db/session-state.js';
-import { isAgentLane } from './session-lane.js';
+import { isAgentLane, sessionOwnsAChannel } from './session-lane.js';
 import {
   formatMessages,
   extractRouting,
@@ -1297,26 +1297,26 @@ export async function autoAppendTaskLog(text: string): Promise<void> {
 async function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): Promise<void> {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
-
-  // THE BATCH'S OWN CHANNEL ANSWERS ITSELF; every other destination is looked
-  // up. Per-destination resolution exists because an agent-shared session
-  // holds several channels at once and a single `routing.threadId` would
-  // stamp one channel's thread onto another — that reason is unchanged and is
-  // why the lookup stays for the `else`.
+  // Resolve thread_id per-destination from the most recent inbound message
+  // that came from this same channel+platform. In agent-shared sessions,
+  // different destinations have different thread contexts — using a single
+  // routing.threadId would stamp one channel's thread onto another.
   //
-  // But `getLatestInboundRoute` answers "the newest row on this channel",
-  // which is only the same thing as "the conversation I am replying to" when
-  // the session serves ONE thread per channel. A `shared` wiring serves the
-  // whole messaging group, so several live threads land in one session, and
-  // the newest row can be a different thread than the batch — or a message
-  // that arrived after this batch was claimed and the agent never read.
-  // Replying there posts a considered answer into a stranger's conversation.
+  // NEWEST-WINS IS DELIBERATE WHEN A BATCH SPANS THREADS, and is asserted by
+  // `integration.test.ts` ("resolves most recent thread_id …"): the agent read
+  // every message in the batch, and the last one is the likeliest subject of a
+  // single reply. It is not changed here.
+  const destRouting = resolveDestinationThread(channelType, platformId);
+  // The thread this session opened on that channel, same as `send_message`
+  // uses — the two doors must not disagree about where a reply belongs, and
+  // this one had no way to know about a thread nobody had replied in yet.
   //
-  // `routing` is the first non-echo row of the batch the agent actually read,
-  // so for that channel it is both correct and stable under interleaving.
-  const isBatchChannel =
-    routing.channelType !== null && channelType === routing.channelType && platformId === routing.platformId;
-  const destRouting = isBatchChannel ? null : resolveDestinationThread(channelType, platformId);
+  // Guarded by `sessionOwnsAChannel` exactly as `resolveRouting` is, and for
+  // the reason recorded there: a chat session that once posted proactively
+  // into another channel is bound to that first thread forever (first-wins,
+  // no clearer), so preferring the binding unconditionally would thread every
+  // later post into it — the removed "hook 3", arriving through a new door.
+  const boundThread = sessionOwnsAChannel(getSessionRouting()) ? null : (dest.threadId ?? null);
   // Channel destinations only. An agent-to-agent message is machine input,
   // and a telemetry line appended to it is noise the receiving agent has to
   // reason about.
@@ -1331,7 +1331,14 @@ async function sendToDestination(dest: DestinationEntry, body: string, routing: 
     kind: 'chat',
     platform_id: platformId,
     channel_type: channelType,
-    thread_id: isBatchChannel ? routing.threadId : (destRouting?.threadId ?? null),
+    // THE BINDING WINS, and both doors agree on that — `resolveRouting` in
+    // mcp-tools/core.ts resolves the same order. The thread this session
+    // opened IS its conversation on that channel; a newer inbound elsewhere in
+    // the same channel is somebody else's, and following it is the cross-thread
+    // mistake this pair of fixes exists to stop. The inbound lookup stays as
+    // the answer for every session that has no binding, which is all of them
+    // until one posts.
+    thread_id: boundThread ?? destRouting?.threadId ?? null,
     content: JSON.stringify({ text: body, ...(footer ? { footer } : {}) }),
   });
 }

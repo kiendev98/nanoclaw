@@ -674,6 +674,73 @@ exchange is bounded by that number rather than by either agent.
 Neither is a bug. Both are the a2a bridge doing its job, and both are
 configuration rather than code — but a worker↔bot loop needs all three doors
 open, and they fail in that order.
+
+## 3.7 The worker replies into the thread it opened
+
+§3.4 threads a worker's reply through `getLatestInboundRoute` — the newest
+inbound on that channel. That answers only once somebody has replied, and the
+protocol needs an answer before that.
+
+```
+   ai-anya                 WORKER
+     │◄─ send_message ──────┤  post #1: no binding yet → top-level ✓
+     │   thread T opens     │
+     │                 ┌────┴────┐
+     │                 │ HOOK 1  │ host binds session ↔ T
+     │                 └────┬────┘
+     │◄─ send_message ──────┤  post #2, nobody replied yet:
+     │                      │    getLatestInboundRoute → null
+     │   thread U opens ✗   │    → TOP-LEVEL, a rival root
+     │                      │    → first-wins, so U never binds
+     │                      │    → every reply in U is lost
+```
+
+The binding already knew the answer. It was simply unreadable from inside the
+container: it routed a human's reply IN and had no path OUT.
+
+**It now rides the destination map.** `write-destinations.ts` projects
+`sessions.bound_root_message_id` onto the channel row it belongs to, composed
+as `<platform_id>:<root>` — the form every inbound row and every adapter uses.
+Rewritten wholesale on every wake, so it tracks the binding with no second
+write path and no invalidation rule.
+
+**Composed, never matched.** `threadRootMessageId` warns against rebuilding a
+composed thread id, because a rebuilt guess that stops matching fails by
+silently finding nothing. That warning is about the INBOUND direction. This
+value is only ever used to send.
+
+**Not on `session_routing`.** That row is the session's own LANE, and
+repointing it at a lent channel would send the worker's report and its
+`ask_user_question` to the channel instead of to the agent that briefed it
+(§3.5). "Which thread on which channel" is per-channel data, so it rides the
+per-channel row.
+
+### The binding wins, and both doors agree
+
+`resolveRouting` (`send_message`) and `sendToDestination` (the
+`<message to="…">` path) resolve the same order: **binding, then newest
+inbound, then top-level.**
+
+A lent channel carries other people's threads. Following whichever is newest is
+how a considered answer lands in a stranger's conversation — so a newer inbound
+elsewhere on the channel does not move a worker off the thread it opened.
+
+Still scoped to a session with **no channel of its own**, exactly as the
+inbound fallback is. An ordinary chat session is untouched, and the removed
+hook 3 cannot return through this door: a session that once posted proactively
+into another channel is bound to that first thread forever, so preferring the
+binding unconditionally would thread every later post into it.
+
+### What this retires
+
+The PR-body thread marker, for any runner with a binding. `saber-pr-babysit`
+recovers its thread in three steps — read the marker, search the channel, else
+open one — and a nanoclaw worker could do none of them: `send_message` takes no
+thread argument and returns the container `seq`, not the platform `ts`, so
+there was nothing to persist and no way to search. The binding is now the
+durable record of "one thread per PR", and it needs no marker at all.
+
+The marker still matters for a runner without a binding, so the skill keeps it.
 ## Limits
 
 - **One thread per worker session.** The binding is first-wins with no clearer.

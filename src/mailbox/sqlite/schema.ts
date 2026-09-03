@@ -33,7 +33,10 @@ CREATE TABLE IF NOT EXISTS destinations (
   type            TEXT NOT NULL,
   channel_type    TEXT,
   platform_id     TEXT,
-  agent_group_id  TEXT
+  agent_group_id  TEXT,
+  -- The thread THIS session opened on that channel, when it opened one. Only
+  -- a session with no channel of its own reads it — see resolveRouting.
+  thread_id       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS session_routing (

@@ -252,6 +252,7 @@ interface DestinationRow {
   channel_type: string | null;
   platform_id: string | null;
   agent_group_id: string | null;
+  thread_id: string | null;
 }
 
 function destination(row: DestinationRow): Destination {
@@ -262,6 +263,7 @@ function destination(row: DestinationRow): Destination {
     channelType: row.channel_type,
     platformId: row.platform_id,
     agentGroupId: row.agent_group_id,
+    threadId: row.thread_id,
   });
 }
 

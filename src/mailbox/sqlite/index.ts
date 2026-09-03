@@ -20,6 +20,7 @@ import {
   markDeliveryFailed,
   markMessageFailed,
   migrateDeliveredTable,
+  migrateDestinationsTable,
   migrateMessagesInTable,
   openInboundDb,
   openOutboundDb,
@@ -194,6 +195,7 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
             channel_type: record.channelType,
             platform_id: record.platformId,
             agent_group_id: record.agentGroupId,
+            thread_id: record.threadId,
           };
         }),
       ),
@@ -465,6 +467,7 @@ export class SqliteAgentMailbox implements AgentMailbox {
         migrateMessagesInTable(inbound);
         const deliveredColumns = inbound.prepare("PRAGMA table_info('delivered')").all();
         if (deliveredColumns.length > 0) migrateDeliveredTable(inbound);
+        migrateDestinationsTable(inbound);
         this.migrated.add(inboundPath);
       }
       // Sequences are allocated per file (inbound writes scan messages_in,

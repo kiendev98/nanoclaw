@@ -22,6 +22,8 @@ export interface DestinationEntry {
   channelType?: string;
   platformId?: string;
   agentGroupId?: string;
+  /** The thread this session opened on that channel — see resolveRouting. */
+  threadId?: string;
 }
 
 export type SessionMode = { kind: 'chat' } | { kind: 'task'; taskId: string };
@@ -34,6 +36,7 @@ function destinationEntry(destination: Destination): DestinationEntry {
     channelType: destination.channelType ?? undefined,
     platformId: destination.platformId ?? undefined,
     agentGroupId: destination.agentGroupId ?? undefined,
+    threadId: destination.threadId ?? undefined,
   };
 }
 

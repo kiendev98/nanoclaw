@@ -144,7 +144,29 @@ function resolveRouting(
     if (isOwnChannel) {
       threadId = session.thread_id;
     } else if (!sessionOwnsAChannel(session)) {
-      threadId = latestInboundThread(dest.channelType!, dest.platformId!);
+      // THE THREAD THIS SESSION OPENED WINS OVER THE NEWEST INBOUND.
+      //
+      // `dest.threadId` is the host's binding for this session, projected into
+      // the destination map on every wake (modules/agent-to-agent/
+      // write-destinations.ts). It answers "the conversation I started here",
+      // which is what a worker driving a review actually means.
+      //
+      // The inbound fallback below cannot answer that on its own, and its two
+      // gaps are the ones that broke the protocol. Before anyone has replied
+      // there is no inbound at all, so a second post named no thread, opened a
+      // SECOND root, and — hook 1 being first-wins — that root never bound, so
+      // every reply in it was lost. And once several threads of one channel
+      // reach one session, "newest inbound" can name a different conversation
+      // than the one being continued.
+      //
+      // It also retires the PR-body thread marker for this runner: the binding
+      // already is the durable record of "one thread per PR", so nothing has
+      // to be persisted, re-read, or searched for.
+      //
+      // Still scoped to a session with NO channel of its own, exactly as the
+      // fallback is, so an ordinary chat session is untouched and the removed
+      // hook 3 cannot return through this door.
+      threadId = dest.threadId ?? latestInboundThread(dest.channelType!, dest.platformId!);
     }
     return {
       channel_type: dest.channelType!,
