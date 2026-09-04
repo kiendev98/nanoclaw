@@ -10,18 +10,20 @@ import { runMigrations } from '../../../db/migrations/index.js';
 import { registerWorkerMigration } from '../db/migrate.js';
 import type { OutboundMessage } from '../../../mailbox/index.js';
 import type { Session } from '../../../types.js';
-import type { WorkerChannelGrant } from '../types.js';
+import type { WorkerChannelGrant, WorkerQuestion } from '../types.js';
 
-const { steps, delivered, warnings, deliveryFails } = vi.hoisted(() => ({
+const { steps, delivered, warnings, deliveryFails, deliveryThrows } = vi.hoisted(() => ({
   steps: [] as string[],
   delivered: [] as Array<{ agentGroupId: string; sessionId: string; text: string; sender: string }>,
   warnings: [] as string[],
   deliveryFails: { value: false },
+  deliveryThrows: { value: false },
 }));
 
 vi.mock('../notify.js', () => ({
   deliverToSession: vi.fn((agentGroupId: string, sessionId: string, text: string, sender: string) => {
     steps.push('deliver');
+    if (deliveryThrows.value) return Promise.reject(new Error('mailbox is unreachable'));
     if (deliveryFails.value) return Promise.resolve(false);
     delivered.push({ agentGroupId, sessionId, text, sender });
     return Promise.resolve(true);
@@ -40,6 +42,7 @@ vi.mock('../../../session-manager.js', () => ({
 }));
 
 const { createGrant, findLiveGrantForTask } = await import('../db/worker-channel-grants.js');
+const { createQuestion, findOpenQuestion } = await import('../db/worker-questions.js');
 const { bindLentConversationThread } = await import('./bind-grant.js');
 
 const NOW = new Date().toISOString();
@@ -86,11 +89,26 @@ function aRootPost(id = 'wlend-1'): OutboundMessage {
   };
 }
 
+function anOpenQuestion(overrides: Partial<WorkerQuestion> = {}): WorkerQuestion {
+  return {
+    question_id: 'wq-1',
+    task_id: 'wt-1',
+    helper_session_id: 'sess-worker',
+    helper_agent_group_id: 'ag-worker',
+    principal_agent_group_id: 'ag-principal',
+    principal_session_id: 'sess-principal',
+    question_text: 'May I have the review channel?',
+    created_at: NOW,
+    ...overrides,
+  };
+}
+
 beforeEach(async () => {
   steps.length = 0;
   delivered.length = 0;
   warnings.length = 0;
   deliveryFails.value = false;
+  deliveryThrows.value = false;
   registerWorkerMigration();
   await runMigrations(await initTestDb());
 });
@@ -169,5 +187,65 @@ describe('bindLentConversationThread', () => {
     await bindLentConversationThread(aRootPost(), PRINCIPAL, { firstDelivery: false, platformMsgId: '1788.42' });
 
     expect(warnings.at(-1)).toContain('worker session is gone');
+  });
+
+  // A worker asks for the conversation through ask_principal, and the principal
+  // answers with the lend. C9 allows one open question, so a question left open
+  // here refuses every later ask for the rest of the task.
+  it('closes the open question the lend answered', async () => {
+    await createGrant(aGrant());
+    await createQuestion(anOpenQuestion());
+
+    await bindLentConversationThread(aRootPost(), PRINCIPAL, { firstDelivery: false, platformMsgId: '1788.42' });
+
+    expect(await findOpenQuestion('sess-worker')).toBeUndefined();
+  });
+
+  // A lend is not always an answer. A worker that was asking about something
+  // else has to learn which question was spent.
+  it('names the closed question in the notice', async () => {
+    await createGrant(aGrant());
+    await createQuestion(anOpenQuestion({ question_id: 'wq-7' }));
+
+    await bindLentConversationThread(aRootPost(), PRINCIPAL, { firstDelivery: false, platformMsgId: '1788.42' });
+
+    expect(delivered[0]!.text).toContain('closed your open question wq-7');
+    expect(delivered[0]!.text).toContain('ask again');
+  });
+
+  it('says nothing about a question when the worker had none open', async () => {
+    await createGrant(aGrant());
+
+    await bindLentConversationThread(aRootPost(), PRINCIPAL, { firstDelivery: false, platformMsgId: '1788.42' });
+
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]!.text).not.toContain('question');
+  });
+
+  // The question is closed before the delivery on purpose. A worker whose
+  // notice never lands is still free to ask again.
+  it('closes the question even when the worker session is gone', async () => {
+    await createGrant(aGrant());
+    await createQuestion(anOpenQuestion());
+    deliveryFails.value = true;
+
+    await bindLentConversationThread(aRootPost(), PRINCIPAL, { firstDelivery: false, platformMsgId: '1788.42' });
+
+    expect(await findOpenQuestion('sess-worker')).toBeUndefined();
+  });
+
+  // The hook fires once and delivery swallows what it throws, so nothing
+  // retries. A throw is transient, and the principal is the only party left to
+  // tell — with different words from the permanent case.
+  it('tells the principal in transient words when the notice throws', async () => {
+    await createGrant(aGrant());
+    deliveryThrows.value = true;
+
+    await bindLentConversationThread(aRootPost(), PRINCIPAL, { firstDelivery: false, platformMsgId: '1788.42' });
+
+    expect(warnings.at(-1)).toContain('did not go through');
+    expect(warnings.at(-1)).toContain('the conversation is live');
+    expect(warnings.at(-1)).not.toContain('worker session is gone');
+    expect((await findLiveGrantForTask('wt-1'))?.thread_id).toBe('1788.42');
   });
 });

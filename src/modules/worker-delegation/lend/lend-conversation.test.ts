@@ -49,9 +49,9 @@ vi.mock('../../agent-to-agent/write-destinations.js', () => ({
 const { createHelper } = await import('../db/worker-helpers.js');
 const { createWorkerSession } = await import('../db/worker-sessions.js');
 const { createTask } = await import('../db/worker-tasks.js');
-const { findLiveGrantForTask } = await import('../db/worker-channel-grants.js');
+const { createGrant, deleteGrant, findLiveGrantForTask } = await import('../db/worker-channel-grants.js');
 const { lendConversation } = await import('./lend-conversation.js');
-import type { WorkerSession, WorkerTask } from '../types.js';
+import type { WorkerChannelGrant, WorkerSession, WorkerTask } from '../types.js';
 
 const NOW = new Date().toISOString();
 const PRINCIPAL: Session = {
@@ -214,5 +214,37 @@ describe('lendConversation', () => {
 
     expect(await getDestinations('ag-worker')).toHaveLength(0);
     expect(outbound).toHaveLength(0);
+  });
+});
+
+// A released grant keeps its row, because `task_id` is the primary key that
+// makes one conversation per task true. A grant whose destination row never
+// got written held nothing, and the row left behind reads as a live collision.
+describe('deleteGrant', () => {
+  function aGrant(overrides: Partial<WorkerChannelGrant> = {}): WorkerChannelGrant {
+    return {
+      task_id: 'wt-1',
+      helper_agent_group_id: 'ag-worker',
+      helper_session_id: 'sess-worker',
+      messaging_group_id: 'mg-lent',
+      channel_type: 'slack',
+      platform_id: 'slack:C123',
+      root_message_id: 'wlend-1',
+      thread_id: '',
+      local_destination_name: 'conversation',
+      granted_by_session_id: 'sess-principal',
+      granted_at: NOW,
+      released_at: null,
+      ...overrides,
+    };
+  }
+
+  it('frees a later grant for the same task', async () => {
+    await createGrant(aGrant());
+    await deleteGrant('wt-1');
+
+    await createGrant(aGrant({ root_message_id: 'wlend-2' }));
+
+    expect((await findLiveGrantForTask('wt-1'))?.root_message_id).toBe('wlend-2');
   });
 });

@@ -33,10 +33,7 @@ export async function bindGrantThread(
     rootMessageId,
   );
   if (result.changes === 0) return undefined;
-  return getDb().get<WorkerChannelGrant>(
-    'SELECT * FROM worker_channel_grants WHERE root_message_id = ?',
-    rootMessageId,
-  );
+  return findGrantByRootMessage(rootMessageId);
 }
 
 /**

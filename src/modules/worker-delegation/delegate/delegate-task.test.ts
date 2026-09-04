@@ -17,13 +17,14 @@ import { runMigrations } from '../../../db/migrations/index.js';
 import { registerWorkerMigration } from '../db/migrate.js';
 import type { Session } from '../../../types.js';
 
-const { refusals, holds } = vi.hoisted(() => ({
+const { refusals, holds, deliveryFails } = vi.hoisted(() => ({
   refusals: [] as string[],
   holds: [] as Array<Record<string, unknown>>,
+  deliveryFails: { value: false },
 }));
 
 vi.mock('../notify.js', () => ({
-  deliverToSession: vi.fn().mockResolvedValue(true),
+  deliverToSession: vi.fn(() => Promise.resolve(!deliveryFails.value)),
   replyToCaller: (_session: Session, text: string) => {
     refusals.push(text);
     return Promise.resolve(true);
@@ -73,6 +74,7 @@ let previousRoots: string | undefined;
 beforeEach(async () => {
   refusals.length = 0;
   holds.length = 0;
+  deliveryFails.value = false;
   tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-delegate-'));
   fs.mkdirSync(path.join(tempRoot, 'nanoclaw', '.git'), { recursive: true });
   previousRoots = process.env[ROOTS_ENV_VAR];
@@ -150,6 +152,25 @@ describe('delegateTask', () => {
 
     expect(refusals.at(-1)).toContain('still on task');
     expect((await findRunningTask('sess-worker'))?.task_id).toBe(first?.task_id);
+  });
+
+  // The row is written before the delivery, so a task nobody received would sit
+  // `running` for good. The caller was promised exactly one report, and it
+  // would block the next delegation while waiting for work that never started.
+  it('takes the task back when the worker session cannot be reached', async () => {
+    const { findRunningTask } = await import('../db/worker-tasks.js');
+    deliveryFails.value = true;
+
+    await delegateTask(request, PRINCIPAL);
+
+    expect(await findRunningTask('sess-worker')).toBeUndefined();
+    expect(refusals.at(-1)).toContain('could not be reached');
+
+    deliveryFails.value = false;
+    await delegateTask(request, PRINCIPAL);
+
+    expect(await findRunningTask('sess-worker')).toBeDefined();
+    expect(refusals.at(-1)).toContain('exactly one report');
   });
 });
 
