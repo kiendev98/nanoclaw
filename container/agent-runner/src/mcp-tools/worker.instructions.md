@@ -70,5 +70,11 @@ something you can forget, and never something to do early.
 is still running.** Finished means the work is done, not that you have nothing
 to say this turn.
 
-**Progress notes are rationed on purpose.** Five per task, ten seconds apart.
-They exist for a milestone worth interrupting for, not for narration.
+**Send at least one progress note once the task passes its first real
+milestone.** Exploration finished, a blocker found, and a draft started all
+qualify. A long task that reports nothing until the end leaves your principal
+with nothing to say.
+
+**Progress notes are rationed, not banned.** Five per task, ten seconds apart.
+They exist for a milestone worth interrupting for, not for narration. The cap
+stops narration. It is not a reason to send none.

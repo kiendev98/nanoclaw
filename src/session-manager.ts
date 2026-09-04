@@ -511,6 +511,18 @@ async function runMailboxSession<T>(
 }
 
 /**
+ * Run a job with an empty held-key set.
+ *
+ * A queue that dispatches asynchronously carries the async context of whoever
+ * enqueued the job. A reconcile enqueued from inside a mailbox session then
+ * inherits that session's key and trips the guard above, long after the
+ * session it names has closed. The job is not nested, so it starts clean.
+ */
+export function runDetachedFromMailboxContext<T>(fn: () => T): T {
+  return activeMailboxKeys.run(new Set(), fn);
+}
+
+/**
  * Write a message directly to a session's outbound mailbox so the host delivery
  * loop picks it up. Used by the command gate to send denial responses
  * without waking a container.

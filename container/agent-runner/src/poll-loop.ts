@@ -1072,7 +1072,11 @@ export async function dispatchResultText(
   // turnDelivered (door deliveries + DB-visible sends like MCP send_message);
   // otherwise by this dispatch's own send count.
   const anythingDelivered = options?.suppressDelivery ? options.turnDelivered === true : sent > 0;
-  const hasUnwrapped = !routing.taskRun && !anythingDelivered && !!scratchpad;
+  // A worker never delivers through a `<message to="...">` block. It reports
+  // through the `finish_task` tool, and its closing text is captured as the
+  // report draft above. Without this clause every worker turn looked
+  // undelivered, and the nudge told it to use a door it does not have.
+  const hasUnwrapped = !routing.taskRun && !anythingDelivered && !!scratchpad && !worktreeDir();
   if (hasUnwrapped) {
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
   }
