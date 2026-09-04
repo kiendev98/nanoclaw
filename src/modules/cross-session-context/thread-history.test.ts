@@ -51,28 +51,29 @@ function history(id: string, text: string, over: Partial<ThreadHistoryMessage> =
 
 interface SeedOverrides {
   messages?: ThreadHistoryMessage[];
-  fetchThreadHistory?: (platformId: string, threadId: string, limit: number) => Promise<ThreadHistoryMessage[]>;
+  readThreadHistory?: ((platformId: string, threadId: string, limit: number) => Promise<ThreadHistoryMessage[]>) | null;
   mg?: never;
   threadId?: string | null;
+  ignoredMessagePolicy?: 'drop' | 'accumulate';
   triggerMessageId?: string;
 }
 
 const calls: Array<{ platformId: string; threadId: string; limit: number }> = [];
 
 async function seed(over: SeedOverrides = {}): Promise<void> {
-  const fetchThreadHistory =
-    over.fetchThreadHistory ??
-    (async (platformId: string, threadId: string, limit: number) => {
-      calls.push({ platformId, threadId, limit });
-      return over.messages ?? [];
-    });
+  const recording = async (platformId: string, threadId: string, limit: number) => {
+    calls.push({ platformId, threadId, limit });
+    return over.messages ?? [];
+  };
+  const readThreadHistory = over.readThreadHistory === undefined ? recording : (over.readThreadHistory ?? undefined);
   await seedThreadHistory({
     agentGroup: AG,
     session: SESSION,
     mg: over.mg ?? ROOM_MG,
-    adapter: { fetchThreadHistory } as never,
+    readThreadHistory,
     platformId: 'slack:C1',
     threadId: over.threadId === undefined ? 'slack:C1:100.0' : over.threadId,
+    ignoredMessagePolicy: over.ignoredMessagePolicy ?? 'accumulate',
     triggerMessageId: over.triggerMessageId ?? 'trigger-1',
     toLocalMessageId: (platformMessageId: string) => `${platformMessageId}:ag-1`,
   });
@@ -168,18 +169,16 @@ describe('seedThreadHistory', () => {
     expect(dmSurface).toBe('dm-timeline');
   });
 
-  it('no-ops when the adapter cannot fetch thread history', async () => {
-    await seedThreadHistory({
-      agentGroup: AG,
-      session: SESSION,
-      mg: ROOM_MG,
-      adapter: {} as never,
-      platformId: 'slack:C1',
-      threadId: 'slack:C1:100.0',
-      triggerMessageId: 'trigger-1',
-      toLocalMessageId: (id: string) => `${id}:ag-1`,
-    });
+  it('no-ops when the channel cannot read thread history', async () => {
+    await seed({ readThreadHistory: null, messages: [history('m1', 'hi')] });
 
+    expect(written).toEqual([]);
+  });
+
+  it('no-ops on a drop wiring, which asks for no ambient context', async () => {
+    await seed({ messages: [history('m1', 'hi')], ignoredMessagePolicy: 'drop' });
+
+    expect(calls).toEqual([]);
     expect(written).toEqual([]);
   });
 
@@ -200,7 +199,7 @@ describe('seedThreadHistory', () => {
   it('delivers the message without a prelude when the fetch rejects', async () => {
     await expect(
       seed({
-        fetchThreadHistory: async () => {
+        readThreadHistory: async () => {
           throw new Error('slack 429');
         },
       }),
@@ -212,7 +211,7 @@ describe('seedThreadHistory', () => {
   it('gives up on a slow platform instead of holding up delivery', async () => {
     vi.useFakeTimers();
     try {
-      const pending = seed({ fetchThreadHistory: () => new Promise<ThreadHistoryMessage[]>(() => {}) });
+      const pending = seed({ readThreadHistory: () => new Promise<ThreadHistoryMessage[]>(() => {}) });
       await vi.advanceTimersByTimeAsync(THREAD_HISTORY_FETCH_TIMEOUT_MS + 1);
       await expect(pending).resolves.toBeUndefined();
     } finally {

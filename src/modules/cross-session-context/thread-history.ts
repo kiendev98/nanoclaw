@@ -26,8 +26,8 @@
 import { isTaskThread } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import { withExistingMailboxSession, writeSessionMessage } from '../../session-manager.js';
-import type { AgentGroup, MessagingGroup, Session } from '../../types.js';
-import type { ChannelAdapter, ThreadHistoryMessage } from '../../channels/adapter.js';
+import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from '../../types.js';
+import type { ThreadHistoryMessage } from '../../channels/adapter.js';
 import { ECHO_CHANNEL_TIMELINE_SURFACE, ECHO_CHANNEL_TYPE, ECHO_TIMELINE_SURFACE } from './config.js';
 import { truncateEchoText } from './fan.js';
 
@@ -43,14 +43,33 @@ export const THREAD_HISTORY_FETCH_TIMEOUT_MS = 4000;
  */
 const LAST_ENTRY_MAX_CHARS = 4000;
 
+/**
+ * The one channel capability this module needs.
+ *
+ * A function rather than the adapter itself, for the same reason
+ * `toLocalMessageId` is a function: the module names what it uses, not who
+ * provides it, and so inherits no change to the 18-member delivery port.
+ */
+export type ThreadHistoryReader = (
+  platformId: string,
+  threadId: string,
+  limit: number,
+) => Promise<ThreadHistoryMessage[]>;
+
 export interface SeedThreadHistoryInput {
   agentGroup: AgentGroup;
   session: Session;
   mg: MessagingGroup;
-  /** Absent, or lacking the capability, means no-op. */
-  adapter: ChannelAdapter | undefined;
+  /** Absent means the channel cannot read history. Seeding no-ops. */
+  readThreadHistory: ThreadHistoryReader | undefined;
   platformId: string;
   threadId: string | null;
+  /**
+   * The wiring's policy for messages that do not engage the agent. 'drop' is
+   * the operator asking for no ambient context between mentions, so reading
+   * the same messages off the platform would defeat the setting they chose.
+   */
+  ignoredMessagePolicy: MessagingGroupAgent['ignored_message_policy'];
   /** Platform id of the mention that created this session. Never re-seeded. */
   triggerMessageId: string | undefined;
   /**
@@ -79,17 +98,18 @@ export function threadHistoryRowId(platformMessageId: string, sessionId: string)
  * no prelude and the triggering message is delivered as it is today.
  */
 async function fetchThreadMessages(input: SeedThreadHistoryInput): Promise<ThreadHistoryMessage[]> {
-  const { adapter, session, threadId, platformId } = input;
-  if (!adapter?.fetchThreadHistory) return [];
+  const { readThreadHistory, session, threadId, platformId, ignoredMessagePolicy } = input;
+  if (!readThreadHistory) return [];
+  if (ignoredMessagePolicy !== 'accumulate') return [];
   if (threadId === null) return [];
   if (isTaskThread(threadId)) return [];
 
-  const fetching = adapter
-    .fetchThreadHistory(platformId, threadId, THREAD_HISTORY_LIMIT)
-    .catch((err: unknown): ThreadHistoryMessage[] => {
+  const fetching = readThreadHistory(platformId, threadId, THREAD_HISTORY_LIMIT).catch(
+    (err: unknown): ThreadHistoryMessage[] => {
       log.warn('Thread-history fetch failed (continuing without context)', { sessionId: session.id, err });
       return [];
-    });
+    },
+  );
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expiring = new Promise<ThreadHistoryMessage[]>((resolve) => {

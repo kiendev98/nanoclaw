@@ -292,12 +292,12 @@ export interface ChannelAdapter {
   /**
    * Read the messages already posted in a thread, oldest first.
    *
-   * The router calls this once, when a mention creates a brand-new thread
-   * session, so an agent tagged mid-conversation can see what came before.
-   * It never runs for a session that already exists.
+   * Bounded and side-effect free: it reports what the platform holds and
+   * changes nothing. Callers decide when to ask and what to do with the
+   * result, so a caller may bound the cost by asking at most once per thread.
    *
    * Platforms with no thread-history API can omit this. Callers treat absence
-   * as a no-op, so the triggering message is delivered either way.
+   * as a no-op, so nothing downstream depends on it being present.
    *
    * @param platformId The channel the thread belongs to.
    * @param threadId The thread to read.

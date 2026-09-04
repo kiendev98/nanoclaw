@@ -172,4 +172,25 @@ describe('SQLite mailbox canonical serialization', () => {
       { timestamp: '2026-01-01T00:00:04.000Z', content: '{"text":"top level"}' },
     ]);
   });
+
+  // Thread-history seeding skips a message the accumulate path already stored,
+  // and decides it on this exact-id lookup. A wrong predicate here would
+  // duplicate every prelude row, or suppress every one, with nothing logged.
+  it('reports presence by exact message id', () => {
+    const inboundDb = new Database(':memory:');
+    databases.push(inboundDb);
+    inboundDb.exec(INBOUND_SCHEMA);
+    inboundDb
+      .prepare(
+        `INSERT INTO messages_in (id, seq, timestamp, kind, channel_type, content, trigger)
+         VALUES (?, ?, ?, 'chat', 'slack', ?, 1)`,
+      )
+      .run('m1:ag-1', 2, '2026-01-01T00:00:00.000Z', '{"text":"stored"}');
+
+    const inbound = wrapSqliteInbound(inboundDb);
+    expect(inbound.hasMessage('m1:ag-1')).toBe(true);
+    expect(inbound.hasMessage('m1')).toBe(false);
+    expect(inbound.hasMessage('m1:ag-2')).toBe(false);
+    expect(inbound.hasMessage('')).toBe(false);
+  });
 });

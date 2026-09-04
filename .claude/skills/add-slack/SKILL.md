@@ -119,6 +119,13 @@ Create the Slack app (webhook delivery):
 5. Basic Information → copy the Signing Secret.
 ```
 
+If the Slack app already exists, check its Bot Token Scopes against the list
+above and re-install to the workspace if any are missing. Thread history needs
+the four `*:history` scopes. A missing scope does not raise an error: the agent
+keeps answering, and a mid-thread mention silently arrives with no prior
+context. `logs/nanoclaw.error.log` records `Thread-history fetch failed` once
+per new session.
+
 Store the secrets in `.env` (the app-level token doubles as the Socket Mode switch, the signing secret authenticates webhook requests):
 ```nc:prompt bot_token secret validate:^xoxb-
 Paste the Bot User OAuth Token — OAuth & Permissions, starts with `xoxb-`.

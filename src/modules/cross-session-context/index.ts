@@ -47,4 +47,5 @@ export {
   THREAD_HISTORY_FETCH_TIMEOUT_MS,
   THREAD_HISTORY_LIMIT,
   type SeedThreadHistoryInput,
+  type ThreadHistoryReader,
 } from './thread-history.js';

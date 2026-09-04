@@ -590,22 +590,19 @@ async function deliverToAgent(
     // earlier messages were never accumulated — still arrives blind. Ask the
     // platform for this thread's own preceding messages. Ordered AFTER the
     // sibling prelude so the thread's own turns sit closest to the live one.
-    //
-    // Gated on 'accumulate' because a 'drop' wiring is the operator asking
-    // for zero ambient context between mentions. Reading the same messages
-    // off the platform instead would defeat the setting they chose.
-    if (agent.ignored_message_policy === 'accumulate') {
-      await seedThreadHistory({
-        agentGroup,
-        session,
-        mg,
-        adapter,
-        platformId: event.platformId,
-        threadId: effectiveThreadId,
-        triggerMessageId: event.message.id,
-        toLocalMessageId: (platformMessageId) => messageIdForAgent(platformMessageId, agent.agent_group_id),
-      });
-    }
+    // Every no-op condition, the wiring's ignored-message policy included,
+    // lives in the module beside its siblings.
+    await seedThreadHistory({
+      agentGroup,
+      session,
+      mg,
+      readThreadHistory: adapter?.fetchThreadHistory?.bind(adapter),
+      platformId: event.platformId,
+      threadId: effectiveThreadId,
+      ignoredMessagePolicy: agent.ignored_message_policy,
+      triggerMessageId: event.message.id,
+      toLocalMessageId: (platformMessageId) => messageIdForAgent(platformMessageId, agent.agent_group_id),
+    });
   }
 
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);

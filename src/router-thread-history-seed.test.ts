@@ -8,6 +8,7 @@
  * reading the same messages off the platform would defeat that setting.
  */
 import fs from 'fs';
+import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -18,6 +19,8 @@ import {
   createMessagingGroup,
   createMessagingGroupAgent,
 } from './db/index.js';
+import { getSessionsByAgentGroup } from './db/sessions.js';
+import { inboundDbPath } from './mailbox/sqlite/paths.js';
 import { initChannelAdapters, registerChannelAdapter, teardownChannelAdapters } from './channels/channel-registry.js';
 import { routeInbound } from './router.js';
 import type { ChannelAdapter, ChannelDefaults, ThreadHistoryMessage } from './channels/adapter.js';
@@ -169,6 +172,32 @@ describe('router — thread-history seeding', () => {
     await inbound('m1', 'testchat:C1:100.0', '@saber PBC-13 blueprint');
 
     expect(fetchCalls).toEqual([{ platformId: 'testchat:C1', threadId: 'testchat:C1:100.0', limit: 12 }]);
+  });
+
+  it('lands every history row at a lower seq than the mention that fetched it', async () => {
+    // The one invariant the whole feature produces: the prelude must sort
+    // BEFORE the live turn, because the container reads ORDER BY seq. Asserted
+    // against the stored rows, so reordering deliverToAgent breaks a test
+    // rather than silently inverting the prompt.
+    await activate();
+    await seedWiring({});
+
+    await inbound('m1', 'testchat:C1:100.0', '@saber PBC-13 blueprint');
+
+    const [session] = await getSessionsByAgentGroup('ag-1');
+    const db = new Database(inboundDbPath('ag-1', session.id), { readonly: true });
+    const rows = db.prepare('SELECT seq, channel_type, "trigger" FROM messages_in ORDER BY seq').all() as Array<{
+      seq: number;
+      channel_type: string | null;
+      trigger: number;
+    }>;
+    db.close();
+
+    const seeded = rows.filter((r) => r.channel_type === 'session-echo');
+    const trigger = rows.find((r) => r.trigger === 1);
+    expect(seeded).toHaveLength(2);
+    expect(trigger).toBeDefined();
+    for (const row of seeded) expect(row.seq).toBeLessThan(trigger!.seq);
   });
 
   it('does not read again for a session that already exists', async () => {
