@@ -15,6 +15,7 @@ describe('scripts/migrate.ts', () => {
     try {
       const result = spawnSync(process.execPath, ['--import', TSX_LOADER, MIGRATE], {
         cwd,
+        env: { ...process.env, NANOCLAW_WORKSPACE_DIR: cwd },
         encoding: 'utf8',
       });
 

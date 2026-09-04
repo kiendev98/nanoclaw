@@ -12,8 +12,8 @@
  * (to.instance vanishes), or the URL-safe check in parseArgs (a key with a
  * space is accepted and stored).
  *
- * Drives the real entry point in a child process against a temp cwd
- * (PROJECT_ROOT = cwd, so data/v2.db and data/cli.sock are temp) with a fake
+ * Drives the real entry point in a child process against a temp workspace
+ * (NANOCLAW_WORKSPACE_DIR = cwd, so data/v2.db and data/cli.sock are temp) with a fake
  * CLI socket standing in for the running service. Same shape as
  * scripts/migrate.test.ts.
  */
@@ -79,7 +79,11 @@ describe('scripts/init-first-agent.ts --instance', () => {
         'Amit',
         ...extra,
       ];
-      const child = spawn(process.execPath, args, { cwd, stdio: ['ignore', 'ignore', 'pipe'] });
+      const child = spawn(process.execPath, args, {
+        cwd,
+        env: { ...process.env, NANOCLAW_WORKSPACE_DIR: cwd },
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
       let stderr = '';
       child.stderr.on('data', (chunk) => {
         stderr += chunk;

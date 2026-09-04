@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 
 const ROOT_VARS = [
-  'NANOCLAW_WORKSPACE_DIR',
+  'NANOCLAW_SESSION_DIR',
   'NANOCLAW_AGENT_DIR',
   'NANOCLAW_EXTRA_DIR',
   'NANOCLAW_SESSION_CONTEXT_PATH',
@@ -46,7 +46,7 @@ describe('roots', () => {
   });
 
   it('treats an empty or whitespace value as unset', async () => {
-    const r = await loadRoots({ NANOCLAW_AGENT_DIR: '   ', NANOCLAW_WORKSPACE_DIR: '' }, 'blank');
+    const r = await loadRoots({ NANOCLAW_AGENT_DIR: '   ', NANOCLAW_SESSION_DIR: '' }, 'blank');
 
     expect(r.AGENT_DIR).toBe('/workspace/agent');
     expect(r.WORKSPACE_DIR).toBe('/workspace');
@@ -58,7 +58,7 @@ describe('roots', () => {
   // derived from the other.
   it('lets the workspace and the agent directory be unrelated host paths', async () => {
     const r = await loadRoots(
-      { NANOCLAW_WORKSPACE_DIR: '/state/sessions/s1', NANOCLAW_AGENT_DIR: '/state/groups/dm' },
+      { NANOCLAW_SESSION_DIR: '/state/sessions/s1', NANOCLAW_AGENT_DIR: '/state/groups/dm' },
       'split',
     );
 
@@ -70,7 +70,7 @@ describe('roots', () => {
   // The outbox lives inside the workspace unless it is named, so a driver that
   // relocates only the workspace still gets a coherent tree.
   it('derives the outbox from the workspace when it is not named', async () => {
-    const r = await loadRoots({ NANOCLAW_WORKSPACE_DIR: '/state/sessions/s1' }, 'derived-outbox');
+    const r = await loadRoots({ NANOCLAW_SESSION_DIR: '/state/sessions/s1' }, 'derived-outbox');
 
     expect(r.OUTBOX_DIR).toBe('/state/sessions/s1/outbox');
   });

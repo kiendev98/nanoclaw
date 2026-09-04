@@ -119,7 +119,8 @@ function runCli(
       '--stdin-json',
       '--json',
     ],
-    { cwd, stdio: ['pipe', 'pipe', 'pipe'] },
+    // The temp directory IS the workspace; state no longer follows cwd.
+    { cwd, env: { ...process.env, NANOCLAW_WORKSPACE_DIR: cwd }, stdio: ['pipe', 'pipe', 'pipe'] },
   );
 
   let stdout = '';

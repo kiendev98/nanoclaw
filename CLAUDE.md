@@ -283,6 +283,7 @@ This project uses pnpm with `minimumReleaseAge: 4320` (3 days) in `pnpm-workspac
 
 | Doc | Purpose |
 |-----|---------|
+| [docs/workspace.md](docs/workspace.md) | The one configured root (`NANOCLAW_WORKSPACE_DIR`), why it sits outside every repository, and how to move an existing install |
 | [docs/architecture.md](docs/architecture.md) | Full architecture writeup |
 | [docs/api-details.md](docs/api-details.md) | Host API + DB schema details |
 | [docs/db.md](docs/db.md) | DB architecture overview: three-DB model, cross-mount rules, readers/writers map |

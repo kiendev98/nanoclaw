@@ -104,7 +104,7 @@ const HOST_OWNED_ENV = ['HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR'] as const;
 
 /** Container paths this driver understands, mapped to the runner's root variables. */
 const ROOT_ENV_BY_CONTAINER_PATH: Record<string, string> = {
-  '/workspace': 'NANOCLAW_WORKSPACE_DIR',
+  '/workspace': 'NANOCLAW_SESSION_DIR',
   '/workspace/agent': 'NANOCLAW_AGENT_DIR',
   '/app/.nanoclaw-session.json': 'NANOCLAW_SESSION_CONTEXT_PATH',
 };
@@ -273,7 +273,7 @@ export class LocalSessionDriver implements SessionDriver {
     if (!env.NANOCLAW_AGENT_DIR) {
       throw specInvalid('no mount at /workspace/agent — the runner has no working directory');
     }
-    if (!env.NANOCLAW_WORKSPACE_DIR) {
+    if (!env.NANOCLAW_SESSION_DIR) {
       throw specInvalid('no mount at /workspace — the runner has no mailbox');
     }
 

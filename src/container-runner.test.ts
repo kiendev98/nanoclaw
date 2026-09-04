@@ -503,7 +503,9 @@ describe('stageSkillsPlugin', () => {
     const sessDir = tmpSessionDir();
     stageSkillsPlugin(sessDir, { ...containerConfig, skills: ['welcome'] } as ContainerConfig);
 
-    const manifest = JSON.parse(fs.readFileSync(path.join(sessDir, 'plugin', '.claude-plugin', 'plugin.json'), 'utf-8'));
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(sessDir, 'plugin', '.claude-plugin', 'plugin.json'), 'utf-8'),
+    );
     expect(manifest.name).toBe('nanoclaw-shared-skills');
   });
 

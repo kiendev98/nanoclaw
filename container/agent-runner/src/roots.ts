@@ -50,7 +50,7 @@ function root(envVar: string, containerDefault: string): string {
 }
 
 /** The session workspace: mailbox databases, outbox, heartbeat. */
-export const WORKSPACE_DIR = root('NANOCLAW_WORKSPACE_DIR', '/workspace');
+export const WORKSPACE_DIR = root('NANOCLAW_SESSION_DIR', '/workspace');
 
 /**
  * The agent group folder, and the process working directory.
