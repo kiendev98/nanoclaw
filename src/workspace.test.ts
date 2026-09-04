@@ -34,7 +34,19 @@ describe('assertWorkspaceMigrated', () => {
     const { assertWorkspaceMigrated } = await loadWorkspace(tmpDir('ncl-ws-'));
 
     // The message must carry the move, not just the diagnosis.
-    expect(() => assertWorkspaceMigrated(projectRoot)).toThrow(/mv /);
+    expect(() => assertWorkspaceMigrated(projectRoot)).toThrow(/cp -R /);
+  });
+
+  it('names only the trees the checkout actually holds', async () => {
+    const projectRoot = tmpDir('ncl-legacy-');
+    fs.mkdirSync(path.join(projectRoot, 'data'));
+    fs.writeFileSync(path.join(projectRoot, 'data', 'v2.db'), '');
+
+    const { assertWorkspaceMigrated } = await loadWorkspace(tmpDir('ncl-ws-'));
+
+    // Naming an absent tree sends the operator to fix a copy never needed.
+    expect(() => assertWorkspaceMigrated(projectRoot)).toThrow(/data\/\./);
+    expect(() => assertWorkspaceMigrated(projectRoot)).not.toThrow(/groups\/\./);
   });
 
   it('starts when the workspace holds the database', async () => {

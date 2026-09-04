@@ -62,13 +62,26 @@ export function assertWorkspaceMigrated(projectRoot: string = process.cwd()): vo
   const legacy = path.join(projectRoot, 'data', 'v2.db');
   if (fs.existsSync(path.join(DATA_DIR, 'v2.db')) || !fs.existsSync(legacy)) return;
 
+  // Only the trees that are actually there. Naming an absent one sends the
+  // operator to fix a `mv` that was never needed.
+  const moves = (
+    [
+      ['data', DATA_DIR],
+      ['groups', GROUPS_DIR],
+      ['store', STORE_DIR],
+    ] as const
+  )
+    .filter(([tree]) => fs.existsSync(path.join(projectRoot, tree)))
+    // Contents, not the directory: a destination that already holds the other
+    // trees would otherwise take `data` as `data/data`. Copy, so the original
+    // survives as a fallback until the operator deletes it.
+    .map(([tree, dest]) => `  cp -R ${path.join(projectRoot, tree)}/. ${dest}/`);
+
   throw new Error(
-    `Agent state still lives in the checkout, and NANOCLAW_WORKSPACE_DIR is now ${WORKSPACE_DIR}. ` +
-      `Move it, then start again:\n` +
-      `  mkdir -p ${WORKSPACE_DIR}\n` +
-      `  mv ${path.join(projectRoot, 'data')} ${DATA_DIR}\n` +
-      `  mv ${path.join(projectRoot, 'groups')} ${GROUPS_DIR}\n` +
-      `  mv ${path.join(projectRoot, 'store')} ${STORE_DIR}\n` +
+    `Agent state still lives in the checkout, and NANOCLAW_WORKSPACE_DIR is ${WORKSPACE_DIR}. ` +
+      `Copy it across, then start again:\n` +
+      `  mkdir -p ${[DATA_DIR, GROUPS_DIR, STORE_DIR].join(' ')}\n` +
+      `${moves.join('\n')}\n` +
       `To keep the old layout instead, set NANOCLAW_WORKSPACE_DIR=${projectRoot} in .env.`,
   );
 }

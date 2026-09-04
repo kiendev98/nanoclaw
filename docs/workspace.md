@@ -37,11 +37,15 @@ holds a database and the workspace does not, because starting would create an
 empty one and report healthy. Move the trees:
 
 ```bash
-mkdir -p ~/.saber
-mv <checkout>/data ~/.saber/data
-mv <checkout>/groups ~/.saber/groups
-mv <checkout>/store ~/.saber/store
+mkdir -p ~/.saber/data ~/.saber/groups ~/.saber/store
+cp -R <checkout>/data/. ~/.saber/data/
+cp -R <checkout>/groups/. ~/.saber/groups/
 ```
+
+The error names only the trees your checkout actually holds. It copies contents
+rather than moving directories, because a workspace that already holds one tree
+would otherwise take `data` as `data/data`. The originals stay until you delete
+them.
 
 To keep the old layout instead, set `NANOCLAW_WORKSPACE_DIR=<checkout>`.
 
