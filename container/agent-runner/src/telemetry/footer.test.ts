@@ -21,10 +21,15 @@ import {
   renderFooter,
   resetFooterTelemetry,
   formatTokens,
-  shortenModel,
-  withFooter,
+  registerAccountResolver,
+  registerModelShortener,
   registerRateLimitWindows,
 } from './index.js';
+import {
+  CLAUDE_RATE_LIMIT_WINDOWS,
+  readClaudeAccountName,
+  shortenClaudeModel,
+} from '../providers/claude-telemetry.js';
 
 let configDir: string;
 let previousConfigDir: string | undefined;
@@ -50,14 +55,11 @@ beforeEach(() => {
   process.env.CLAUDE_CONFIG_DIR = configDir;
   process.env.NANOCLAW_AGENT_DIR = groupDir;
   resetFooterTelemetry();
-  // Windows are a provider's vocabulary now, not this module's. These are the
-  // ones `providers/claude.ts` declares.
-  registerRateLimitWindows([
-    ['five_hour', '5h'],
-    ['seven_day', '7d'],
-    ['seven_day_opus', '7d opus'],
-    ['seven_day_sonnet', '7d sonnet'],
-  ]);
+  // Provider vocabulary is registered, not built in. These are exactly what
+  // `providers/claude.ts` registers at import.
+  registerRateLimitWindows(CLAUDE_RATE_LIMIT_WINDOWS);
+  registerModelShortener(shortenClaudeModel);
+  registerAccountResolver(readClaudeAccountName);
 });
 
 afterEach(() => {
@@ -99,11 +101,11 @@ describe('accountName', () => {
 
 describe('shortenModel', () => {
   it('strips the vendor prefix and a trailing date stamp', () => {
-    expect(shortenModel('claude-opus-4-5-20251101')).toBe('opus-4-5');
+    expect(shortenClaudeModel('claude-opus-4-5-20251101')).toBe('opus-4-5');
   });
 
   it('leaves an already-short id alone', () => {
-    expect(shortenModel('claude-opus-5')).toBe('opus-5');
+    expect(shortenClaudeModel('claude-opus-5')).toBe('opus-5');
   });
 });
 
@@ -172,26 +174,6 @@ describe('renderFooter', () => {
   });
 });
 
-describe('withFooter', () => {
-  it('separates the footer from the body by a blank line', () => {
-    writeConfig('Wego #1');
-    recordModel('claude-opus-5');
-
-    expect(withFooter('done')).toBe('done\n\nWego #1 · opus-5');
-  });
-
-  it('leaves the body untouched when there is no footer, adding no trailing blank lines', () => {
-    expect(withFooter('done')).toBe('done');
-  });
-});
-
-/**
- * The reason the blob is persisted at all.
- *
- * The numbers arrive far more rarely than they are read, and sessions are swept
- * when idle. Held in memory alone, every wake would start blank. See
- * `docs/message-footer.md`.
- */
 describe('surviving a session sweep', () => {
   beforeEach(() => {
     initTestSessionDb();

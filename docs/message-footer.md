@@ -82,13 +82,33 @@ the group folder, shared by every session of the agent group.
 | `telemetry/state.ts` | what the turn knows about itself — providers write, nothing else does |
 | `telemetry/persistence.ts` | the two stores, session and group. No state, no decisions |
 | `telemetry/footer.ts` | rendering one line from a snapshot |
+| `providers/claude-telemetry.ts` | the three things only Claude knows |
+| `src/channels/message-footer.ts` | the field's shape on the host side of the boundary |
 
 The split follows the callers: `providers/claude.ts` calls seven recorders and
 `poll-loop.ts` calls `renderFooter`, so collection and rendering never had the
 same consumer.
 
-No provider vocabulary lives in `telemetry/`. Claude's rate-limit windows —
-`five_hour`, `seven_day_opus` — are declared in `providers/claude.ts` through
-`registerRateLimitWindows`, because `seven_day_opus` is a model name. A
-provider with different windows registers its own; one with none registers
-nothing and the footer prints no window fields.
+No provider vocabulary lives in `telemetry/`. Three things only a provider can
+know arrive through a `register*` call at import:
+
+| Registered | What Claude supplies |
+|---|---|
+| `registerRateLimitWindows` | `five_hour`, `seven_day_opus`, and their labels |
+| `registerModelShortener` | strips the `claude-` prefix and the date suffix |
+| `registerAccountResolver` | reads the organisation from `~/.claude.json` |
+
+Unregistered defaults are inert, not wrong: no windows render, a model id
+renders as-is, and no account field appears. A second provider inherits none of
+Claude's assumptions.
+
+## The field crossing the boundary
+
+The runner writes `footer` beside `text` on the outbound content blob.
+`OutboundMessage.content` is `unknown` by design — the host does not own what a
+provider puts there — so no compiler enforces the field.
+
+`src/channels/message-footer.ts` holds the contract instead. An adapter reads
+`readFooter(content)`, then either renders it separately or falls back to
+`appendFooter`. An adapter that does neither drops the footer silently, which is
+what every adapter on the `channels` branch does today.

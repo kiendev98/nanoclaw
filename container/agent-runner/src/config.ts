@@ -25,8 +25,6 @@ export interface RunnerConfig {
   effort?: string;
   /** API fast serving tier (host-configured; see the host's container-config). */
   fastMode?: boolean;
-  /** This host's `claude` binary. Set only for a runner outside a container. */
-  hostClaudeExecutable?: string;
 }
 
 const DEFAULT_MAX_MESSAGES = 10;
@@ -57,7 +55,6 @@ export function loadConfig(): RunnerConfig {
     model: (raw.model as string) || undefined,
     effort: (raw.effort as string) || undefined,
     fastMode: raw.fastMode === true || undefined,
-    hostClaudeExecutable: (raw.hostClaudeExecutable as string) || undefined,
   };
 
   return _config;

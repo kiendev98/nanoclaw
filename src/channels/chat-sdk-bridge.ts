@@ -21,6 +21,7 @@ import {
   type Message as ChatMessage,
 } from 'chat';
 import { log } from '../log.js';
+import { appendFooter, readFooter } from './message-footer.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
@@ -441,7 +442,7 @@ export function buildFooterCard(
   if (!text || !footerText || hasFiles || text.length > CARD_SECTION_LIMIT) return null;
   return {
     card: Card({ title: '', children: [CardText(text), CardText(footerText, { style: 'muted' })] }),
-    fallbackText: `${text}\n\n${footerText}`,
+    fallbackText: appendFooter(text, footerText),
   };
 }
 
@@ -954,14 +955,14 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       const text = rawText ? transformText(rawText) : rawText;
 
       // Its own field so a channel can style it. See `buildFooterCard`.
-      const footerText = typeof content.footer === 'string' ? content.footer.trim() : '';
+      const footerText = readFooter(content);
       const hasFiles = Boolean(message.files && message.files.length > 0);
       const footerCard = buildFooterCard(text, footerText, hasFiles);
       if (footerCard) {
         const result = await adapter.postMessage(tid, footerCard);
         return result?.id;
       }
-      const withFooterText = text && footerText ? `${text}\n\n${footerText}` : text;
+      const withFooterText = appendFooter(text, footerText);
       if (withFooterText) {
         // Attach files if present (FileUpload format: { data, filename })
         const fileUploads = message.files?.map((f: { data: Buffer; filename: string }) => ({

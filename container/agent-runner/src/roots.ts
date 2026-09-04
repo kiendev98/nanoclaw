@@ -49,6 +49,20 @@ function root(envVar: string, containerDefault: string): string {
   return value ? value.replace(/\/+$/, '') : containerDefault;
 }
 
+/**
+ * The same resolution, read at call time instead of at import.
+ *
+ * The constants below are the normal way in: a driver sets the environment
+ * before spawn, so import time is correct for the runner's own modules. A
+ * caller that must tolerate the root changing after first import — a test
+ * suite, or a module loaded before the driver's variables land — asks for it
+ * here instead of re-implementing the trim. There is deliberately no setter;
+ * see the module comment.
+ */
+export function currentRoot(envVar: string, containerDefault: string): string {
+  return root(envVar, containerDefault);
+}
+
 /** The session workspace: mailbox databases, outbox, heartbeat. */
 export const WORKSPACE_DIR = root('NANOCLAW_SESSION_DIR', '/workspace');
 
@@ -59,6 +73,11 @@ export const WORKSPACE_DIR = root('NANOCLAW_SESSION_DIR', '/workspace');
  * host directory outside one, which is the overlap the module comment explains.
  */
 export const AGENT_DIR = root('NANOCLAW_AGENT_DIR', '/workspace/agent');
+
+/** `AGENT_DIR`, resolved now. See `currentRoot`. */
+export function agentDir(): string {
+  return root('NANOCLAW_AGENT_DIR', '/workspace/agent');
+}
 
 /** Parent of the allowlisted extra mounts. Its entries are leaves. */
 export const EXTRA_DIR = root('NANOCLAW_EXTRA_DIR', '/workspace/extra');

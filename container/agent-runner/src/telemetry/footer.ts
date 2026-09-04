@@ -47,16 +47,3 @@ export function renderFooter(modelOverride?: string | null): string | null {
   if (parts.length < 2) return null;
   return parts.join(' · ');
 }
-
-/**
- * Append the footer to a message body, for channels that carry only text.
- *
- * Prefer emitting the footer as its OWN field where the channel can style it.
- * See `renderFooter`. Slack renders a muted text element as a context block,
- * small and grey, which is the point of separating it from the body. This is
- * the fallback for channels with no such affordance.
- */
-export function withFooter(body: string): string {
-  const footer = renderFooter();
-  return footer ? `${body}\n\n${footer}` : body;
-}

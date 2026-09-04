@@ -11,7 +11,6 @@ import { spawn, type ChildProcess } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
-import { resolveClaudeExecutable } from './claude-executable.js';
 import { log } from '../log.js';
 
 import {
@@ -338,14 +337,6 @@ export class LocalSessionDriver implements SessionDriver {
       else delete env[key];
     }
     stripInheritedClaudeEnv(env);
-
-    // Warned here and delivered elsewhere: `container-config.ts` writes the
-    // resolved path into `container.json`, which is the runner's config
-    // channel. This spawn is the last moment a human-visible warning is worth
-    // emitting, because the failure that follows happens inside the child.
-    if (!resolveClaudeExecutable(env.PATH)) {
-      log.warn('No `claude` on PATH — the agent will fail with the container default path', { name });
-    }
 
     this.#reportMissingRunnerDeps(name);
 

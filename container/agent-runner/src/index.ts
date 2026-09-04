@@ -117,7 +117,7 @@ async function main(): Promise<void> {
     model: config.model,
     effort: config.effort,
     fastMode: config.fastMode,
-    claudeExecutable: IS_HOSTED ? config.hostClaudeExecutable : undefined,
+    executablePath: IS_HOSTED ? process.env.NANOCLAW_PROVIDER_EXECUTABLE : undefined,
   });
   provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
 

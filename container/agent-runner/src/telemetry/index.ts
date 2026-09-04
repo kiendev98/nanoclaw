@@ -11,11 +11,12 @@ export {
   recordModel,
   recordRateLimits,
   recordUtilization,
+  registerAccountResolver,
+  registerModelShortener,
   registerRateLimitWindows,
   resetFooterTelemetry,
-  shortenModel,
   telemetrySnapshot,
   type FooterUsage,
   type TelemetrySnapshot,
 } from './state.js';
-export { formatTokens, renderFooter, withFooter } from './footer.js';
+export { formatTokens, renderFooter } from './footer.js';

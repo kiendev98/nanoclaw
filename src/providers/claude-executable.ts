@@ -5,6 +5,9 @@
  * reads the OS keychain, so failing to find it costs the whole credential
  * story. Returns undefined rather than throwing, so the runner fails with the
  * SDK's own message. See `docs/local-driver.md`.
+ *
+ * Lives beside the provider that registers it, not in `drivers/`: a driver
+ * never computes or looks anything up, and this is a host-state lookup.
  */
 import fs from 'fs';
 import path from 'path';

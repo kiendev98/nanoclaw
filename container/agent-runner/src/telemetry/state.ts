@@ -4,23 +4,20 @@
  * Every value is optional and every field is omitted when its source has not
  * reported. A footer that invents a number is worse than no footer.
  *
- * Rate-limit windows are a provider's vocabulary and arrive through
- * `registerRateLimitWindows`, so no model id appears here.
- *
- * Two things have NOT been inverted yet and are Claude's: `shortenModel`
- * strips a `claude-` prefix, and `accountName` reads Claude Code's own
- * `~/.claude.json`. A second provider inherits both, wrongly and silently.
- * They want the same registration treatment.
+ * This module holds no provider vocabulary. Everything a provider alone can
+ * know — its rate-limit window names, how to shorten its model ids, where its
+ * account name is written — arrives through a `register*` call, so a second
+ * provider inherits none of the first one's assumptions.
  */
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
-
 import { readGroupWindows, readSessionTokens, writeGroupWindows, writeSessionTokens } from './persistence.js';
 
 const utilizationByWindow = new Map<string, number>();
 
 let registeredWindows: ReadonlyArray<readonly [string, string]> = [];
+/** Identity by default: an unregistered provider's model id renders as-is. */
+let shortenModelId: (model: string) => string = (model) => model;
+/** Null by default: an unregistered provider contributes no account name. */
+let resolveAccount: () => string | null = () => null;
 let contextTokens: number | null = null;
 let accountLabel: string | null | undefined;
 let modelLabel: string | null = null;
@@ -65,17 +62,23 @@ export function registerRateLimitWindows(windows: ReadonlyArray<readonly [string
 }
 
 /**
- * Shorten an SDK model id for display: `claude-opus-4-5-20251101` → `opus-4-5`.
+ * Declare how this provider's model ids shorten for display.
  *
- * Taken from `system:init` rather than from `container.json`. The config's
- * `model` is optional, so an install that never pins one would show no model
- * at all. Init always reports what the turn actually ran on.
+ * `claude-opus-4-5-20251101` is a Claude shape, and stripping it here would
+ * mangle another provider's ids. Unregistered means rendered as-is.
  */
-export function shortenModel(model: string): string {
-  return model
-    .replace(/^claude-/, '')
-    .replace(/-\d{8}$/, '')
-    .replace(/-latest$/, '');
+export function registerModelShortener(shorten: (model: string) => string): void {
+  shortenModelId = shorten;
+}
+
+/**
+ * Declare where this provider's account name is read from.
+ *
+ * The file, its path variable, and its shape are all provider-specific. An
+ * unregistered provider simply contributes no account field.
+ */
+export function registerAccountResolver(resolve: () => string | null): void {
+  resolveAccount = resolve;
 }
 
 /** Record the configured reasoning effort. Omitted entirely when unset. */
@@ -86,7 +89,7 @@ export function recordEffort(effort: string | undefined): void {
 
 /** Record the model the current turn runs on, from `system:init`. */
 export function recordModel(model: string | undefined): void {
-  if (typeof model === 'string' && model.trim()) modelLabel = shortenModel(model.trim());
+  if (typeof model === 'string' && model.trim()) modelLabel = shortenModelId(model.trim());
 }
 
 export interface FooterUsage {
@@ -156,29 +159,16 @@ export function recordUtilization(rateLimitType: string | undefined, utilization
 }
 
 /**
- * The active subscription's organisation name.
+ * The account name, memoized after the first resolution.
  *
- * `CLAUDE_CONFIG_DIR` is read per call, then cached. Note that the config file
- * is `~/.claude.json`, a SIBLING of `~/.claude`. See `docs/message-footer.md`.
+ * The SDK's own answer wins when a provider reported one. Otherwise the
+ * registered resolver is asked once, and its answer — including null — is
+ * kept, so a missing config file is not re-read on every message.
  */
 export function accountName(): string | null {
   if (accountFromSdk) return accountFromSdk;
   if (accountLabel !== undefined) return accountLabel;
-
-  const configDir = (process.env.CLAUDE_CONFIG_DIR ?? '').trim();
-  const configPath = configDir ? path.join(configDir, '.claude.json') : path.join(os.homedir(), '.claude.json');
-
-  try {
-    const parsed = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as {
-      oauthAccount?: { organizationName?: unknown };
-    };
-    const name = parsed.oauthAccount?.organizationName;
-    accountLabel = typeof name === 'string' && name.trim() ? name.trim() : null;
-  } catch {
-    // No config file, unreadable, or not JSON. The footer drops the field
-    // rather than failing a delivery over a cosmetic line.
-    accountLabel = null;
-  }
+  accountLabel = resolveAccount();
   return accountLabel;
 }
 

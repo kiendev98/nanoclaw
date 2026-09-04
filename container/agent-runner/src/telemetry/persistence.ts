@@ -14,7 +14,7 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 
 import { getFooterTelemetry, setFooterTelemetry } from '../db/session-state.js';
-import { AGENT_DIR } from '../roots.js';
+import { agentDir } from '../roots.js';
 
 const GROUP_FILE = '.footer-telemetry.json';
 
@@ -26,8 +26,7 @@ const GROUP_FILE = '.footer-telemetry.json';
  * exercisable, and picks up a driver that sets the root after first import.
  */
 function groupFilePath(): string {
-  const dir = (process.env.NANOCLAW_AGENT_DIR ?? '').trim() || AGENT_DIR;
-  return path.join(dir.replace(/\/+$/, ''), GROUP_FILE);
+  return path.join(agentDir(), GROUP_FILE);
 }
 
 /** This session's context occupancy, or null when nothing is stored. */
