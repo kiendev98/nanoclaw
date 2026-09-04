@@ -8,8 +8,9 @@ import path from 'path';
 // quiet one: passing it as a bare option typechecks nowhere and would simply
 // never reach the API, leaving an install that believes it enabled the fast
 // tier paying the ordinary rate — or expecting the higher one and not getting
-// it. The absent case matters just as much: an install that never sets the
-// variable must send exactly the options it always did.
+// it. The absent case now pins the other half. `settings` is always sent,
+// because `BOT_ISOLATION_SETTINGS` rides it. An install that never enables fast
+// mode must still get that object, and must not get a `fastMode` key inside it.
 
 let lastOptions: Record<string, unknown> | undefined;
 
@@ -54,17 +55,17 @@ async function drive(options: ConstructorParameters<typeof ClaudeProvider>[0]): 
 describe('fast mode reaches the SDK through settings', () => {
   it('sends settings.fastMode when enabled', async () => {
     await drive({ fastMode: true });
-    expect(lastOptions?.settings).toEqual({ fastMode: true });
+    expect(lastOptions?.settings).toEqual({ disableClaudeAiConnectors: true, fastMode: true });
   });
 
-  it('sends no settings key at all when not enabled', async () => {
+  it('omits fastMode when not enabled', async () => {
     await drive({});
-    expect(lastOptions && 'settings' in lastOptions).toBe(false);
+    expect(lastOptions?.settings).toEqual({ disableClaudeAiConnectors: true });
   });
 
-  it('sends no settings key when explicitly false', async () => {
+  it('omits fastMode when explicitly false', async () => {
     await drive({ fastMode: false });
-    expect(lastOptions && 'settings' in lastOptions).toBe(false);
+    expect(lastOptions?.settings).toEqual({ disableClaudeAiConnectors: true });
   });
 
   it('leaves the settingSources chain untouched either way', async () => {
