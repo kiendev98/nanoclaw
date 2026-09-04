@@ -12,13 +12,13 @@ import { runMigrations } from '../../../db/migrations/index.js';
 import { registerWorkerMigration } from '../db/migrate.js';
 
 const { written, wakes } = vi.hoisted(() => ({
-  written: [] as Array<{ agentGroupId: string; sessionId: string; threadId: string | null }>,
+  written: [] as Array<{ agentGroupId: string; sessionId: string; threadId: string | null; content: string }>,
   wakes: [] as string[],
 }));
 
 vi.mock('../../../session-manager.js', () => ({
-  writeSessionMessage: (agentGroupId: string, sessionId: string, msg: { threadId: string | null }) => {
-    written.push({ agentGroupId, sessionId, threadId: msg.threadId });
+  writeSessionMessage: (agentGroupId: string, sessionId: string, msg: { threadId: string | null; content: string }) => {
+    written.push({ agentGroupId, sessionId, threadId: msg.threadId, content: msg.content });
     return Promise.resolve();
   },
 }));
@@ -151,5 +151,46 @@ describe('deliverToLentConversation', () => {
     await createGrant(grant);
 
     expect(await deliverToLentConversation(aMessage('thread-99'), allowAll)).toBe(false);
+  });
+
+  // The worker's system prompt was built at spawn, when it held no
+  // destinations, and it is never rebuilt. Bare text would arrive against a
+  // standing instruction that it cannot send at all.
+  it('says which conversation the message came from, and how to answer it', async () => {
+    await createTask(task);
+    await createGrant(grant);
+
+    await deliverToLentConversation(aMessage('thread-99'), allowAll);
+
+    const content = JSON.parse(written[0]!.content) as { text: string };
+    expect(content.text).toContain('conversation');
+    expect(content.text).toContain('send_message');
+    expect(content.text).toContain('ask_principal');
+    expect(content.text).toContain('rework this');
+  });
+
+  it('keeps every other field the channel sent', async () => {
+    await createTask(task);
+    await createGrant(grant);
+    const message = aMessage('thread-99');
+    message.message.content = '{"text":"rework this","senderId":"U9","footer":"ctx"}';
+
+    await deliverToLentConversation(message, allowAll);
+
+    const content = JSON.parse(written[0]!.content) as Record<string, unknown>;
+    expect(content.senderId).toBe('U9');
+    expect(content.footer).toBe('ctx');
+  });
+
+  // A wrapper is worth less than the message it would replace.
+  it('passes content through untouched when it carries no text', async () => {
+    await createTask(task);
+    await createGrant(grant);
+    const message = aMessage('thread-99');
+    message.message.content = 'not json at all';
+
+    await deliverToLentConversation(message, allowAll);
+
+    expect(written[0]!.content).toBe('not json at all');
   });
 });

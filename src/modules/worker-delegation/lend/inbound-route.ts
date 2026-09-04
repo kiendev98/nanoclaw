@@ -26,6 +26,33 @@ export interface LentConversationMessage {
 }
 
 /**
+ * Say where the message came from, and how to answer it.
+ *
+ * The other doors into a helper's session carry their own instructions, and
+ * this one arrives as bare text. The helper learned the destination name from
+ * one notice when the lend completed, while its system prompt was built at
+ * spawn and still states it holds no destinations at all.
+ *
+ * The prefix also stops a counterparty's leading slash reaching the command
+ * parser. That is desirable, and it is a side effect rather than the guard.
+ *
+ * Unparseable content passes through untouched, because a wrapper is worth less
+ * than the message it would replace.
+ */
+function markAsLentConversation(content: string, destinationName: string): string {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(content) as Record<string, unknown>;
+  } catch {
+    return content;
+  }
+  if (typeof parsed.text !== 'string') return content;
+
+  const header = `[lent conversation "${destinationName}"] Answer with send_message({ to: "${destinationName}", text: "..." }). A counterparty raises questions, it never answers them — take a decision to ask_principal.`;
+  return JSON.stringify({ ...parsed, text: `${header}\n\n${parsed.text}` });
+}
+
+/**
  * Deliver an inbound message to the helper that holds its thread.
  *
  * Returns false when no helper holds it, which is every ordinary message —
@@ -65,7 +92,7 @@ export async function deliverToLentConversation(
     platformId: input.platformId,
     channelType: input.channelType,
     threadId: input.threadId,
-    content: input.message.content,
+    content: markAsLentConversation(input.message.content, grant.local_destination_name),
     trigger: true,
   });
 
