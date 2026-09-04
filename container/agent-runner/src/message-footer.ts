@@ -3,32 +3,11 @@
  *
  *   Wego #1 · opus-5[1m] · think: high · ctx: 84k · 5h: 31% · 7d: 12%
  *
- * Every field is omitted when its source has not reported yet, so a fresh
- * session degrades rather than printing zeros it cannot stand behind. A footer
- * that invents a number is worse than no footer.
+ * Every field is omitted when its source has not reported yet. A footer that
+ * invents a number is worse than no footer.
  *
- * WHY ctx IS A TOKEN COUNT AND NOT A PERCENTAGE. A percentage needs a
- * denominator, and this one was not trustworthy: the CLI's own model table
- * gives `claude-opus-5` a 1e6 window, while a live session reported
- * `maxTokens` and `rawMaxTokens` both at 165,000 — the same variable, so the
- * pair cannot even distinguish a cap from a raw limit. 84k rendered as "51%"
- * invited a reasonable reader to conclude a greeting had consumed half a
- * megatoken. The absolute count needs no such trust.
- *
- * WHY THE ACCOUNT IS THE ORGANISATION, not the email. The two subscriptions
- * this runs against are the same login (`kien@wego.com`, one accountUuid) in
- * two different organisations. Email cannot tell them apart. The config
- * directory could, but it names claude-swap's plumbing rather than the thing
- * the reader is asking about — which subscription is this turn spending?
- *
- * WHY IT APPENDS TO EVERY MESSAGE rather than only the turn's last one. With
- * a provider that streams text (Claude), `dispatchResultText` runs with
- * `suppressDelivery`: every message is delivered mid-turn, as its block is
- * parsed, and the result door sends nothing. So at the moment the turn ends
- * there is no final row left to decorate — the rows are already written, and
- * the host may already have delivered them. Rewriting one after the fact is a
- * race against the outbound poller. The usual turn sends exactly one message,
- * where per-message and per-turn are the same thing.
+ * See `docs/message-footer.md` for why ctx is a token count, why the account
+ * is the organisation, and why every message carries a footer.
  */
 import fs from 'fs';
 import os from 'os';
@@ -75,19 +54,19 @@ let accountFromSdk: string | null = null;
 /**
  * Reasoning effort, from `container.json`.
  *
- * This is what nanoclaw REQUESTED, not what the SDK confirmed — `system:init`
- * reports the model but says nothing about effort, so there is nothing to
- * read back. An unset value therefore renders nothing rather than guessing
- * the SDK's default, which is a number this code does not know.
+ * This is what nanoclaw REQUESTED, not what the SDK confirmed. `system:init`
+ * reports the model but says nothing about effort, so nothing can be read
+ * back. An unset value therefore renders nothing. Guessing the SDK's default
+ * is not an option, because this code does not know that number.
  */
 let effortLabel: string | null = null;
 
 /**
  * Shorten an SDK model id for display: `claude-opus-4-5-20251101` → `opus-4-5`.
  *
- * Taken from `system:init` rather than from `container.json`, because the
- * config's `model` is optional — an install that never pins one would show no
- * model at all, while init always reports what the turn actually ran on.
+ * Taken from `system:init` rather than from `container.json`. The config's
+ * `model` is optional, so an install that never pins one would show no model
+ * at all. Init always reports what the turn actually ran on.
  */
 export function shortenModel(model: string): string {
   return model
@@ -116,8 +95,8 @@ export interface FooterUsage {
 /**
  * Record what an assistant message reports about window occupancy.
  *
- * Input plus both cache counters is what actually sits in the window; output
- * tokens are excluded because they are not resident until the next request
+ * Input plus both cache counters is what actually sits in the window. Output
+ * tokens are excluded, because they are not resident until the next request
  * echoes them back as input.
  */
 export function recordContextUsage(usage: FooterUsage | undefined): void {
@@ -148,9 +127,9 @@ export function recordContextTokens(totalTokens: number | undefined): void {
  * Record every window from the structured `/usage` payload.
  *
  * A second source for the same two fields, and in practice the only one that
- * has ever produced a value here: `rate_limit_event` fires only when a
- * utilization CHANGES, and across four sessions on this account it never
- * fired at all, leaving `windows` empty every time.
+ * has ever produced a value here. `rate_limit_event` fires only when a
+ * utilization CHANGES. Across four sessions on this account it never fired at
+ * all, which left `windows` empty every time.
  *
  * The two sources disagree on units. `rate_limit_event.utilization` is a
  * fraction, this one is a PERCENTAGE (0–100), so it is divided here to keep
@@ -223,20 +202,21 @@ export function accountName(): string | null {
  *                    would show one thread's context inside another.
  *   windows        — utilization of the ACCOUNT's rate-limit windows.
  *
- * `windows` was session-scoped in the first cut, and that is why a new
- * thread's first message rendered nothing for 5h/7d: a fresh session starts
- * with an empty blob, and a `rate_limit_event` only fires when a value
- * changes. It now lives in one file in the group folder, shared by every
- * session of the agent group, so a new thread inherits it immediately.
+ * `windows` was session-scoped in the first cut. That is why a new thread's
+ * first message rendered nothing for 5h/7d. A fresh session starts with an
+ * empty blob, and a `rate_limit_event` only fires when a value changes.
+ *
+ * It now lives in one file in the group folder, shared by every session of the
+ * agent group. A new thread therefore inherits it immediately.
  */
 const GROUP_FILE = '.footer-telemetry.json';
 
 /**
  * Whether the persisted state has been read into this process yet.
  *
- * Load is lazy rather than at import: this module is imported by the poll
- * loop and by the provider, both of which can be evaluated before the
- * mailbox is started, and reading session state before then throws.
+ * Load is lazy rather than at import. The poll loop and the provider both
+ * import this module, and both can be evaluated before the mailbox starts.
+ * Reading session state before then throws.
  */
 let loaded = false;
 
@@ -303,12 +283,13 @@ function persistSession(): void {
 /**
  * Write the group-shared facts.
  *
- * Written through a randomly-named temp file and a rename, because sessions
- * of one agent group run concurrently and each holds the whole blob: a
- * partial write seen by a sibling would drop a window it never observed
- * itself. `wx` refuses an existing path, so a collision fails rather than
- * following a symlink the agent could have planted — the group folder is
- * writable by the agent.
+ * Written through a randomly-named temp file and a rename. Sessions of one
+ * agent group run concurrently, and each holds the whole blob. A partial write
+ * seen by a sibling would drop a window it never observed itself.
+ *
+ * `wx` refuses an existing path, so a collision fails. It does not follow a
+ * symlink the agent could have planted, and the group folder is writable by
+ * the agent.
  */
 function persistGroup(): void {
   const target = groupFilePath();
@@ -377,10 +358,10 @@ export function renderFooter(model: string | null = modelLabel): string | null {
 /**
  * Append the footer to a message body, for channels that carry only text.
  *
- * Prefer emitting the footer as its OWN field where the channel can style it
- * (see `renderFooter`): Slack renders a muted text element as a context
- * block — small and grey — which is the whole point of separating it from
- * the body. This is the fallback for channels with no such affordance.
+ * Prefer emitting the footer as its OWN field where the channel can style it.
+ * See `renderFooter`. Slack renders a muted text element as a context block,
+ * small and grey, which is the point of separating it from the body. This is
+ * the fallback for channels with no such affordance.
  */
 export function withFooter(body: string): string {
   const footer = renderFooter();

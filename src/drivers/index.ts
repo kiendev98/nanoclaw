@@ -95,12 +95,12 @@ registerSessionDriver('docker', (policy) => new DockerSessionDriver({ ...policy,
  * The local driver, and this fork's default.
  *
  * Docker stays registered rather than deleted. It is unused here, but keeping
- * it costs one line and preserves the ability to merge upstream — removing a
+ * it costs one line and preserves the ability to merge upstream. Removing a
  * 724-line driver, its tests and its conformance suite would turn every later
- * `git pull upstream` into a conflict, buying no behaviour this fork wants.
+ * `git pull upstream` into a conflict. That buys no behaviour this fork wants.
  *
- * The runner entry is the real path in this checkout, not a container path:
- * there is no image, and `/app/src` exists only as a mount target inside one.
+ * The runner entry is the real path in this checkout, not a container path.
+ * There is no image, and `/app/src` exists only as a mount target inside one.
  */
 registerSessionDriver(
   'local',

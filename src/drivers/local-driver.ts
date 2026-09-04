@@ -1,38 +1,11 @@
 /**
  * Local driver — runs the agent as a host process instead of a container.
  *
- * NO ISOLATION. Docker's container is the permission boundary. Here the
- * boundary is the user account the host runs as. This driver does not sandbox
- * the filesystem, confine the network, or enforce a read-only mount: a symlink
- * has no mode, so the spec's `ro` states intent rather than a guarantee.
- * `capabilities()` reports each reduction honestly.
+ * This driver provides NO isolation. The permission boundary is the user
+ * account the host runs as. It exists because credentials, the account pool
+ * and the VPN all work only on the host.
  *
- * The provider runs with `permissionMode: 'auto'`, not `bypassPermissions`.
- * Auto denies a dangerous call with a stated reason instead of prompting, so it
- * needs no approval UI. That was the constraint which made bypass look
- * inevitable when chat is the only surface. It is a gate, not a boundary.
- *
- * Three things work only on the host, and together they are the reason:
- *
- * - Credentials. Claude Code on macOS keeps its token in the Keychain, keyed by
- *   a hash of `CLAUDE_CONFIG_DIR`. A container has no Keychain, so the Docker
- *   path needs a separately minted `CLAUDE_CODE_OAUTH_TOKEN` on disk. Here the
- *   SDK spawns the local `claude`, which authenticates itself.
- * - The account pool. Auth belongs to that local `claude`, so an external
- *   account switcher covers the agent too. This driver does not pin
- *   `CLAUDE_CONFIG_DIR`. It inherits, which keeps the pool shared.
- * - The network. A host process is on the host's VPN. Docker Desktop's VM has
- *   its own network stack and ignores utun routes.
- *
- * The container's filesystem shape is not realized. The runner reads one
- * environment variable per root, so this driver hands it real host directories
- * and plants no symlink tree. Two container mounts overlap: `/workspace` is the
- * session directory and `/workspace/agent` the group directory nested in its
- * path. A symlink at the parent would swallow the child's writes.
- * `/workspace/extra` is the exception, because its entries are leaves.
- *
- * `HOME` is inherited. `~/.claude` is therefore the user's real harness, so
- * commands, agents, skills and rules load with no wiring.
+ * See `docs/local-driver.md` for what it trades away and why.
  */
 import { spawn, type ChildProcess } from 'child_process';
 import fs from 'fs';
@@ -64,12 +37,14 @@ import {
  * Environment variables that override the credential the local `claude` would
  * otherwise resolve for itself. Scrubbed from every spawn.
  *
- * This list is claude-swap's `AUTH_OVERRIDE_ENV_VARS`, and it is deliberately
- * the same list: an account switcher works by keeping these OUT of the
- * environment so the config dir decides. A stale `CLAUDE_CODE_OAUTH_TOKEN` in
- * `.env` — which a Docker-oriented setup run writes as a matter of course —
- * would silently outrank the switcher and pin the agent to one account, which
- * is the exact failure this driver exists to avoid. Scrubbing is not optional.
+ * This list is claude-swap's `AUTH_OVERRIDE_ENV_VARS`, and deliberately so. An
+ * account switcher works by keeping these out of the environment. The config
+ * dir then decides the account.
+ *
+ * A Docker-oriented setup run writes `CLAUDE_CODE_OAUTH_TOKEN` into `.env` as a
+ * matter of course. A stale one silently outranks the switcher. It pins the
+ * agent to one account, which is the failure this driver exists to avoid.
+ * Scrubbing is not optional.
  */
 const AUTH_OVERRIDE_ENV_VARS = [
   'ANTHROPIC_API_KEY',
@@ -82,22 +57,23 @@ const AUTH_OVERRIDE_ENV_VARS = [
 /**
  * Claude Code's own session environment, scrubbed before the agent starts.
  *
- * A container never saw these. A host process inherits whatever launched it,
- * and the overwhelmingly likely launcher during development is a terminal
- * inside Claude Code — which exports a session identity, a live control
- * socket, and an effort override. The runner passes `{...process.env}` to the
- * SDK, so every one of them reaches the nested `claude`, and it then believes
- * it is a CHILD of the launching session rather than its own agent.
+ * A container never saw these. A host process inherits whatever launched it.
+ * During development the likely launcher is a terminal inside Claude Code. That
+ * terminal exports a session identity, a live control socket, and an effort
+ * override.
  *
- * That is not cosmetic. A session started this way reported a 165,000-token
- * context window on a model whose id ends in `[1m]` — smaller than the
- * standard 200k — and carried a messaging socket pointing back at the
+ * The runner passes `{...process.env}` to the SDK. Every one of them reaches the
+ * nested `claude`. It then believes it is a CHILD of the launching session
+ * rather than its own agent.
+ *
+ * That is not cosmetic. One session started this way reported a 165,000-token
+ * context window on a model whose id ends in `[1m]`. That is smaller than the
+ * standard 200k. It also carried a messaging socket pointing back at the
  * launching session.
  *
- * `CLAUDE_CONFIG_DIR` is deliberately NOT here: it is how claude-swap selects
- * an account, and scrubbing it would pin the agent to the default profile —
- * the same failure `AUTH_OVERRIDE_ENV_VARS` exists to prevent, from the other
- * direction.
+ * `CLAUDE_CONFIG_DIR` is deliberately NOT here. It is how claude-swap selects an
+ * account. Scrubbing it would pin the agent to the default profile, which is the
+ * failure `AUTH_OVERRIDE_ENV_VARS` prevents from the other direction.
  */
 const CLAUDE_SESSION_ENV_VARS = [
   'CLAUDECODE',
@@ -124,11 +100,10 @@ const CLAUDE_SESSION_ENV_VARS = [
 /**
  * The agent's working directory.
  *
- * NOT necessarily the group folder. cwd is what Claude Code walks up from to
- * discover a project's `CLAUDE.md`, `.claude/skills/` and
- * `.claude/settings.json` — verified empirically, and it does not stop at a git
- * repository root. So cwd is the ONLY lever that puts an agent inside a given
- * repository with that repository's context loaded.
+ * NOT necessarily the group folder. Claude Code walks up from cwd to discover a
+ * project's `CLAUDE.md`, `.claude/skills/` and `.claude/settings.json`. The walk
+ * is verified, and it does not stop at a git repository root. So cwd is the only
+ * lever that puts an agent inside a repository with that repository's context.
  *
  * `NANOCLAW_AGENT_DIR` stays the agent's own state directory (memory, footer
  * telemetry) in every case. The two were one value, which is precisely what
@@ -150,19 +125,20 @@ export function stripInheritedClaudeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessE
 /**
  * Environment the host owns, which a composed spec may never override.
  *
- * `HOME` is the one that matters and the reason this list exists. Composition
+ * `HOME` is the one that matters, and the reason this list exists. Composition
  * sets `HOME=/home/node` whenever the spec carries a `runAs`
- * (`container-runner.ts`), because inside the image that uid has no passwd
- * entry and HOME would otherwise resolve to `/`. Copied onto a host process it
- * is simply wrong: the directory does not exist, and the first thing that tries
- * to create it dies with `ENOTSUP` on macOS.
+ * (`container-runner.ts`). Inside the image that uid has no passwd entry, so
+ * HOME would otherwise resolve to `/`.
  *
- * The quieter failure is the one worth naming. `HOME` is how the SDK finds
- * `~/.claude` and how Claude Code derives its keychain entry, so a spec-supplied
- * HOME does not only break a mkdir — it detaches the agent from the user's
- * harness and from the credentials this whole driver exists to reuse.
+ * Copied onto a host process it is simply wrong. The directory does not exist.
+ * The first thing that tries to create it dies with `ENOTSUP` on macOS.
  *
- * The rest are listed for the same reason: they describe the container's
+ * The quieter failure is worth naming. `HOME` is how the SDK finds `~/.claude`,
+ * and how Claude Code derives its keychain entry. A spec-supplied HOME does not
+ * only break a mkdir. It detaches the agent from the user's harness, and from
+ * the credentials this driver exists to reuse.
+ *
+ * The rest are listed for the same reason. They describe the container's
  * filesystem and identity, not this machine's.
  */
 const HOST_OWNED_ENV = ['HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR'] as const;
@@ -236,9 +212,9 @@ export class LocalSessionDriver implements SessionDriver {
       // than accepting one and reporting the reductions below.
       isolationTiers: ['container'],
       admissionEnforced: false,
-      // Nothing is enforced. 'declarative' is the closer of the two available
-      // values: there is no topology to inspect, because there is one network
-      // namespace and it is the host's.
+      // Nothing is enforced. 'declarative' is the closer of the two
+      // available values. There is no topology to inspect, because there is
+      // one network namespace and it is the host's.
       networkPolicy: 'declarative',
       encryptedVolumes: false,
       // A host process has no per-session cgroup, so every resource cap in the
@@ -304,15 +280,17 @@ export class LocalSessionDriver implements SessionDriver {
    *
    * Every mount this driver understands is addressed by its containerPath,
    * because that is the contract the runner reads. A mount it does not
-   * recognise is not an error: `/app/src` is the code being executed, and
-   * `/app/skills` is dropped on purpose — the shared skills reach a host agent
-   * as a plugin staged into the session workspace instead, which needs no root
-   * of its own (`container-runner.ts`, `stageSkillsPlugin`).
+   * recognise is not an error.
    *
-   * That second clause used to claim `/app/skills` was "reached through the
-   * project settings directory", describing a mechanism nothing implemented —
-   * which is how every shared skill stayed missing without one line of
-   * evidence. Unknown paths are dropped silently; this comment is the record.
+   * `/app/src` is the code being executed. `/app/skills` is dropped on purpose.
+   * The shared skills reach a host agent as a plugin staged into the session
+   * workspace, which needs no root of its own (`container-runner.ts`,
+   * `stageSkillsPlugin`).
+   *
+   * That second clause once claimed `/app/skills` was reached through the
+   * project settings directory. Nothing implemented that mechanism. Every
+   * shared skill therefore stayed missing, without one line of evidence.
+   * Unknown paths are dropped silently, and this comment is the record.
    */
   #deriveRootEnv(spec: SessionSpec, mounts: SessionSpec['containers'][number]['mounts']): Record<string, string> {
     const env: Record<string, string> = {};
@@ -328,10 +306,10 @@ export class LocalSessionDriver implements SessionDriver {
         extras.push({ name: mount.containerPath.slice(EXTRA_PREFIX.length), hostPath: mount.hostPath });
         continue;
       }
-      // Nested read-only views over the group directory (container.json,
-      // CLAUDE.md) need no action: on the host those files already sit at
-      // those paths inside the group directory itself. The read-only part is
-      // the reduction this driver reports rather than fakes.
+      // Nested read-only views over the group directory need no action.
+      // On the host, container.json and CLAUDE.md already sit at those paths
+      // inside the group directory. The read-only part is the reduction this
+      // driver reports rather than fakes.
     }
 
     if (!env.NANOCLAW_AGENT_DIR) {
@@ -369,22 +347,23 @@ export class LocalSessionDriver implements SessionDriver {
   /**
    * Say once, loudly, that the runner has no dependencies installed.
    *
-   * `container/agent-runner` is a separate package and NOT a pnpm workspace
-   * member, so `pnpm install` at the root never touches it. The image installs
-   * it with `bun install --frozen-lockfile` (`container/Dockerfile`); under this
-   * driver the host is the thing that runs the runner and nothing installs it.
+   * `container/agent-runner` is a separate package, and NOT a pnpm workspace
+   * member. `pnpm install` at the root never touches it. The image installs it
+   * with `bun install --frozen-lockfile` (`container/Dockerfile`). Under this
+   * driver the host runs the runner, and nothing installs it.
    *
    * Without this the failure is invisible in the worst way. Every spawn dies
-   * instantly on `Cannot find module '@anthropic-ai/claude-agent-sdk'`, the
+   * instantly on `Cannot find module '@anthropic-ai/claude-agent-sdk'`. The
    * undelivered message stays due, and the host respawns every 2 seconds
-   * forever. Install and service health both look fine; only the log shows it,
-   * and it shows it as an endless wall of identical stack traces rather than as
-   * one diagnosable event. Observed in the wild at 64 respawns before anyone
-   * read the log.
+   * forever.
    *
-   * Latched rather than thrown: the driver's contract is to spawn and report
-   * exits, and a throw here would change how one bad install surfaces
-   * everywhere else. One actionable line beats a new failure mode.
+   * Install and service health both look fine. Only the log shows it, as an
+   * endless wall of identical stack traces rather than one diagnosable event.
+   * Observed in the wild at 64 respawns before anyone read the log.
+   *
+   * Latched rather than thrown. The driver's contract is to spawn and report
+   * exits. A throw here would change how one bad install surfaces everywhere
+   * else. One actionable line beats a new failure mode.
    */
   #reportMissingRunnerDeps(name: string): void {
     if (this.#runnerDepsReported) return;
@@ -539,9 +518,9 @@ export class LocalSessionDriver implements SessionDriver {
     this.#listeners.add(onEvent);
 
     // One subscription per driver, never one per session. A host process
-    // reports its own exit synchronously through the child handle; the poll
-    // exists only for records this process did not spawn (a host restarted
-    // under an adopted session), so a slow interval is correct.
+    // reports its own exit synchronously through the child handle. The poll
+    // exists only for records this process did not spawn, such as a host
+    // restarted under an adopted session. A slow interval is therefore correct.
     this.#watchTimer ??= setInterval(() => {
       void this.listSessions(installSlug)
         .then((snapshots) => {

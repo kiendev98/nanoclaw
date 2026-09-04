@@ -82,8 +82,8 @@ export interface ContainerSpec {
    *
    * Typed rather than an environment variable because cwd is a property of how
    * the process is started, not something it reads. A driver that cannot honour
-   * it (a container, where the path is a mount target) may ignore it: the
-   * runner learns the same fact from `container.json`.
+   * it may ignore it. In a container the path is a mount target, and the runner
+   * learns the same fact from `container.json`.
    */
   cwd?: string;
   /**

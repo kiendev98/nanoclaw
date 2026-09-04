@@ -1145,8 +1145,8 @@ async function sendToDestination(dest: DestinationEntry, body: string, routing: 
   // reason about.
   //
   // Carried as its OWN field rather than appended to the text, so a channel
-  // that can style it does: the Slack bridge renders it as a muted context
-  // block (small, grey), and channels with no such affordance append it.
+  // that can style it does. The Slack bridge renders it as a small grey
+  // context block. Channels with no such affordance append it.
   const footer = dest.type === 'channel' ? renderFooter() : null;
   await writeMessageOut({
     id: generateId(),

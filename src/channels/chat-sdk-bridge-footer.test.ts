@@ -3,12 +3,12 @@
  *
  * The footer arrives as its OWN content field rather than pre-appended to the
  * text, so a channel that can style it does. Slack turns a muted text element
- * into a `context` block — small and grey — which is the entire reason for
- * separating it. Everything else appends.
+ * into a small grey `context` block, which is the reason for separating it.
+ * Everything else appends.
  *
- * The failure this guards against is a silent drop: if the card path stops
- * matching (files present, body too long) and nothing appends the footer, the
- * line simply disappears with no error anywhere.
+ * The failure this guards against is a silent drop. The card path stops
+ * matching when files are present or the body is too long. If nothing then
+ * appends the footer, the line disappears with no error anywhere.
  */
 import { describe, expect, it, vi } from 'vitest';
 

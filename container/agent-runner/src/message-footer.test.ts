@@ -1,6 +1,6 @@
 /**
  * The telemetry footer. Every case here is about NOT printing a number the
- * runner cannot stand behind — a plausible-looking wrong percentage is worse
+ * runner cannot stand behind. A plausible-looking wrong percentage is worse
  * than a missing field, because the reader acts on it.
  */
 import fs from 'fs';
@@ -179,12 +179,13 @@ describe('withFooter', () => {
 /**
  * The reason the blob is persisted at all.
  *
- * Sessions are swept whenever they go idle, and the numbers arrive far more
- * rarely than they are read: `contextWindow` once per turn on the result, and
- * a utilization only when it CHANGES, which can be many turns apart. Held in
- * memory alone, every wake starts blank and the footer decays to a bare model
- * name until the SDK happens to mention them again — which is exactly what a
- * reader would report as "the data is wrong".
+ * Sessions are swept whenever they go idle. The numbers arrive far more rarely
+ * than they are read. `contextWindow` arrives once per turn on the result. A
+ * utilization arrives only when it CHANGES, which can be many turns apart.
+ *
+ * Held in memory alone, every wake starts blank. The footer then decays to a
+ * bare model name, until the SDK happens to mention them again. A reader
+ * reports that as "the data is wrong".
  */
 describe('surviving a session sweep', () => {
   beforeEach(() => {
@@ -224,9 +225,9 @@ describe('surviving a session sweep', () => {
   });
 
   // The bug this scoping fixes. A new thread is a NEW session with an empty
-  // session store, and the window size only arrives on that turn's result —
-  // after the first message is already sent. Held per session, every new
-  // thread rendered its first message with no ctx at all.
+  // session store. The window size arrives only on that turn's result, after
+  // the first message is already sent. Held per session, every new thread
+  // rendered its first message with no ctx at all.
   it('gives a brand-new session the account facts from the group', () => {
     writeConfig('Wego #1');
     recordUtilization('five_hour', 0.31);
@@ -263,17 +264,17 @@ describe('surviving a session sweep', () => {
 /**
  * The SDK's own answers, preferred over anything derived here.
  *
- * `getContextUsage()` is what `/context` prints, and it divides by the USABLE
- * window — Claude Code reserves part of the window for output. Computing the
- * ratio from the raw window reads LOWER than the number the user sees in a
- * terminal, which is the kind of near-miss that makes a reader distrust every
- * other field in the line.
+ * `getContextUsage()` is what `/context` prints. It divides by the USABLE
+ * window, because Claude Code reserves part of the window for output.
+ * Computing the ratio from the raw window reads LOWER than the number the user
+ * sees in a terminal. That near-miss makes a reader distrust every other field
+ * in the line.
  */
 describe('authoritative SDK sources', () => {
   it('prefers the reported total over the sum computed from an assistant message', () => {
-    // The assistant message counts input plus cache; the CLI's own figure also
-    // includes the reserved autocompact buffer, so the two differ by tens of
-    // thousands and only one matches what /context prints.
+    // The assistant message counts input plus cache. The CLI's own figure also
+    // includes the reserved autocompact buffer. The two differ by tens of
+    // thousands, and only one matches what /context prints.
     writeConfig('Wego #1');
     recordContextUsage({ input_tokens: 20_000 });
     expect(renderFooter()).toBe('Wego #1 · ctx: 20k');
@@ -318,9 +319,9 @@ describe('authoritative SDK sources', () => {
 });
 
 /**
- * The structured `/usage` payload. In practice the only source that has ever
- * produced a 5h/7d value here — `rate_limit_event` fires solely on CHANGE and
- * never fired at all across four sessions on this account.
+ * The structured `/usage` payload. In practice it is the only source that has
+ * ever produced a 5h/7d value here. `rate_limit_event` fires solely on CHANGE,
+ * and it never fired at all across four sessions on this account.
  */
 describe('recordRateLimits', () => {
   it('converts percentages to the fraction the store keeps', () => {

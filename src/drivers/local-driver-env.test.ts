@@ -2,9 +2,9 @@
  * What the agent must never inherit from whatever launched the host.
  *
  * A container never saw any of this. A host process inherits its launcher's
- * environment, and during development the launcher is very often a terminal
- * inside Claude Code — which exports a session identity, a live control
- * socket back to that session, and an effort override. The runner hands
+ * environment. During development the launcher is often a terminal inside
+ * Claude Code. That terminal exports a session identity, a live control socket
+ * back to that session, and an effort override. The runner hands
  * `{...process.env}` to the SDK, so all of it reaches the nested `claude`.
  *
  * Both failures are silent. The agent starts, answers, and is simply wrong
@@ -74,13 +74,13 @@ describe('stripInheritedClaudeEnv', () => {
  * Which directory the agent stands in.
  *
  * Claude Code resolves project memory and project skills by walking UP from
- * cwd — proven, and it does NOT stop at a git repository root. So cwd decides
- * which repository's `CLAUDE.md` and `.claude/skills/` an agent loads, and it
- * is the only thing that decides it.
+ * cwd. The walk is proven, and it does NOT stop at a git repository root. So
+ * cwd alone decides which repository's `CLAUDE.md` and `.claude/skills/` an
+ * agent loads.
  *
  * `NANOCLAW_AGENT_DIR` used to serve as both cwd and the agent's state
  * directory. That conflation is why one agent could only ever work in one
- * repository: moving it into a repo would have moved its memory and telemetry
+ * repository. Moving it into a repo would have moved its memory and telemetry
  * in there too.
  */
 describe('resolveSpawnCwd', () => {
@@ -99,7 +99,7 @@ describe('resolveSpawnCwd', () => {
 
   it('treats a whitespace-only cwd as unset rather than chdir-ing to nothing', () => {
     // An empty value reaching `spawn` would resolve cwd to the host's own
-    // directory — the nanoclaw checkout — which is how the 11,618-token
+    // directory, the nanoclaw checkout. That is how the 11,618-token
     // CLAUDE.md leak got into every session in the first place.
     expect(resolveSpawnCwd('   ', { NANOCLAW_AGENT_DIR: '/groups/g' })).toBe('/groups/g');
   });

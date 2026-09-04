@@ -65,10 +65,10 @@ export function migrateLegacyContinuation(providerName: string): string | undefi
  *
  * Persisted because the numbers arrive far more rarely than they are read.
  * `contextWindow` is reported once per turn on the result, and a
- * `rate_limit_event` fires ONLY when a utilization changes — which can be
- * many turns apart. Sessions are swept whenever they go idle, so in-memory
- * state means every wake starts blank and the footer shows a bare model name
- * until the SDK happens to mention those numbers again.
+ * `rate_limit_event` fires ONLY when a utilization changes, which can be many
+ * turns apart. Sessions are swept whenever they go idle. In-memory state would
+ * therefore start blank on every wake. The footer would show a bare model name
+ * until the SDK happened to mention those numbers again.
  *
  * Kept as an opaque string here so this module stays a key/value store and
  * the shape belongs to `message-footer.ts`.

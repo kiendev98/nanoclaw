@@ -61,14 +61,14 @@ export interface SdkRateLimitInfo {
  * Log what actually occupies the context window, once per turn.
  *
  * Diagnostic, and it exists because the percentage alone is unfalsifiable. A
- * greeting reported 51% on a model whose id says 1M, which is either ~510k
- * tokens of standing context or a `maxTokens` far below the raw window — and
- * the two call for opposite responses. `percentage` cannot distinguish them;
- * these fields can.
+ * greeting reported 51% on a model whose id says 1M. That is either ~510k
+ * tokens of standing context, or a `maxTokens` far below the raw window. The
+ * two call for opposite responses, and `percentage` cannot tell them apart.
+ * These fields can.
  *
- * `rawMaxTokens` is the model's full window and `maxTokens` is what Claude
- * Code lets a conversation occupy after reserving room for output, so a large
- * gap between them IS the answer.
+ * `rawMaxTokens` is the model's full window. `maxTokens` is what Claude Code
+ * lets a conversation occupy after reserving room for output. A large gap
+ * between them IS the answer.
  */
 function logContextBreakdown(usage: unknown): void {
   const u = usage as {
@@ -700,17 +700,18 @@ export class ClaudeProvider implements AgentProvider {
           // generator declaration, so `this` is undefined inside it.
           recordEffort(configuredEffort);
           // The SDK's own answers for the other two footer fields, asked once
-          // per turn. `getContextUsage` is what `/context` prints — it divides
-          // by the USABLE window, not the raw one, so computing the ratio here
+          // per turn. `getContextUsage` is what `/context` prints. It divides
+          // by the USABLE window, not the raw one. Computing the ratio here
           // would read low against the number the user sees in a terminal.
           //
           // Both are optional and fire-and-forget. They are control-protocol
-          // methods that arrived in a later SDK than the one this provider was
-          // written against, and the object is only a Query by contract — the
-          // recorded-turn tests drive this generator with a bare async
-          // iterable. Calling an absent method here throws INSIDE the event
-          // loop and kills the turn, so a cosmetic footer would take down
-          // every delivery on an older SDK.
+          // methods from a later SDK than this provider was written against.
+          // The object is only a Query by contract, and the recorded-turn
+          // tests drive this generator with a bare async iterable.
+          //
+          // Calling an absent method here throws INSIDE the event loop and
+          // kills the turn. A cosmetic footer would then take down every
+          // delivery on an older SDK.
           callIfAvailable<{ totalTokens?: number }>(sdkResult, 'getContextUsage', (usage) => {
             recordContextTokens(usage?.totalTokens);
             logContextBreakdown(usage);
@@ -718,15 +719,17 @@ export class ClaudeProvider implements AgentProvider {
           callIfAvailable<{ organization?: string }>(sdkResult, 'accountInfo', (info) => recordAccountName(info?.organization));
           // The structured `/usage` payload, which carries the plan's
           // rate-limit windows outright. The control request for it exists in
-          // the protocol but is not on the Query interface this SDK version
-          // types, so it is probed rather than called — `callIfAvailable`
-          // makes an absent method a no-op. This is the only source that can
-          // populate 5h/7d: `rate_limit_event` fires solely on CHANGE, and it
-          // has never fired on this account.
+          // the protocol, but is not on the Query interface this SDK version
+          // types. So it is probed rather than called, and `callIfAvailable`
+          // makes an absent method a no-op.
+          //
+          // This is the only source that can populate 5h/7d.
+          // `rate_limit_event` fires solely on CHANGE, and it has never fired
+          // on this account.
           callIfAvailable<{ rate_limits?: Record<string, { utilization?: number | null } | null> }>(sdkResult, 'getUsage', (usage) => recordRateLimits(usage?.rate_limits));
           // The model catalogue this CLI offers. ModelInfo carries no context
-          // window, so this cannot say what 165k SHOULD be — but it does say
-          // whether a non-[1m] opus row exists, which separates "165k is this
+          // window, so this cannot say what 165k SHOULD be. It does say
+          // whether a non-[1m] opus row exists. That separates "165k is this
           // model's window" from "the [1m] variant is not being served".
           callIfAvailable(sdkResult, 'supportedModels', (models) => {
             const rows = (models as Array<{ value?: string; resolvedModel?: string }> | undefined) ?? [];
@@ -791,10 +794,10 @@ export class ClaudeProvider implements AgentProvider {
           //   otherwise         → a transient window limit that resets.
           const info = (message as { rate_limit_info?: SdkRateLimitInfo }).rate_limit_info;
           // Recorded for the message footer before any classification. These
-          // events fire only when a value CHANGES, so an 'allowed' event is
-          // the only place the current utilization is ever reported —
-          // dropping it because the turn is healthy is how the footer would
-          // end up permanently blank.
+          // events fire only when a value CHANGES. An 'allowed' event is
+          // therefore the only place the current utilization is reported.
+          // Dropping it because the turn is healthy would leave the footer
+          // permanently blank.
           recordUtilization(info?.rateLimitType, info?.utilization);
           const blocked = classifyRateLimitEvent(info);
           if (!blocked) {
