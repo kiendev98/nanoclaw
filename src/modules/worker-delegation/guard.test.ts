@@ -58,6 +58,7 @@ beforeEach(async () => {
   await makeAgentGroup(HELPER, 'group');
   await createHelper({
     helper_agent_group_id: HELPER,
+    principal_agent_group_id: PRINCIPAL,
     repo_name: 'nanoclaw',
     repo_path: '/somewhere/nanoclaw',
     created_at: NOW,

@@ -1,4 +1,4 @@
-/** `worker_sessions` — one helper session per (repository, messaging group, thread). */
+/** `worker_sessions` — one worker session per (worker agent group, messaging group, thread). */
 import { getDb } from '../../../db/connection.js';
 import type { WorkerSession } from '../types.js';
 
@@ -7,14 +7,21 @@ export function threadKey(threadId: string | null): string {
   return threadId ?? '';
 }
 
+/**
+ * The worker session for one conversation.
+ *
+ * Keyed on the worker's agent group rather than the repository name, because a
+ * repository has one worker per principal. Two principals wired to the same
+ * thread would otherwise collide on one session.
+ */
 export async function findWorkerSession(
-  repoName: string,
+  helperAgentGroupId: string,
   messagingGroupId: string,
   threadId: string | null,
 ): Promise<WorkerSession | undefined> {
   return getDb().get<WorkerSession>(
-    'SELECT * FROM worker_sessions WHERE repo_name = ? AND messaging_group_id = ? AND thread_id = ?',
-    repoName,
+    'SELECT * FROM worker_sessions WHERE helper_agent_group_id = ? AND messaging_group_id = ? AND thread_id = ?',
+    helperAgentGroupId,
     messagingGroupId,
     threadKey(threadId),
   );

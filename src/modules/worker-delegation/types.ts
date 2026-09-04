@@ -1,8 +1,10 @@
 /** Row shapes for the worker-delegation tables (migration 025). */
 
-/** One per repository. The agent group, and therefore the memory, is per repo. */
+/** One per (principal, repository). The agent group carries the worker's memory. */
 export interface WorkerHelper {
   helper_agent_group_id: string;
+  /** The agent group that delegates into this worker. Part of its identity. */
+  principal_agent_group_id: string;
   repo_name: string;
   repo_path: string;
   created_at: string;

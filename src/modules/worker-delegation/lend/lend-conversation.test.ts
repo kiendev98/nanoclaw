@@ -124,6 +124,7 @@ beforeEach(async () => {
   });
   await createHelper({
     helper_agent_group_id: 'ag-worker',
+    principal_agent_group_id: 'ag-principal',
     repo_name: 'nanoclaw',
     repo_path: '/somewhere/nanoclaw',
     created_at: NOW,

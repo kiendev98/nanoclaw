@@ -1,7 +1,8 @@
 /**
  * A4 and A5 are one key read two ways, so they are tested together.
  *
- * The key is (repository, messaging group, thread). Keying on the principal's
+ * The key is (worker agent group, messaging group, thread), and the worker
+ * agent group is itself per (principal, repository). Keying on the principal's
  * SESSION id instead would give the same answer under `per-thread` and the
  * wrong one under `shared`, where one session covers a whole channel — so the
  * shared-mode case below is the one that matters.
@@ -44,6 +45,7 @@ import type { WorkerHelper } from '../types.js';
 
 const helper: WorkerHelper = {
   helper_agent_group_id: 'ag-worker-nanoclaw',
+  principal_agent_group_id: 'ag-principal',
   repo_name: 'nanoclaw',
   repo_path: '/somewhere/nanoclaw',
   created_at: new Date().toISOString(),
@@ -89,6 +91,27 @@ describe('ensureHelperSession', () => {
 
     expect(second.workerSession.helper_session_id).toBe(first.workerSession.helper_session_id);
     expect(first.workerSession.thread_id).toBe('');
+  });
+
+  // A worker's agent group carries its memory and its transcripts. Keyed on
+  // the repository alone, a second principal would boot into the first one's
+  // notes and prior task context, which its own approver never saw.
+  it('gives a second principal its own worker session in the same thread', async () => {
+    const other: WorkerHelper = {
+      helper_agent_group_id: 'ag-worker-nanoclaw-2',
+      principal_agent_group_id: 'ag-other-principal',
+      repo_name: 'nanoclaw',
+      repo_path: '/somewhere/nanoclaw',
+      created_at: new Date().toISOString(),
+    };
+    await createHelper(other);
+
+    const mine = await forThread('thread-1');
+    const theirs = await ensureHelperSession(other, { messagingGroupId: 'mg-1', threadId: 'thread-1' });
+
+    expect(theirs.created).toBe(true);
+    expect(theirs.workerSession.helper_session_id).not.toBe(mine.workerSession.helper_session_id);
+    expect(theirs.workerSession.worktree_path).not.toBe(mine.workerSession.worktree_path);
   });
 
   // Reuse is a property of the conversation, not of who is asking. The

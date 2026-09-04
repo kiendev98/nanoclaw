@@ -17,9 +17,11 @@ import { createDestination, getDestinationByName, normalizeName } from '../../ag
 import { writeDestinations } from '../../agent-to-agent/write-destinations.js';
 import { getAgentGroup } from '../../../db/agent-groups.js';
 import { createGrant, findLiveGrantForSession } from '../db/worker-channel-grants.js';
+import { getHelperForPrincipal } from '../db/worker-helpers.js';
 import { findWorkerSession } from '../db/worker-sessions.js';
 import { findRunningTask } from '../db/worker-tasks.js';
 import { WORKER_LEND_CONVERSATION_ACTION } from '../guard.js';
+import { firstFreeName } from '../free-name.js';
 import { generateId } from '../ids.js';
 import { replyToCaller } from '../notify.js';
 import type { MessagingGroup } from '../../../types.js';
@@ -41,16 +43,12 @@ function readRequest(content: Record<string, unknown>): LendRequest {
   };
 }
 
-/** A local name for the lent conversation that the helper does not already use. */
+/** A local name for the lent conversation that the worker does not already use. */
 async function freeDestinationName(helperAgentGroupId: string): Promise<string> {
-  const preferred = normalizeName('conversation');
-  let name = preferred;
-  let suffix = 2;
-  while (await getDestinationByName(helperAgentGroupId, name)) {
-    name = `${preferred}-${suffix}`;
-    suffix++;
-  }
-  return name;
+  return firstFreeName(
+    normalizeName('conversation'),
+    async (candidate) => (await getDestinationByName(helperAgentGroupId, candidate)) !== undefined,
+  );
 }
 
 export async function validateLendConversation(content: Record<string, unknown>, session: Session): Promise<boolean> {
@@ -104,8 +102,16 @@ async function resolveLendableWorker(
   session: Session,
   request: LendRequest,
 ): Promise<{ workerSession: WorkerSession; task: WorkerTask } | string> {
+  // The caller's OWN worker for that repository. Resolving by repository name
+  // alone would reach another principal's worker, which this caller never
+  // created and may not even be allowed to see.
+  const helper = await getHelperForPrincipal(session.agent_group_id, request.repository);
+  if (!helper) {
+    return `no ${request.repository} worker is running for this conversation. Delegate a task first.`;
+  }
+
   const workerSession = await findWorkerSession(
-    request.repository,
+    helper.helper_agent_group_id,
     session.messaging_group_id ?? '',
     session.thread_id ?? request.threadId,
   );

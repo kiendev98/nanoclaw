@@ -1,9 +1,11 @@
 /**
  * Three keys, not one.
  *
- * The AGENT GROUP is per repository, so `groups/` holds one folder per repo and
- * a helper's memory of that repository is shared across every thread that asks
- * about it. The SESSION is per (repository, messaging group, thread) — the A4
+ * The AGENT GROUP is per (principal, repository). It carries the worker's
+ * memory and its transcripts, so one shared across principals would hand one
+ * assistant's work to another whose approver never saw it. Within a principal,
+ * memory of that repository is still shared across every thread that asks.
+ * The SESSION is per (worker agent group, messaging group, thread) — the A4
  * reuse key, and the A5 separation key. The WORKTREE is per session, because
  * two threads working one repository at once must not share a working copy.
  *
@@ -21,7 +23,8 @@ import { initGroupFilesystem } from '../../../group-init.js';
 import { log } from '../../../log.js';
 import { resolveSystemSession } from '../../../session-manager.js';
 import type { AgentGroup, Session } from '../../../types.js';
-import { createHelper, getHelperByRepo } from '../db/worker-helpers.js';
+import { createHelper, getHelperForPrincipal } from '../db/worker-helpers.js';
+import { firstFreeName } from '../free-name.js';
 import { generateId } from '../ids.js';
 import { createWorkerSession, findWorkerSession, threadKey } from '../db/worker-sessions.js';
 import type { ResolvedRepo } from './repo-registry.js';
@@ -39,23 +42,29 @@ function workerThreadId(repoName: string, messagingGroupId: string, threadId: st
 
 /** A folder name nothing else claims, on disk or in the DB. */
 async function freeFolderName(preferred: string): Promise<string> {
-  let folder = preferred;
-  let suffix = 2;
-  while ((await getAgentGroupByFolder(folder)) || groupFolderExistsOnDisk(folder)) {
-    folder = `${preferred}-${suffix}`;
-    suffix++;
-  }
-  return folder;
+  return firstFreeName(
+    preferred,
+    async (candidate) => Boolean(await getAgentGroupByFolder(candidate)) || groupFolderExistsOnDisk(candidate),
+  );
 }
 
 /**
- * The one agent group that works this repository, created on first use.
+ * The agent group this principal uses to work this repository, created on first
+ * use.
+ *
+ * One per (principal, repository), not one per repository. The group holds the
+ * worker's memory and its transcripts, so a group shared between principals
+ * would hand one assistant's work to another whose approver never saw it.
  *
  * A concurrent first delegation loses the UNIQUE race and reads the winner's
- * row, so the repository never ends up with two helpers.
+ * row, so a principal never ends up with two workers on one repository.
  */
-export async function ensureHelperAgentGroup(repo: ResolvedRepo, providerHint: string | null): Promise<WorkerHelper> {
-  const existing = await getHelperByRepo(repo.name);
+export async function ensureHelperAgentGroup(
+  principalAgentGroupId: string,
+  repo: ResolvedRepo,
+  providerHint: string | null,
+): Promise<WorkerHelper> {
+  const existing = await getHelperForPrincipal(principalAgentGroupId, repo.name);
   if (existing) return existing;
 
   const folder = await freeFolderName(`worker-${repo.name}`);
@@ -68,6 +77,7 @@ export async function ensureHelperAgentGroup(repo: ResolvedRepo, providerHint: s
   };
   const helper: WorkerHelper = {
     helper_agent_group_id: group.id,
+    principal_agent_group_id: principalAgentGroupId,
     repo_name: repo.name,
     repo_path: repo.hostPath,
     created_at: group.created_at,
@@ -78,7 +88,7 @@ export async function ensureHelperAgentGroup(repo: ResolvedRepo, providerHint: s
     await createHelper(helper);
   } catch (error) {
     if (!isUniqueViolation(error)) throw error;
-    const winner = await getHelperByRepo(repo.name);
+    const winner = await getHelperForPrincipal(principalAgentGroupId, repo.name);
     if (!winner) throw error;
     return winner;
   }
@@ -122,7 +132,7 @@ export async function ensureHelperSession(
     'worker',
   );
 
-  const existing = await findWorkerSession(helper.repo_name, messagingGroupId, threadId);
+  const existing = await findWorkerSession(helper.helper_agent_group_id, messagingGroupId, threadId);
   if (existing) return { workerSession: existing, session, created: false };
 
   const worktree = ensureWorktree(helper.repo_path, helper.repo_name, session.id);
@@ -141,7 +151,7 @@ export async function ensureHelperSession(
     await createWorkerSession(row);
   } catch (error) {
     if (!isUniqueViolation(error)) throw error;
-    const winner = await findWorkerSession(helper.repo_name, messagingGroupId, threadId);
+    const winner = await findWorkerSession(helper.helper_agent_group_id, messagingGroupId, threadId);
     if (!winner) throw error;
     return { workerSession: winner, session, created: false };
   }

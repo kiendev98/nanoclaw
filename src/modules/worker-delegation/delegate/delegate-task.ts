@@ -98,7 +98,7 @@ export async function delegateTask(content: Record<string, unknown>, session: Se
   const repo = resolveRepo(request.repository);
   if (isRepoRefusal(repo) || !session.messaging_group_id) return; // precheck already answered
 
-  const helper = await ensureHelperAgentGroup(repo, await providerOf(session.agent_group_id));
+  const helper = await ensureHelperAgentGroup(session.agent_group_id, repo, await providerOf(session.agent_group_id));
   const threadId = session.thread_id ?? request.threadId;
 
   let helperSessionId: string;

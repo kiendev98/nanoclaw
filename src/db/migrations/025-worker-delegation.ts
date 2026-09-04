@@ -12,13 +12,18 @@ import type { Migration } from './index.js';
  * the principal on the TASK row, and a second copy that nothing reads is how
  * those six dead columns began.
  *
- * - `worker_helpers` — one row per repository. The agent group is per repo, so
- *   `groups/` holds one folder per repo and memory is shared across its
- *   threads.
- * - `worker_sessions` — one row per (repo, messaging group, thread). This is
- *   the A4 reuse key and the A5 separation key. It is keyed on the THREAD, not
- *   on the principal's session id, because `session_mode` decides how a thread
- *   maps to a principal session and this key must be invariant to it.
+ * - `worker_helpers` — one row per (principal, repository). A worker's agent
+ *   group holds its memory and its transcripts, so keying it on the repository
+ *   alone would pool one principal's work into the next principal's worker.
+ *   Two assistants delegating into one repository get one worker each, and
+ *   each remembers only what it was told.
+ * - `worker_sessions` — one row per (worker agent group, messaging group,
+ *   thread). This is the A4 reuse key and the A5 separation key. It is keyed on
+ *   the THREAD, not on the principal's session id, because `session_mode`
+ *   decides how a thread maps to a principal session and this key must be
+ *   invariant to it. The worker agent group leads the key rather than the
+ *   repository name, so two principals sharing one thread still get one worker
+ *   session each.
  *   `thread_id` is `''` for an unthreaded chat: SQLite treats NULLs as distinct
  *   in a UNIQUE index, which would defeat the reuse this key exists for.
  * - `worker_tasks` — one row per delegated task. `draft_answer` is overwritten
@@ -35,10 +40,13 @@ export const migration025: Migration = {
     await db.exec(`
       CREATE TABLE worker_helpers (
         helper_agent_group_id TEXT PRIMARY KEY,
-        repo_name TEXT NOT NULL UNIQUE,
+        principal_agent_group_id TEXT NOT NULL,
+        repo_name TEXT NOT NULL,
         repo_path TEXT NOT NULL,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        UNIQUE (principal_agent_group_id, repo_name)
       );
+      CREATE INDEX idx_worker_helpers_repo ON worker_helpers(repo_name);
 
       CREATE TABLE worker_sessions (
         helper_session_id TEXT PRIMARY KEY,
@@ -49,7 +57,7 @@ export const migration025: Migration = {
         worktree_path TEXT NOT NULL,
         branch_name TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        UNIQUE (repo_name, messaging_group_id, thread_id)
+        UNIQUE (helper_agent_group_id, messaging_group_id, thread_id)
       );
       CREATE INDEX idx_worker_sessions_group ON worker_sessions(helper_agent_group_id);
 
