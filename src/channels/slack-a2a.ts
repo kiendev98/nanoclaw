@@ -89,6 +89,33 @@ function roomFromPlatformId(platformId: string): string {
  * `getConfig` is injectable for tests; production reads .env with a short TTL
  * cache.
  */
+/**
+ * Threads exempt from the hop cap, keyed `<room>:<thread>`.
+ *
+ * The cap counts CONSECUTIVE bot turns and only a human resets it, so a
+ * deliberate bot-to-bot loop — a review loop a worker holds with another
+ * agent — stops mid-conversation with nothing but a log line. The exemption is
+ * per thread rather than a higher global cap, so every other room keeps the
+ * cap that is the only thing between two agents and an infinite loop.
+ *
+ * In memory on purpose. A host restart re-arms the cap on a thread that was
+ * exempt, which fails toward the bound rather than away from it.
+ */
+const exemptThreads = new Set<string>();
+
+function exemptionKey(platformId: string, threadId: string): string {
+  return `${roomFromPlatformId(platformId)}:${threadId}`;
+}
+
+/** Exempt one thread. The caller owns a grant that ends with its task. */
+export function exemptThreadFromHopLimit(platformId: string, threadId: string): void {
+  exemptThreads.add(exemptionKey(platformId, threadId));
+}
+
+export function restoreHopLimitOnThread(platformId: string, threadId: string): void {
+  exemptThreads.delete(exemptionKey(platformId, threadId));
+}
+
 export function createA2aRoomPolicy(getConfig: () => A2aConfig = readA2aConfig): SlackBotInboundPolicy {
   /** Consecutive accepted bot hops, keyed `<instanceKey>:<room>`. */
   const hops = new Map<string, number>();
@@ -102,7 +129,8 @@ export function createA2aRoomPolicy(getConfig: () => A2aConfig = readA2aConfig):
       }
       const key = `${ctx.instanceKey}:${room}`;
       const count = hops.get(key) ?? 0;
-      if (count >= maxHops) {
+      const exempt = ctx.threadId !== null && exemptThreads.has(exemptionKey(ctx.platformId, ctx.threadId));
+      if (!exempt && count >= maxHops) {
         log.info('slack-a2a: hop limit reached — dropping bot messages until a human speaks', {
           room,
           botId: ctx.botId,
@@ -119,7 +147,11 @@ export function createA2aRoomPolicy(getConfig: () => A2aConfig = readA2aConfig):
         // The guard fires this only after downstream accepted the message —
         // a throw in the host's onInbound must not consume budget for a
         // message that never reached a session.
-        onAccepted: () => hops.set(key, count + 1),
+        // An exempt thread spends no budget either, so a loop inside it cannot
+        // starve the rest of the room.
+        onAccepted: () => {
+          if (!exempt) hops.set(key, count + 1);
+        },
       };
     },
     onHumanInbound(ctx) {

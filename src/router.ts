@@ -21,6 +21,7 @@ import { getChannelAdapter, getChannelDefaults } from './channels/channel-regist
 import { resolveThreadPolicy, resolveUnknownSenderPolicy } from './channels/channel-defaults.js';
 import { gateCommand } from './command-gate.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { getDb, hasTable } from './db/connection.js';
 import { recordDroppedMessage } from './db/dropped-messages.js';
 import {
   createMessagingGroupIfAbsent,
@@ -366,6 +367,28 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   // wiring reproduces the historical supportsThreads-derived routing exactly.
   const channelDefaults = getChannelDefaults(mg.instance ?? mg.channel_type, mg.channel_type);
   const supportsThreads = adapter?.supportsThreads === true;
+
+  // MODULE-HOOK:worker-lent-conversation:start
+  // A thread a helper holds bypasses the fan-out entirely: it engages without
+  // being named (D5) and nothing else engages at all (D8). The gate below is
+  // the same access check the fan-out applies, resolved against the helper's
+  // principal, so a helper admits exactly who its principal admits (D10).
+  if (await hasTable(getDb(), 'worker_channel_grants')) {
+    const { deliverToLentConversation } = await import('./modules/worker-delegation/inbound-route.js');
+    const held = await deliverToLentConversation(
+      {
+        messagingGroupId: mg.id,
+        threadId: event.threadId,
+        channelType: event.channelType,
+        platformId: event.platformId,
+        message: event.message,
+      },
+      async (principalAgentGroupId) =>
+        !accessGate || (await accessGate(event, userId, mg, principalAgentGroupId)).allowed,
+    );
+    if (held) return;
+  }
+  // MODULE-HOOK:worker-lent-conversation:end
 
   let engagedCount = 0;
   let accumulatedCount = 0;

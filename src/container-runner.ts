@@ -41,7 +41,7 @@ import {
   type SessionClaimRow,
 } from './db/coordination.js';
 import { getHostInstanceId } from './host-instance.js';
-import { getDb, hasTable } from './db/connection.js';
+import { getDb, getDbIfInitialized, hasTable } from './db/connection.js';
 import { getSession } from './db/sessions.js';
 import { getSessionDriver, isSessionEventsDriver } from './drivers/index.js';
 import type { SupervisedHandle, SupervisedSnapshot } from './drivers/session-events.js';
@@ -400,6 +400,35 @@ async function spawnContainer(session: Session): Promise<void> {
 }
 
 /**
+ * Session-terminal hooks.
+ *
+ * Registered modules observe a session whose runtime has ended — the process
+ * exited, however it exited. This is the seam a module uses when the END of a
+ * run has to mean something, and it cannot be an action the agent takes: a
+ * crashed agent takes none.
+ *
+ * Hooks are decoration only. Each call is wrapped, so a failing hook can never
+ * affect finalization, the claim release, or a respawn.
+ */
+export type SessionTerminalHook = (sessionId: string) => void | Promise<void>;
+
+const sessionTerminalHooks: SessionTerminalHook[] = [];
+
+export function registerSessionTerminalHook(hook: SessionTerminalHook): void {
+  sessionTerminalHooks.push(hook);
+}
+
+async function runSessionTerminalHooks(sessionId: string): Promise<void> {
+  for (const hook of sessionTerminalHooks) {
+    try {
+      await hook(sessionId);
+    } catch (err) {
+      log.error('Session-terminal hook failed', { sessionId, err });
+    }
+  }
+}
+
+/**
  * Wire a session's lifecycle in the one order that is safe, as executable code
  * rather than as a comment a refactor can silently invert.
  *
@@ -581,6 +610,8 @@ async function finish(sessionId: string, runtime: ActiveSessionRuntime, failure?
       log.error('Container exit callback failed', { sessionId, containerName, err });
     }
   }
+
+  await runSessionTerminalHooks(sessionId);
 }
 
 /** Kill a container for a session. */
@@ -772,6 +803,20 @@ async function resolveProviderContribution(
   return { provider, contribution };
 }
 
+/**
+ * The working copy this session stands in, when it is a helper session.
+ *
+ * Table-guarded like the agent-to-agent destination projection: without the
+ * worker-delegation tables there is nothing to read, and every session is an
+ * ordinary one.
+ */
+async function workerWorktreePath(sessionId: string): Promise<string | null> {
+  const db = getDbIfInitialized();
+  if (!db || !(await hasTable(db, 'worker_sessions'))) return null;
+  const { getWorkerSession } = await import('./modules/worker-delegation/db/worker-sessions.js');
+  return (await getWorkerSession(sessionId))?.worktree_path ?? null;
+}
+
 export async function buildMounts(
   agentGroup: AgentGroup,
   session: Session,
@@ -818,6 +863,24 @@ export async function buildMounts(
     mountClass: 'group-state',
     scope,
   });
+
+  // MODULE-HOOK:worker-worktree:start
+  // A helper session's working copy of the repository it was delegated into.
+  // Classed 'allowlisted-extra' rather than 'group-state' because it lives
+  // outside every group folder ON PURPOSE — the memory walk must not climb out
+  // of it into someone else's checkout — and that class is exactly "a host path
+  // vetted upstream", which the repository registry is.
+  const worktreePath = await workerWorktreePath(session.id);
+  if (worktreePath) {
+    mounts.push({
+      hostPath: worktreePath,
+      containerPath: '/workspace/repo',
+      readonly: false,
+      mountClass: 'allowlisted-extra',
+      scope,
+    });
+  }
+  // MODULE-HOOK:worker-worktree:end
 
   // container.json — nested RO mount on top of RW group dir so the agent can
   // read its config but cannot modify it. Composed per group, so 'group-state'

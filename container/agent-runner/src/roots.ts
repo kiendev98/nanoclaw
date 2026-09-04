@@ -41,6 +41,7 @@
  * environment before spawn; a setter would only invite a half-migrated process
  * holding two roots at once.
  */
+import fs from 'fs';
 import path from 'path';
 
 /** Read an override, treating whitespace-only as unset. */
@@ -115,3 +116,16 @@ export const SESSION_CONTEXT_PATH = root('NANOCLAW_SESSION_CONTEXT_PATH', '/app/
 
 /** True when this process is running outside a container. */
 export const IS_HOSTED: boolean = Boolean((process.env.NANOCLAW_AGENT_DIR ?? '').trim());
+
+/**
+ * The repository working copy a helper session stands in, or null.
+ *
+ * Two shapes, one answer. A container gets the mount at the fixed path and no
+ * variable; a host process gets the variable and no mount. Both are absent for
+ * an ordinary chat session, and the caller then keeps `AGENT_DIR` — which is
+ * what makes this addition invisible to every session that is not a helper's.
+ */
+export function worktreeDir(): string | null {
+  const candidate = root('NANOCLAW_WORKTREE_DIR', '/workspace/repo');
+  return fs.existsSync(candidate) ? candidate : null;
+}

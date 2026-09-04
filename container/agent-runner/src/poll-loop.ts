@@ -9,6 +9,7 @@ import {
 import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { clearStaleProcessingAcks } from './db/container-state.js';
 import { touchHeartbeat } from './heartbeat.js';
+import { worktreeDir } from './roots.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import { renderFooter } from './telemetry/index.js';
 import {
@@ -578,6 +579,9 @@ export async function processQuery(
           // A corrective retry handles delivery only; its result is not a
           // second run summary.
           if (routing.taskRun && !taskBlockNudged) await autoAppendTaskLog(event.text);
+          // A helper session captures the same final text as its report draft.
+          // Automatic, so B1's "the helper must not have to remember" holds.
+          if (worktreeDir()) await autoAppendWorkerReportDraft(event.text);
           if (resultBlocks === 0 && event.isError === true && !routing.taskRun) {
             // Non-retryable error turn (e.g. a 403 billing_error) with no
             // <message> envelope: deliver the notice instead of dropping it as
@@ -1130,6 +1134,24 @@ export async function autoAppendTaskLog(text: string): Promise<void> {
     content: JSON.stringify({ text: line }),
   });
   log('Task run log auto-appended from final text');
+}
+
+/**
+ * A helper's report draft, captured from the turn's final text.
+ *
+ * The sibling above APPENDS to a run log. This one OVERWRITES a draft, because
+ * only the last statement is the answer (B2). Nothing is delivered here: the
+ * host reads the draft once, when the task ends, so a helper never has to
+ * remember to report and a crashed one still does.
+ */
+export async function autoAppendWorkerReportDraft(text: string): Promise<void> {
+  const body = stripInternalTags(text).trim();
+  if (!body) return;
+  await writeMessageOut({
+    id: generateId(),
+    kind: 'system',
+    content: JSON.stringify({ action: 'worker_report_draft', text: body }),
+  });
 }
 
 async function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): Promise<void> {

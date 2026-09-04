@@ -94,6 +94,7 @@ const HOST_OWNED_ENV = ['HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR'] as const;
 const ROOT_ENV_BY_CONTAINER_PATH: Record<string, string> = {
   '/workspace': 'NANOCLAW_SESSION_DIR',
   '/workspace/agent': 'NANOCLAW_AGENT_DIR',
+  '/workspace/repo': 'NANOCLAW_WORKTREE_DIR',
   '/app/.nanoclaw-session.json': 'NANOCLAW_SESSION_CONTEXT_PATH',
 };
 

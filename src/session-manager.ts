@@ -11,6 +11,7 @@ import { isSafeAttachmentName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
 import { ensureContainedInboxDir, isPathInside } from './inbox-safety.js';
+import { getDb, hasTable } from './db/connection.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import { isUniqueViolation } from './db/errors.js';
 import {
@@ -159,13 +160,19 @@ export async function resolveSession(
   });
 }
 
-/** Find or create the per-agent-group session used for scheduled tasks. */
-/** Find or create the isolated session for one task series (thread `system:tasks:<seriesId>`). */
-export async function resolveTaskSession(
+/**
+ * Find or create an isolated session under the reserved `system:` thread
+ * namespace, which `db/sessions.ts` excludes from every ordinary lookup.
+ *
+ * Such a session has no messaging group, so it has no origin chat — which is
+ * what stops delivery's own "an agent may always reply to the chat it was
+ * spawned from" exemption from applying to it.
+ */
+export async function resolveSystemSession(
   agentGroupId: string,
-  seriesId: string,
+  threadId: string,
+  kind: string,
 ): Promise<{ session: Session; created: boolean }> {
-  const threadId = taskThreadId(seriesId);
   return withSessionCreationLock(`system\0${agentGroupId}\0${threadId}`, async () => {
     const existing = await findSystemSession(agentGroupId, threadId);
     if (existing) return { session: existing, created: false };
@@ -192,10 +199,18 @@ export async function resolveTaskSession(
       return { session: raced, created: false };
     }
     initSessionFolder(agentGroupId, id);
-    log.info('Task session created', { id, agentGroupId, seriesId });
+    log.info('System session created', { id, agentGroupId, threadId, kind });
 
     return { session, created: true };
   });
+}
+
+/** Find or create the isolated session for one task series (thread `system:tasks:<seriesId>`). */
+export async function resolveTaskSession(
+  agentGroupId: string,
+  seriesId: string,
+): Promise<{ session: Session; created: boolean }> {
+  return resolveSystemSession(agentGroupId, taskThreadId(seriesId), 'task');
 }
 
 /** Create the workspace folders and synchronously prepare the registered mailbox. */
@@ -229,6 +244,7 @@ export async function writeSessionRouting(agentGroupId: string, sessionId: strin
 
   let channelType: string | null = null;
   let platformId: string | null = null;
+  let threadId: string | null = session.thread_id;
   if (session.messaging_group_id) {
     const mg = await getMessagingGroup(session.messaging_group_id);
     if (mg) {
@@ -237,14 +253,36 @@ export async function writeSessionRouting(agentGroupId: string, sessionId: strin
     }
   }
 
+  // MODULE-HOOK:worker-lent-conversation:start
+  // A helper holding a lent conversation is routed to that thread instead of
+  // to its own origin chat, which it has none of. `resolveRouting` in the
+  // container preserves the session's thread whenever a named destination
+  // resolves to the same channel, so projecting the grant here is what keeps
+  // every later message inside the one bound thread (D6).
+  const lent = await liveLentConversation(sessionId);
+  if (lent) {
+    channelType = lent.channel_type;
+    platformId = lent.platform_id;
+    threadId = lent.thread_id || null;
+  }
+  // MODULE-HOOK:worker-lent-conversation:end
+
   await withMailboxSession(agentGroupId, sessionId, (mailbox) => {
-    mailbox.setRouting({
-      channelType,
-      platformId,
-      threadId: session.thread_id,
-    });
+    mailbox.setRouting({ channelType, platformId, threadId });
   });
-  log.debug('Session routing written', { sessionId, channelType, platformId, threadId: session.thread_id });
+  log.debug('Session routing written', { sessionId, channelType, platformId, threadId });
+}
+
+/**
+ * The lent conversation this session holds, or undefined.
+ *
+ * Absent the worker-delegation tables there is nothing to read, so the lookup
+ * is table-guarded exactly like the agent-to-agent destination projection.
+ */
+async function liveLentConversation(sessionId: string) {
+  if (!(await hasTable(getDb(), 'worker_channel_grants'))) return undefined;
+  const { findLiveGrantForSession } = await import('./modules/worker-delegation/db/worker-channel-grants.js');
+  return findLiveGrantForSession(sessionId);
 }
 
 /**

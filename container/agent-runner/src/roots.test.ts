@@ -1,3 +1,7 @@
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
 import { describe, expect, it } from 'bun:test';
 
 const ROOT_VARS = [
@@ -82,5 +86,46 @@ describe('roots', () => {
     const r = await loadRoots({ NANOCLAW_AGENT_DIR: '/state/groups/dm///' }, 'trailing');
 
     expect(r.AGENT_DIR).toBe('/state/groups/dm');
+  });
+});
+
+describe('worktreeDir', () => {
+  const VAR = 'NANOCLAW_WORKTREE_DIR';
+
+  function withVar<T>(value: string | undefined, run: () => T): T {
+    const previous = process.env[VAR];
+    if (value === undefined) delete process.env[VAR];
+    else process.env[VAR] = value;
+    try {
+      return run();
+    } finally {
+      if (previous === undefined) delete process.env[VAR];
+      else process.env[VAR] = previous;
+    }
+  }
+
+  // The absent case is every ordinary session, and it has to stay absent: the
+  // caller then keeps AGENT_DIR, so nothing about a chat session changes.
+  it('is null when no working copy is named or mounted', async () => {
+    const r = await import('./roots.js');
+
+    withVar(undefined, () => expect(r.worktreeDir()).toBeNull());
+  });
+
+  it('is null when the named directory does not exist', async () => {
+    const r = await import('./roots.js');
+
+    withVar('/nanoclaw-no-such-worktree', () => expect(r.worktreeDir()).toBeNull());
+  });
+
+  it('is the named directory when it exists', async () => {
+    const r = await import('./roots.js');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-worktree-'));
+
+    try {
+      withVar(dir, () => expect(r.worktreeDir()).toBe(dir));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
