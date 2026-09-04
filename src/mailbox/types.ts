@@ -89,8 +89,26 @@ export interface MailboxTimelineMessage {
   content: string;
 }
 
+/**
+ * Whether a message id is already in the mailbox.
+ *
+ * Its own interface, not a member of the 30-odd on InboundMailbox, so a
+ * caller that needs presence and nothing else can say so — and can be tested
+ * with a one-method fake instead of a whole mailbox.
+ */
+export interface MessagePresence {
+  /**
+   * Whether a row with this exact id is already in messages_in.
+   *
+   * Thread-history seeding uses it to skip a message the accumulate path
+   * already stored, so an exact primary-key hit decides it and no text
+   * comparison is needed.
+   */
+  hasMessage(id: string): boolean;
+}
+
 /** Host-visible inbound mailbox behavior. Storage layout and lifecycle are implementation-private. */
-export interface InboundMailbox {
+export interface InboundMailbox extends MessagePresence {
   setRouting(routing: SessionRouting): void;
   replaceDestinations(entries: Destination[]): void;
   insertMessage(message: InboundMessage): Promise<void>;

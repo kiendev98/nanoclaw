@@ -23,7 +23,15 @@ export function isSessionEcho(msg: MessageInRow): boolean {
  */
 export type CommandCategory = 'admin' | 'filtered' | 'passthrough' | 'none';
 
-const ADMIN_COMMANDS = new Set(['/remote-control', '/clear', '/compact', '/context', '/cost', '/files', '/upload-trace']);
+const ADMIN_COMMANDS = new Set([
+  '/remote-control',
+  '/clear',
+  '/compact',
+  '/context',
+  '/cost',
+  '/files',
+  '/upload-trace',
+]);
 const FILTERED_COMMANDS = new Set(['/help', '/login', '/logout', '/doctor', '/config', '/start']);
 
 export interface CommandInfo {
@@ -136,9 +144,7 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
     inReplyTo: first?.id ?? null,
     // Echo rows riding along with a task must not disable one-door delivery:
     // taskRun as long as at least one task row and no non-task/non-echo row.
-    taskRun:
-      messages.some((m) => m.kind === 'task') &&
-      messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
+    taskRun: messages.some((m) => m.kind === 'task') && messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
   };
 }
 
@@ -222,7 +228,11 @@ function formatEchoMessage(msg: MessageInRow): string {
   const content = parseContent(msg.content);
   const label = content.echo?.label || 'another conversation';
   const sender = content.sender || 'Unknown';
-  const time = formatLocalStamp(new Date(msg.timestamp), TIMEZONE);
+  // Prelude rows carry the message's real send time in echo.sentAt, because
+  // their `timestamp` column holds the SEEDING time — the echo pruner ages
+  // pending rows by that column, and a thread wired weeks after it started
+  // would otherwise have its whole prelude swept before the first poll.
+  const time = formatLocalStamp(new Date(content.echo?.sentAt ?? msg.timestamp), TIMEZONE);
   // Timeline rows are the conversation's own preceding history — FIRST-CLASS
   // context this thread continues from (the agent's own posts render as
   // sender="you"), unlike cross-session-context ambient echoes from other
@@ -231,7 +241,11 @@ function formatEchoMessage(msg: MessageInRow): string {
   if (content.echo?.surface === 'dm-timeline' || content.echo?.surface === 'channel-timeline') {
     const who = (content as { self?: boolean }).self ? 'you' : sender;
     const tag = content.echo.surface === 'channel-timeline' ? 'channel-history' : 'dm-history';
-    return `<${tag} sender="${escapeXml(who)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</${tag}>`;
+    // `from` distinguishes the two prelude sources, which are otherwise
+    // indistinguishable: this thread's own earlier turns and another thread's
+    // opener render under the same tag and interleave by seq.
+    const fromLabel = content.echo.label ? ` from="${escapeXml(content.echo.label)}"` : '';
+    return `<${tag}${fromLabel} sender="${escapeXml(who)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</${tag}>`;
   }
   return `<cross-session-context from="${escapeXml(label)}" sender="${escapeXml(sender)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</cross-session-context>`;
 }

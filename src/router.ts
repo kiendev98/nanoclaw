@@ -28,17 +28,42 @@ import {
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
 import { findSessionForAgent } from './db/sessions.js';
-import { backfillNewSession, fanInboundMessage } from './modules/cross-session-context/index.js';
+import {
+  backfillNewSession,
+  fanInboundMessage,
+  seedThreadHistory,
+  type ThreadHistoryReader,
+} from './modules/cross-session-context/index.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
 import { requestWake } from './request-wake.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from './types.js';
-import type { InboundEvent } from './channels/adapter.js';
+import type { ChannelAdapter, InboundEvent, ThreadHistoryMessage } from './channels/adapter.js';
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Wrap an adapter's thread-history read so one message costs one round trip.
+ *
+ * The result is per thread, and every wiring on a chat asks about the same
+ * thread, so the first call's promise is reused. Absent capability stays
+ * absent, which the seeder treats as a no-op.
+ */
+function memoizeThreadHistoryRead(adapter: ChannelAdapter | undefined): ThreadHistoryReader | undefined {
+  if (!adapter?.fetchThreadHistory) return undefined;
+  const inFlight = new Map<string, Promise<ThreadHistoryMessage[]>>();
+  return (platformId, threadId, limit) => {
+    const key = `${platformId}|${threadId}|${limit}`;
+    const existing = inFlight.get(key);
+    if (existing) return existing;
+    const started = adapter.fetchThreadHistory!(platformId, threadId, limit);
+    inFlight.set(key, started);
+    return started;
+  };
 }
 
 /**
@@ -371,6 +396,13 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   let accumulatedCount = 0;
   let subscribed = false;
 
+  // One platform read per message, however many agent groups are wired to
+  // this chat. The read is per THREAD, so N wirings creating N sessions would
+  // otherwise issue N identical round trips, serialized, each paying the
+  // adapter's per-message enrichment. Shared here rather than inside
+  // deliverToAgent, which runs once per wiring.
+  const readThreadHistory = memoizeThreadHistoryRead(adapter);
+
   for (const agent of agents) {
     const agentGroup = await getAgentGroup(agent.agent_group_id);
     if (!agentGroup) continue;
@@ -396,7 +428,17 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     const scopeOk = engages && (!senderScopeGate || (await senderScopeGate(event, userId, mg, agent)).allowed);
 
     if (engages && accessOk && scopeOk) {
-      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, true);
+      await deliverToAgent({
+        agent,
+        agentGroup,
+        mg,
+        event,
+        userId,
+        threadsEnabled,
+        effectiveThreadId,
+        wake: true,
+        readThreadHistory,
+      });
       engagedCount++;
 
       // Mention-sticky: ask the adapter to subscribe the thread so the
@@ -428,7 +470,17 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       // message (which also stages their attachments to disk via
       // writeSessionMessage → extractAttachmentFiles) is exactly what the
       // gate is meant to prevent.
-      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, false);
+      await deliverToAgent({
+        agent,
+        agentGroup,
+        mg,
+        event,
+        userId,
+        threadsEnabled,
+        effectiveThreadId,
+        wake: false,
+        readThreadHistory,
+      });
       accumulatedCount++;
     } else {
       log.debug('Message not engaged for agent (drop policy)', {
@@ -514,16 +566,35 @@ async function evaluateEngage(
   }
 }
 
-async function deliverToAgent(
-  agent: MessagingGroupAgent,
-  agentGroup: AgentGroup,
-  mg: MessagingGroup,
-  event: InboundEvent,
-  userId: string | null,
-  threadsEnabled: boolean,
-  effectiveThreadId: string | null,
-  wake: boolean,
-): Promise<void> {
+/**
+ * One inbound message, resolved as far as the fanout loop can resolve it.
+ *
+ * A parameter object because the positional list had reached nine, where a
+ * caller can silently transpose two same-typed arguments and the compiler
+ * cannot help. Everything here is decided once per message in routeInbound
+ * and read, never written, by delivery.
+ */
+interface DeliveryContext {
+  agent: MessagingGroupAgent;
+  agentGroup: AgentGroup;
+  mg: MessagingGroup;
+  event: InboundEvent;
+  userId: string | null;
+  /** Thread policy resolved for THIS wiring, not the adapter's raw capability. */
+  threadsEnabled: boolean;
+  effectiveThreadId: string | null;
+  /** True engages and wakes the container. False stores silent context. */
+  wake: boolean;
+  /**
+   * Reads this thread's earlier messages, absent when the channel cannot.
+   * Shared across the wirings on one message, so the platform is asked once.
+   */
+  readThreadHistory: ThreadHistoryReader | undefined;
+}
+
+async function deliverToAgent(context: DeliveryContext): Promise<void> {
+  const { agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, wake, readThreadHistory } = context;
+
   // Apply the resolved thread policy (wiring override AND channel declaration
   // AND adapter capability — resolveThreadPolicy at fanout): thread-enabled
   // wiring in a group chat → per-thread session regardless of wiring
@@ -577,12 +648,54 @@ async function deliverToAgent(
     }
   }
 
+  if (wake) {
+    // Typing starts BEFORE session seeding, not after. Seeding may wait on a
+    // platform read, and the prelude has to be written before the triggering
+    // message to take a lower seq — so the read sits between the mention and
+    // any sign of life. Without this the user watches nothing happen for as
+    // long as the fetch takes. Accumulated messages get no indicator; they
+    // sit silently until a real trigger fires.
+    // Typing fires via the adapter instance that owns this chat's row.
+    startTypingRefresh(
+      session.id,
+      session.agent_group_id,
+      event.channelType,
+      event.platformId,
+      effectiveThreadId,
+      mg.instance,
+    );
+  }
+
   if (wake && created) {
-    // New-session backfill (cross-session context): a just-born session is
-    // seeded with its conversation's top-level timeline from sibling
-    // sessions BEFORE the triggering message is written, so replying to
-    // something said in another thread lands with that context in view.
-    await backfillNewSession(agentGroup, session, mg);
+    // A just-born session is seeded with context BEFORE the triggering
+    // message is written, so the prelude takes a lower seq and the container
+    // renders it ahead of the live turn.
+    //
+    // Two sources, and they are mutually exclusive on purpose. The container
+    // caps how many context rows reach one prompt and keeps the NEWEST by
+    // seq, so writing both guarantees one is written and never read, while
+    // its unread rows stay pending and resurface as stale prelude later. For
+    // a mid-thread mention this thread's own earlier turns beat another
+    // thread's opener, so thread history is asked first and the sibling
+    // timeline is the fallback when it yields nothing.
+    //
+    // Every no-op condition lives in the thread-history module, beside its
+    // siblings, so this stays one call.
+    const seededFromThread = await seedThreadHistory({
+      agentGroup,
+      session,
+      mg,
+      readThreadHistory,
+      platformId: event.platformId,
+      threadId: effectiveThreadId,
+      triggerMessageId: event.message.id,
+      triggerTimestamp: event.message.timestamp,
+      toLocalMessageId: (platformMessageId) => messageIdForAgent(platformMessageId, agent.agent_group_id),
+    });
+
+    if (seededFromThread === 0) {
+      await backfillNewSession(agentGroup, session, mg);
+    }
   }
 
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
@@ -643,17 +756,6 @@ async function deliverToAgent(
   });
 
   if (wake) {
-    // Typing indicator + wake are only for the engaged branch; accumulated
-    // messages sit silently until a real trigger fires.
-    // Typing fires via the adapter instance that owns this chat's row.
-    startTypingRefresh(
-      session.id,
-      session.agent_group_id,
-      event.channelType,
-      event.platformId,
-      effectiveThreadId,
-      mg.instance,
-    );
     const freshSession = await getSession(session.id);
     if (freshSession) {
       const woke = await requestWake(freshSession, 'inbound-message');
