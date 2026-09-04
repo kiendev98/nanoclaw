@@ -52,6 +52,7 @@ import { initGroupFilesystem } from './group-init.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
+import { selectedSkillNames, stageSkillsPlugin, syncSkillSymlinks } from './skill-delivery.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
 // Provider host-side config barrel — each provider that needs host-side
 // container setup self-registers on import.
@@ -797,6 +798,7 @@ export async function buildMounts(
   const mounts: VolumeMount[] = [];
   const sessDir = sessionDir(agentGroup.id, session.id);
   const scope = agentGroup.id;
+  if (defaultSurfaces) stageSkillsPlugin(sessDir, containerConfig);
 
   // Session workspace: mailbox-selected state plus outbox and heartbeat files.
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false, mountClass: 'group-state', scope });
@@ -1092,86 +1094,6 @@ export function parseMemoryMb(value: string): number | undefined {
 export function parsePidsLimit(value: string): number | undefined {
   const pids = Number(value);
   return Number.isFinite(pids) && pids > 0 ? Math.floor(pids) : undefined;
-}
-
-/**
- * Sync skill symlinks in .claude-shared/skills/ to match the container.json
- * selection. Each symlink points to a container path (/app/skills/<name>) so
- * it's dangling on the host but valid inside the container.
- *
- * Not the mechanism the composer stopped using: skill discovery is a directory
- * scan that follows a link wherever it lands, and only `@` imports are gated on
- * resolving inside the project directory.
- */
-export function syncSkillSymlinks(
-  claudeDir: string,
-  containerConfig: import('./container-config.js').ContainerConfig,
-): void {
-  const skillsDir = path.join(claudeDir, 'skills');
-  if (!fs.existsSync(skillsDir)) {
-    fs.mkdirSync(skillsDir, { recursive: true });
-  }
-
-  const desired = selectedSkillNames(containerConfig);
-  const desiredSet = new Set(desired);
-
-  // Remove symlinks not in the desired set
-  for (const entry of fs.readdirSync(skillsDir)) {
-    const entryPath = path.join(skillsDir, entry);
-    let isSymlink = false;
-    try {
-      isSymlink = fs.lstatSync(entryPath).isSymbolicLink();
-    } catch {
-      continue;
-    }
-    if (isSymlink && !desiredSet.has(entry)) {
-      fs.unlinkSync(entryPath);
-    }
-  }
-
-  // Create symlinks for desired skills (container path targets)
-  for (const skill of desired) {
-    const linkPath = path.join(skillsDir, skill);
-    let entry: fs.Stats | undefined;
-    try {
-      entry = fs.lstatSync(linkPath);
-    } catch {
-      /* missing */
-    }
-    if (!entry) {
-      fs.symlinkSync(`/app/skills/${skill}`, linkPath);
-    } else if (!entry.isSymbolicLink()) {
-      // A real entry here is either a template overlay (intentional; see
-      // src/group-skills.ts) or a stale pre-refactor skill copy that shadows
-      // the shared skill (#3001). No marker distinguishes them yet, so
-      // surface the skip instead of staying silent.
-      log.warn(
-        'Shared skill not symlinked: real entry occupies the path (template overlay or stale pre-refactor copy)',
-        {
-          skill,
-          path: linkPath,
-        },
-      );
-    }
-  }
-}
-
-/**
- * Resolve the group's skill selection to concrete names — `'all'` recomputes
- * from `container/skills/` so newly-added upstream skills appear automatically.
- */
-function selectedSkillNames(containerConfig: import('./container-config.js').ContainerConfig): string[] {
-  if (containerConfig.skills !== 'all') return containerConfig.skills;
-  const sharedSkillsDir = path.join(process.cwd(), 'container', 'skills');
-  return fs.existsSync(sharedSkillsDir)
-    ? fs.readdirSync(sharedSkillsDir).filter((e) => {
-        try {
-          return fs.statSync(path.join(sharedSkillsDir, e)).isDirectory();
-        } catch {
-          return false;
-        }
-      })
-    : [];
 }
 
 const execAsync = promisify(exec);

@@ -6,7 +6,21 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
+import {
+  recordAccountName,
+  recordContextUsage,
+  recordContextTokens,
+  recordEffort,
+  recordModel,
+  recordRateLimits,
+  recordUtilization,
+  registerAccountResolver,
+  registerModelShortener,
+  registerRateLimitWindows,
+} from '../telemetry/index.js';
+import { CLAUDE_RATE_LIMIT_WINDOWS, readClaudeAccountName, shortenClaudeModel } from './claude-telemetry.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
+import { AGENT_DIR, IS_HOSTED, SKILLS_PLUGIN_DIR } from '../roots.js';
 import { shimCwd } from './cwd-shim.js';
 import { registerProvider } from './provider-registry.js';
 import type {
@@ -17,6 +31,15 @@ import type {
   ProviderOptions,
   QueryInput,
 } from './types.js';
+
+// Everything the footer needs that only this provider knows. Registered at
+// import, which is what a restart re-runs. See `claude-telemetry.ts`.
+registerRateLimitWindows(CLAUDE_RATE_LIMIT_WINDOWS);
+registerModelShortener(shortenClaudeModel);
+registerAccountResolver(readClaudeAccountName);
+
+/** Where the image installs `claude`. A host path would name nothing here. */
+const CONTAINER_CLAUDE = '/pnpm/claude';
 
 function log(msg: string): void {
   console.error(`[claude-provider] ${msg}`);
@@ -48,6 +71,80 @@ export interface SdkRateLimitInfo {
  *
  * Returns null when the event is informational (do not disturb the turn).
  */
+/**
+ * Log what actually occupies the context window, once per turn.
+ *
+ * Diagnostic, because the percentage alone is unfalsifiable. A greeting
+ * reported 51% on a model whose id says 1M. `rawMaxTokens` is the full window
+ * and `maxTokens` is what a conversation may occupy, so a large gap between
+ * them IS the answer.
+ */
+function logContextBreakdown(usage: unknown): void {
+  const u = usage as {
+    totalTokens?: number;
+    maxTokens?: number;
+    rawMaxTokens?: number;
+    percentage?: number;
+    model?: string;
+    categories?: Array<{ name?: string; tokens?: number }>;
+    memoryFiles?: Array<{ path?: string; tokens?: number }>;
+    mcpTools?: Array<{ serverName?: string; tokens?: number }>;
+  } | null;
+  if (!u) return;
+
+  const top = (rows: Array<{ tokens?: number }> | undefined, label: (row: never) => string): string =>
+    (rows ?? [])
+      .filter((row) => (row.tokens ?? 0) > 0)
+      .sort((a, b) => (b.tokens ?? 0) - (a.tokens ?? 0))
+      .slice(0, 8)
+      .map((row) => `${label(row as never)}=${row.tokens}`)
+      .join(' ');
+
+  // Server-grouped rather than per-tool: a dozen MCP servers produce hundreds
+  // of tool rows, and the question is which SERVER is expensive.
+  const perServer = new Map<string, number>();
+  for (const tool of u.mcpTools ?? []) {
+    const name = tool.serverName ?? 'unknown';
+    perServer.set(name, (perServer.get(name) ?? 0) + (tool.tokens ?? 0));
+  }
+
+  log(
+    `context: total=${u.totalTokens} max=${u.maxTokens} rawMax=${u.rawMaxTokens} pct=${u.percentage} model=${u.model}`,
+  );
+  log(`context categories: ${top(u.categories, (row: { name?: string }) => row.name ?? '?')}`);
+  log(`context memory files: ${top(u.memoryFiles, (row: { path?: string }) => row.path ?? '?')}`);
+  log(
+    `context mcp servers: ${[...perServer.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([name, tokens]) => `${name}=${tokens}`)
+      .join(' ')}`,
+  );
+}
+
+/**
+ * Invoke an optional zero-argument control method and hand its result to
+ * `onValue`, or do nothing at all.
+ *
+ * Every failure is swallowed deliberately: a missing method (older SDK, or a
+ * test double), a rejected control request, and a throwing handler. The only
+ * caller is footer telemetry, which must never delay a turn or fail one.
+ */
+function callIfAvailable<T>(
+  target: unknown,
+  method: string,
+  onValue: (value: T | undefined) => void,
+): void {
+  const fn = (target as Record<string, unknown> | null)?.[method];
+  if (typeof fn !== 'function') return;
+  try {
+    void Promise.resolve((fn as () => Promise<T>).call(target))
+      .then((value) => onValue(value))
+      .catch(() => {});
+  } catch {
+    // A synchronous throw from the control call itself.
+  }
+}
+
 export function classifyRateLimitEvent(
   info: SdkRateLimitInfo | undefined,
 ): { message: string; classification: 'rate_limit' | 'quota' } | null {
@@ -307,7 +404,7 @@ function archiveTranscriptFile(
           .slice(0, 50)
       : `conversation-${new Date().getHours().toString().padStart(2, '0')}${new Date().getMinutes().toString().padStart(2, '0')}`;
 
-    const conversationsDir = process.env.NANOCLAW_CONVERSATIONS_DIR || '/workspace/agent/conversations';
+    const conversationsDir = process.env.NANOCLAW_CONVERSATIONS_DIR || path.join(AGENT_DIR, 'conversations');
     fs.mkdirSync(conversationsDir, { recursive: true });
     // Local calendar date — the fallback `name` above already uses local
     // hours, and the agent navigates conversations/ by these date prefixes.
@@ -482,6 +579,7 @@ export class ClaudeProvider implements AgentProvider {
   private mcpServers: Record<string, McpServerConfig>;
   private env: Record<string, string | undefined>;
   private additionalDirectories?: string[];
+  private executablePath?: string;
   private model?: string;
   private effort?: string;
   private fastMode?: boolean;
@@ -493,6 +591,7 @@ export class ClaudeProvider implements AgentProvider {
       Object.entries(options.mcpServers ?? {}).map(([name, server]) => [name, shimCwd(server)]),
     );
     this.additionalDirectories = options.additionalDirectories;
+    this.executablePath = options.executablePath;
     this.model = options.model;
     this.effort = options.effort;
     this.fastMode = options.fastMode;
@@ -561,7 +660,7 @@ export class ClaudeProvider implements AgentProvider {
         cwd: input.cwd,
         additionalDirectories: this.additionalDirectories,
         resume: input.continuation,
-        pathToClaudeCodeExecutable: '/pnpm/claude',
+        pathToClaudeCodeExecutable: this.executablePath || CONTAINER_CLAUDE,
         systemPrompt: instructions
           ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions }
           : undefined,
@@ -574,6 +673,16 @@ export class ClaudeProvider implements AgentProvider {
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
         settingSources: ['project', 'user', 'local'],
+        // The shared skills, passed by path because no setting source above
+        // reaches a host-driver agent. `project` is the agent's cwd and `user`
+        // is the operator's own ~/.claude. The host stages the directory at
+        // spawn. See `docs/local-driver.md`.
+        //
+        // Outside a container only. Inside one the `.claude-shared` symlinks
+        // already deliver these skills, so the plugin would register each one
+        // twice — and a template overlay stamped in to SHADOW a shared skill
+        // would find the original reinstated beside it.
+        ...(IS_HOSTED ? { plugins: [{ type: 'local' as const, path: SKILLS_PLUGIN_DIR }] } : {}),
         // Only sent when enabled, so an install that never turns it on passes
         // exactly the options it always did. `fastMode` is a Settings member
         // rather than a query option, which is why it rides `settings`.
@@ -589,6 +698,8 @@ export class ClaudeProvider implements AgentProvider {
     });
 
     let aborted = false;
+    // Captured for the generator below, which cannot see `this`.
+    const configuredEffort = this.effort;
 
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
@@ -600,6 +711,37 @@ export class ClaudeProvider implements AgentProvider {
         yield { type: 'activity' };
 
         if (message.type === 'system' && message.subtype === 'init') {
+          // init reports the model the turn actually ran on. container.json's
+          // `model` is optional, so an install that pins nothing would
+          // otherwise have no model to show.
+          recordModel((message as { model?: string }).model);
+          // What nanoclaw asked for. init reports the model but not the
+          // effort, so this is the request, not a confirmation. Read from a
+          // captured const, never `this`: `translateEvents` is a plain
+          // generator declaration, so `this` is undefined inside it.
+          recordEffort(configuredEffort);
+          // Asked once per turn. Do not compute a ratio from these.
+          // `getContextUsage` divides by the USABLE window, so a ratio would
+          // read low against what the user sees. See `callIfAvailable` for why
+          // an absent method is safe.
+          callIfAvailable<{ totalTokens?: number }>(sdkResult, 'getContextUsage', (usage) => {
+            recordContextTokens(usage?.totalTokens);
+            logContextBreakdown(usage);
+          });
+          callIfAvailable<{ organization?: string }>(sdkResult, 'accountInfo', (info) => recordAccountName(info?.organization));
+          // The structured `/usage` payload, carrying the plan's rate-limit
+          // windows. Probed rather than called, because this SDK version does
+          // not type it. It is the only source that has populated 5h/7d, since
+          // `rate_limit_event` fires solely on CHANGE.
+          callIfAvailable<{ rate_limits?: Record<string, { utilization?: number | null } | null> }>(sdkResult, 'getUsage', (usage) => recordRateLimits(usage?.rate_limits));
+          // The model catalogue this CLI offers. ModelInfo carries no context
+          // window, so this cannot say what 165k SHOULD be. It does say
+          // whether a non-[1m] opus row exists. That separates "165k is this
+          // model's window" from "the [1m] variant is not being served".
+          callIfAvailable(sdkResult, 'supportedModels', (models) => {
+            const rows = (models as Array<{ value?: string; resolvedModel?: string }> | undefined) ?? [];
+            log(`models: ${rows.map((m) => m.value ?? '?').join(' ')}`);
+          });
           yield { type: 'init', continuation: message.session_id };
         } else if (message.type === 'assistant') {
           // Surface each assistant message's text as it streams in. The final
@@ -618,6 +760,13 @@ export class ClaudeProvider implements AgentProvider {
           // result reports. Blocks split across ASSISTANT MESSAGES (a tool
           // call between them) remain unparseable mid-turn by design; the
           // poll-loop's midTurnSent===0 fallback and wrap-nudge cover that.
+          // Window occupancy, refreshed per assistant message rather than per
+          // result. Messages are delivered mid-turn, before any result
+          // exists, so reading it only from the result would put a
+          // turn-old percentage in every footer.
+          recordContextUsage(
+            (message as { message?: { usage?: Parameters<typeof recordContextUsage>[0] } }).message?.usage,
+          );
           const content = (message as { message?: { content?: Array<{ type?: string; text?: string }> } }).message
             ?.content;
           if (Array.isArray(content)) {
@@ -651,6 +800,12 @@ export class ClaudeProvider implements AgentProvider {
           //   'out_of_credits'  → genuinely out of credits (billing)
           //   otherwise         → a transient window limit that resets.
           const info = (message as { rate_limit_info?: SdkRateLimitInfo }).rate_limit_info;
+          // Recorded for the message footer before any classification. These
+          // events fire only when a value CHANGES. An 'allowed' event is
+          // therefore the only place the current utilization is reported.
+          // Dropping it because the turn is healthy would leave the footer
+          // permanently blank.
+          recordUtilization(info?.rateLimitType, info?.utilization);
           const blocked = classifyRateLimitEvent(info);
           if (!blocked) {
             // Informational ('allowed' / 'allowed_warning') — never kill the turn.

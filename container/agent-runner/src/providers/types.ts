@@ -94,6 +94,12 @@ export interface ProviderOptions {
    */
   effort?: string;
   /**
+   * Absolute path to this provider's agent binary on the host, for a runner
+   * executing outside a container. Omitted inside one, where the image's own
+   * path is correct. Contributed by the provider's host-side registration.
+   */
+  executablePath?: string;
+  /**
    * API fast serving tier: faster output at a higher per-token price. Passed
    * through to the underlying SDK. If omitted, the SDK default is used.
    */

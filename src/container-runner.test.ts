@@ -20,7 +20,6 @@ import {
   parseMemoryMb,
   parsePidsLimit,
   resolveProviderName,
-  syncSkillSymlinks,
   toMountSpecs,
 } from './container-runner.js';
 import type { SupervisedHandle } from './drivers/session-events.js';
@@ -451,44 +450,5 @@ describe('armSessionLifecycle', () => {
     ).rejects.toThrow('image-unavailable');
 
     expect(order).toEqual(['onTerminal', 'start']);
-  });
-});
-
-describe('syncSkillSymlinks', () => {
-  function tmpClaudeDir(): string {
-    return fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-skills-'));
-  }
-
-  it('links every selected skill to its container path', () => {
-    const dir = tmpClaudeDir();
-    syncSkillSymlinks(dir, { ...containerConfig, skills: ['welcome'] } as ContainerConfig);
-
-    const link = path.join(dir, 'skills', 'welcome');
-    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
-    // Dangling on the host, valid inside the container.
-    expect(fs.readlinkSync(link)).toBe('/app/skills/welcome');
-  });
-
-  it('prunes symlinks that are no longer selected', () => {
-    const dir = tmpClaudeDir();
-    syncSkillSymlinks(dir, { ...containerConfig, skills: ['welcome', 'vercel-cli'] } as ContainerConfig);
-    syncSkillSymlinks(dir, { ...containerConfig, skills: ['welcome'] } as ContainerConfig);
-
-    expect(fs.existsSync(path.join(dir, 'skills', 'vercel-cli'))).toBe(false);
-  });
-
-  it('warns instead of silently skipping when a real entry blocks a desired skill', () => {
-    // Template overlays depend on surviving the prune (see src/group-skills.ts);
-    // a stale pre-refactor skill copy (#3001) otherwise gets served forever with
-    // no trace.
-    const dir = tmpClaudeDir();
-    fs.mkdirSync(path.join(dir, 'skills', 'welcome'), { recursive: true });
-
-    syncSkillSymlinks(dir, { ...containerConfig, skills: ['welcome'] } as ContainerConfig);
-
-    expect(log.warn).toHaveBeenCalledWith(
-      expect.stringContaining('Shared skill not symlinked'),
-      expect.objectContaining({ skill: 'welcome' }),
-    );
   });
 });

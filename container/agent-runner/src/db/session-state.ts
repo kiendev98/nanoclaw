@@ -60,6 +60,29 @@ export function migrateLegacyContinuation(providerName: string): string | undefi
   return legacy;
 }
 
+/**
+ * Footer telemetry, as one JSON blob.
+ *
+ * Persisted because the numbers arrive far more rarely than they are read.
+ * `contextWindow` is reported once per turn on the result, and a
+ * `rate_limit_event` fires ONLY when a utilization changes, which can be many
+ * turns apart. Sessions are swept whenever they go idle. In-memory state would
+ * therefore start blank on every wake. The footer would show a bare model name
+ * until the SDK happened to mention those numbers again.
+ *
+ * Kept as an opaque string here so this module stays a key/value store and
+ * the shape belongs to `telemetry/persistence.ts`.
+ */
+const FOOTER_TELEMETRY_KEY = 'footer_telemetry';
+
+export function getFooterTelemetry(): string | undefined {
+  return getValue(FOOTER_TELEMETRY_KEY);
+}
+
+export function setFooterTelemetry(json: string): void {
+  setValue(FOOTER_TELEMETRY_KEY, json);
+}
+
 export function getContinuation(providerName: string): string | undefined {
   return getValue(continuationKey(providerName));
 }

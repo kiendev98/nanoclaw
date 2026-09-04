@@ -73,6 +73,7 @@ For ad-hoc central queries from skills or scripts, use the in-tree wrapper rathe
 | `src/command-gate.ts` | Router-side admin command gate — queries `user_roles` directly (no env var, no container-side check) |
 | `src/modules/approvals/onecli-approvals.ts` | OneCLI credentialed-action approval bridge |
 | `src/modules/permissions/user-dm.ts` | Cold-DM resolution + `user_dms` cache |
+| `src/skill-delivery.ts` | How a group's selected skills reach an agent — `.claude-shared` symlinks for a container, a staged plugin directory for a host process. Both routes side by side |
 | `src/group-init.ts` | Per-agent-group filesystem scaffold (CLAUDE.md, skills) — agent-runner source is a shared read-only mount, not copied per group |
 | `src/db/container-configs.ts` | CRUD for `container_configs` table (per-group container runtime config) |
 | `src/backfill-container-configs.ts` | Migrates legacy `container.json` files into the DB on startup |
@@ -283,6 +284,7 @@ This project uses pnpm with `minimumReleaseAge: 4320` (3 days) in `pnpm-workspac
 
 | Doc | Purpose |
 |-----|---------|
+| [docs/workspace.md](docs/workspace.md) | The one configured root (`NANOCLAW_WORKSPACE_DIR`), why it sits outside every repository, and how to move an existing install |
 | [docs/architecture.md](docs/architecture.md) | Full architecture writeup |
 | [docs/api-details.md](docs/api-details.md) | Host API + DB schema details |
 | [docs/db.md](docs/db.md) | DB architecture overview: three-DB model, cross-mount rules, readers/writers map |

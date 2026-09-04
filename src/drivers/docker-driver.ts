@@ -88,6 +88,8 @@ export class DockerSessionDriver implements SessionDriver {
       networkPolicy: 'topology',
       encryptedVolumes: false,
       unrealized: [],
+      // `--mount ...,readonly` is enforced by the kernel, not by convention.
+      readonlyMounts: true,
       sharedNetworkNamespace: false,
       // Realizes the agent container only, and REFUSES specs carrying more —
       // see the role check in `prepare`. Flips only when this driver actually

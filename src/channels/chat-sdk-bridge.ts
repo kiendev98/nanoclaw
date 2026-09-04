@@ -21,6 +21,7 @@ import {
   type Message as ChatMessage,
 } from 'chat';
 import { log } from '../log.js';
+import { appendFooter, readFooter } from './message-footer.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
@@ -417,6 +418,42 @@ function terminalApprovalMessage(spec: TerminalApprovalCard) {
   return {
     card: buildTerminalApprovalCard(spec),
     fallbackText: [spec.title, spec.question, spec.resolution].filter(Boolean).join('\n\n'),
+  };
+}
+
+/**
+ * Slack caps a section block at 3000 characters. A body longer than this
+ * cannot become one section, so it takes the markdown path and the footer is
+ * appended instead of styled. Held below the cap to leave room for the
+ * mrkdwn escaping the converter adds.
+ *
+ * It is a ceiling, not the whole gate: `buildFooterCard` also honours the
+ * adapter's own `maxTextLength`, whichever is lower.
+ */
+const CARD_SECTION_LIMIT = 2800;
+
+/**
+ * The body and its footer as one card, or null when the card route does not
+ * apply. A card is what lets a channel style the footer as muted; a body over
+ * the section cap, or one carrying files, takes the markdown path instead.
+ */
+export function buildFooterCard(
+  text: string,
+  footerText: string,
+  hasFiles: boolean,
+  maxTextLength?: number,
+): Parameters<Adapter['postMessage']>[1] | null {
+  // The lower of the two caps. The card path posts ONE message and cannot
+  // split, so a body this adapter would have had to chunk must take the
+  // markdown path instead — on a bridge whose own limit is under the Slack
+  // section cap (Discord is 2000), gating on the section cap alone sent a
+  // 2500-character reply through the card path unsplit, over that adapter's
+  // limit, where before the footer existed it was chunked.
+  const cap = Math.min(CARD_SECTION_LIMIT, maxTextLength ?? Number.POSITIVE_INFINITY);
+  if (!text || !footerText || hasFiles || text.length > cap) return null;
+  return {
+    card: Card({ title: '', children: [CardText(text), CardText(footerText, { style: 'muted' })] }),
+    fallbackText: appendFooter(text, footerText),
   };
 }
 
@@ -927,7 +964,17 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // Normal message
       const rawText = (content.markdown as string) || (content.text as string);
       const text = rawText ? transformText(rawText) : rawText;
-      if (text) {
+
+      // Its own field so a channel can style it. See `buildFooterCard`.
+      const footerText = readFooter(content);
+      const hasFiles = Boolean(message.files && message.files.length > 0);
+      const footerCard = buildFooterCard(text, footerText, hasFiles, config.maxTextLength);
+      if (footerCard) {
+        const result = await adapter.postMessage(tid, footerCard);
+        return result?.id;
+      }
+      const withFooterText = appendFooter(text, footerText);
+      if (withFooterText) {
         // Attach files if present (FileUpload format: { data, filename })
         const fileUploads = message.files?.map((f: { data: Buffer; filename: string }) => ({
           data: f.data,
@@ -936,9 +983,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         // Split if over the adapter's max length. Files ride on the first
         // chunk so the head of the reply still carries them.
         const chunks =
-          config.maxTextLength && text.length > config.maxTextLength
-            ? splitForLimit(text, config.maxTextLength)
-            : [text];
+          config.maxTextLength && withFooterText.length > config.maxTextLength
+            ? splitForLimit(withFooterText, config.maxTextLength)
+            : [withFooterText];
         let firstId: string | undefined;
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i];

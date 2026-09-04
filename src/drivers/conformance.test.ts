@@ -295,6 +295,7 @@ describe('conformance: the isolation-tier rule (validateSpec is the shared layer
     networkPolicy: 'topology',
     encryptedVolumes: false,
     unrealized: [],
+    readonlyMounts: true,
     sharedNetworkNamespace: false,
     auxiliaryContainers: false,
     imageBuild: true,
@@ -732,6 +733,7 @@ describe('conformance: capabilities are honest', () => {
     expect(capabilities.admissionEnforced).toBe(false);
     expect(capabilities.networkPolicy).toBe('topology');
     expect(capabilities.sharedNetworkNamespace).toBe(false);
+    expect(capabilities.readonlyMounts).toBe(true);
     // Realizes the agent container only — and refuses, never drops, the rest.
     expect(capabilities.auxiliaryContainers).toBe(false);
     // The session daemon doubles as the build daemon: rebuild-in-place works.

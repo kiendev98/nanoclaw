@@ -45,6 +45,7 @@ import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 
 import { DockerSessionDriver, agentContainerName } from './docker-driver.js';
+import { LocalSessionDriver } from './local-driver.js';
 import {
   getSessionDriverFactory,
   listSessionDriverKinds,
@@ -58,7 +59,12 @@ import './installed.js';
 import { withSessionEvents, type SessionEventsDriver } from './session-events.js';
 import type { MountPolicy, SessionDriver, SessionSpec } from './types.js';
 
-const DEFAULT_DRIVER_KIND = 'docker';
+/**
+ * This fork runs the agent on the host, so 'local' is the default where
+ * upstream's is 'docker'. Docker stays registered — set
+ * NANOCLAW_RUNTIME_DRIVER=docker to get it back.
+ */
+const DEFAULT_DRIVER_KIND = 'local';
 
 const SETTINGS = ['NANOCLAW_RUNTIME_DRIVER', 'NANOCLAW_SESSION_MATERIAL_ROOT'] as const;
 
@@ -83,9 +89,26 @@ function dockerNetworkArgs(spec: SessionSpec): string[] {
   return os.platform() === 'linux' ? ['--add-host=host.docker.internal:host-gateway'] : [];
 }
 
+registerSessionDriver('docker', (policy) => new DockerSessionDriver({ ...policy, networkArgsFor: dockerNetworkArgs }));
+
+/**
+ * The local driver, and this fork's default.
+ *
+ * Docker stays registered rather than deleted. It is unused here, but keeping
+ * it costs one line and preserves the ability to merge upstream. Removing a
+ * 724-line driver, its tests and its conformance suite would turn every later
+ * `git pull upstream` into a conflict. That buys no behaviour this fork wants.
+ *
+ * The runner entry is the real path in this checkout, not a container path.
+ * There is no image, and `/app/src` exists only as a mount target inside one.
+ */
 registerSessionDriver(
-  DEFAULT_DRIVER_KIND,
-  (policy) => new DockerSessionDriver({ ...policy, networkArgsFor: dockerNetworkArgs }),
+  'local',
+  (policy) =>
+    new LocalSessionDriver({
+      policy,
+      runnerEntry: path.join(process.cwd(), 'container', 'agent-runner', 'src', 'index.ts'),
+    }),
 );
 
 export function configuredDriverKind(env: NodeJS.ProcessEnv = process.env): DriverKind {

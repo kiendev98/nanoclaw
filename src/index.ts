@@ -10,6 +10,7 @@ import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js
 import { adoptRunningSessions } from './container-runner.js';
 import { closeDb, initDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
+import { assertWorkspaceMigrated } from './workspace.js';
 import { getSessionDriver } from './drivers/index.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
 import { startHostInstanceLease, stopHostInstanceLease } from './host-instance.js';
@@ -69,6 +70,10 @@ async function main(): Promise<void> {
   // 0.5 Upgrade tripwire — refuse to start if this install was updated
   // outside the sanctioned path (raw `git pull` instead of /update-nanoclaw).
   enforceUpgradeTripwire();
+
+  // 0.6 Refuse an empty workspace beside a populated checkout, rather than
+  // creating a fresh database and reporting healthy.
+  assertWorkspaceMigrated();
 
   // 1. Init central DB
   const db = await initDb(CENTRAL_DB_PATH, { role: 'host' });

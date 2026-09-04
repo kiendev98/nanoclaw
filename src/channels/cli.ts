@@ -50,6 +50,7 @@ import type {
   OutboundMessage,
 } from './adapter.js';
 import { INSTANCE_KEY_RE, registerChannelAdapter } from './channel-registry.js';
+import { appendFooter, readFooter } from './message-footer.js';
 
 const PLATFORM_ID = 'local';
 
@@ -302,7 +303,9 @@ function extractText(message: OutboundMessage): string | null {
   const content = message.content as Record<string, unknown> | string | undefined;
   if (typeof content === 'string') return content;
   if (content && typeof content === 'object' && typeof content.text === 'string') {
-    return content.text;
+    // The CLI has no styling affordance, so the footer is appended. See
+    // `message-footer.ts` for what a channel that can style it does instead.
+    return appendFooter(content.text, readFooter(content));
   }
   return null;
 }

@@ -1,0 +1,685 @@
+/**
+ * Local driver — runs the agent as a host process instead of a container.
+ *
+ * This driver provides NO isolation. The permission boundary is the user
+ * account the host runs as. It exists because credentials, the account pool
+ * and the VPN all work only on the host.
+ *
+ * See `docs/local-driver.md` for what it trades away and why.
+ */
+import { spawn, type ChildProcess } from 'child_process';
+import fs from 'fs';
+import path from 'path';
+
+import { log } from '../log.js';
+
+import {
+  LABELS,
+  asFailureError,
+  labelsForKey,
+  specInvalid,
+  validateSpec,
+  type DriverCapabilities,
+  type MountPolicy,
+  type SessionDriver,
+  type SessionEvent,
+  type SessionExecSpec,
+  type SessionHandle,
+  type SessionKey,
+  type SessionSnapshot,
+  type SessionSpec,
+  type SessionStatus,
+  type SessionWatch,
+} from './types.js';
+
+/**
+ * Environment variables that override the credential the local `claude` would
+ * otherwise resolve for itself. Scrubbed from every spawn.
+ *
+ * A stale one silently outranks the account switcher. See
+ * `docs/local-driver.md`.
+ */
+const AUTH_OVERRIDE_ENV_VARS = [
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
+  'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
+] as const;
+
+/**
+ * Claude Code's own session environment, scrubbed before the agent starts.
+ *
+ * Left in, the agent believes it is a CHILD of the launching session.
+ * `CLAUDE_CONFIG_DIR` is deliberately NOT here. See `docs/local-driver.md`.
+ */
+const CLAUDE_SESSION_ENV_VARS = [
+  'CLAUDECODE',
+  'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_CHILD_SESSION',
+  'CLAUDE_CODE_BRIDGE_SESSION_ID',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_CODE_AGENT',
+  'CLAUDE_CODE_EXECPATH',
+  'CLAUDE_CODE_MESSAGING_SOCKET',
+  'CLAUDE_CODE_MESSAGING_TOKEN',
+  'CLAUDE_EFFORT',
+  'CLAUDE_PID',
+  'CLAUDE_JOB_DIR',
+] as const;
+
+/**
+ * Remove every inherited Claude identity from an agent's environment.
+ *
+ * Exported so the two lists can be asserted without spawning a process. The
+ * failure both prevent is silent: the agent starts, answers, and is simply
+ * wrong about which account it is or whose session it belongs to.
+ */
+export function stripInheritedClaudeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  for (const key of AUTH_OVERRIDE_ENV_VARS) delete env[key];
+  for (const key of CLAUDE_SESSION_ENV_VARS) delete env[key];
+  return env;
+}
+
+/**
+ * Environment the host owns, which a composed spec may never override.
+ *
+ * `HOME` is the one that matters. A spec-supplied HOME breaks a mkdir, and
+ * detaches the agent from the user's harness and credentials. See
+ * `docs/local-driver.md`.
+ */
+const HOST_OWNED_ENV = ['HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR'] as const;
+
+/** Container paths this driver understands, mapped to the runner's root variables. */
+const ROOT_ENV_BY_CONTAINER_PATH: Record<string, string> = {
+  '/workspace': 'NANOCLAW_SESSION_DIR',
+  '/workspace/agent': 'NANOCLAW_AGENT_DIR',
+  '/app/.nanoclaw-session.json': 'NANOCLAW_SESSION_CONTEXT_PATH',
+};
+
+const EXTRA_PREFIX = '/workspace/extra/';
+const AGENT_ROLE = 'agent';
+const POLL_INTERVAL_MS = 2_000;
+
+interface SessionRecord {
+  name: string;
+  pid: number;
+  /** The agent's working directory. Absent on a record an older build wrote. */
+  cwd?: string;
+  key: SessionKey;
+  labels: Record<string, string>;
+  startedAt: string;
+}
+
+/** Is this pid still ours and alive? Signal 0 tests without delivering. */
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The name a realized session carries, and the stem of its record file.
+ *
+ * `saber` rather than `nanoclaw`: this driver is the fork's, so a host running
+ * both keeps the two sets of records and processes apart on sight.
+ */
+function sessionName(key: SessionKey): string {
+  return `saber-local-${key.agentGroupId}-${key.sessionId}`;
+}
+
+export interface LocalDriverOptions {
+  policy: MountPolicy;
+  /** Absolute path to the agent runner's entry module. */
+  runnerEntry: string;
+  /** Interpreter for the runner. Bun, because the runner imports `bun:sqlite`. */
+  runtimeBin?: string;
+}
+
+export class LocalSessionDriver implements SessionDriver {
+  readonly kind = 'local';
+
+  readonly #policy: MountPolicy;
+  readonly #runnerEntry: string;
+  readonly #runtimeBin: string;
+  readonly #records = new Map<string, SessionRecord>();
+  readonly #children = new Map<string, ChildProcess>();
+  readonly #exits = new Map<string, number | null>();
+  #watchTimer: NodeJS.Timeout | undefined;
+  #listeners = new Set<(event: SessionEvent) => void>();
+  /** Latched so the preflight below reports once, not once per respawn. */
+  #runnerDepsReported = false;
+  /** Latched for the same reason. See `#reportMissingProviderExecutable`. */
+  #providerExecutableReported = false;
+
+  constructor(options: LocalDriverOptions) {
+    this.#policy = options.policy;
+    this.#runnerEntry = options.runnerEntry;
+    this.#runtimeBin = options.runtimeBin ?? 'bun';
+  }
+
+  capabilities(): DriverCapabilities {
+    return {
+      // The host composes runtimeTier 'container' for every spec. Accepting it
+      // is not a claim to containment — see the file header. The seam has no
+      // 'process' tier to name, and refusing every spec would be a worse lie
+      // than accepting one and reporting the reductions below.
+      isolationTiers: ['container'],
+      admissionEnforced: false,
+      // Nothing is enforced. 'declarative' is the closer of the two
+      // available values. There is no topology to inspect, because there is
+      // one network namespace and it is the host's.
+      networkPolicy: 'declarative',
+      encryptedVolumes: false,
+      // A host process has no per-session cgroup, so every resource cap in the
+      // spec is unrealizable. Naming them is what stops a feature from gating
+      // on driver identity instead of on capability.
+      unrealized: ['memoryMb', 'cpus', 'pidsLimit', 'shmSizeMb'],
+      // A mount here is the host directory itself, so `ro` states intent and
+      // nothing enforces it. Named rather than implied: composition marks the
+      // group's `plugins` tree and `container.json` read-only precisely
+      // because the agent executes what they hold, and a consumer that gates
+      // on capability could not otherwise discover the loss.
+      readonlyMounts: false,
+      sharedNetworkNamespace: true,
+      auxiliaryContainers: false,
+      imageBuild: false,
+    };
+  }
+
+  async ensureReady(): Promise<void> {
+    if (!fs.existsSync(this.#runnerEntry)) {
+      throw asFailureError({
+        kind: 'spec-invalid',
+        retryable: false,
+        detail: `agent runner entry not found: ${this.#runnerEntry}`,
+      });
+    }
+    log.warn(
+      'Local driver active — the agent runs as a host process with no isolation, on this account and this network',
+      { kind: this.kind },
+    );
+  }
+
+  async prepare(spec: SessionSpec): Promise<SessionHandle> {
+    validateSpec(spec, this.#policy, this.capabilities());
+
+    const agents = spec.containers.filter((c) => c.role === AGENT_ROLE);
+    if (spec.containers.length !== 1 || agents.length !== 1) {
+      // capabilities().auxiliaryContainers is false, so composition already
+      // gates this. Refusing here too is the backstop the seam asks for:
+      // silently dropping a composed container is semantic loss, not a
+      // degradation.
+      throw specInvalid(`local driver realizes exactly one 'agent' container, got ${spec.containers.length}`);
+    }
+
+    const container = agents[0]!;
+    const name = sessionName(spec.key);
+
+    // Idempotency on key, which `SessionDriver.prepare` requires and the
+    // Docker driver implements: an existing live child for this key IS the
+    // session. Re-realizing one spawned a second runner against the same
+    // mailbox databases, overwrote the first child so it could never be
+    // stopped through the driver, and rmSync'd the live session's extra/ tree.
+    const live = this.#children.get(name);
+    if (live?.pid && isAlive(live.pid)) {
+      return new LocalSessionHandle({
+        key: spec.key,
+        name,
+        driver: this,
+        // Already running: hand back the child rather than starting a second.
+        spawn: () => live,
+        stopGraceSeconds: spec.stopGraceSeconds,
+        adoptedPid: live.pid,
+      });
+    }
+
+    // A fresh realization of this key starts a new lifecycle, so no earlier
+    // run's exit code may answer for it. Cleared here as well as at spawn so
+    // a prepared-but-unstarted handle reports 'ready' rather than 'failed'.
+    this.#exits.delete(name);
+
+    const rootEnv = this.#deriveRootEnv(spec, container.mounts);
+
+    const record: SessionRecord = {
+      name,
+      pid: 0,
+      cwd: rootEnv.NANOCLAW_AGENT_DIR,
+      key: spec.key,
+      labels: { ...labelsForKey(spec.key, AGENT_ROLE, spec.labels), ...(container.labels ?? {}) },
+      startedAt: '',
+    };
+    this.#records.set(name, record);
+
+    return new LocalSessionHandle({
+      key: spec.key,
+      name,
+      driver: this,
+      spawn: () => this.#spawnRunner(name, spec, container.env, container.contributedEnv, rootEnv),
+      stopGraceSeconds: spec.stopGraceSeconds,
+    });
+  }
+
+  /**
+   * Translate the composed mounts into the runner's root variables.
+   *
+   * Every mount is addressed by its containerPath, because that is the
+   * contract the runner reads. An unrecognised mount is not an error, and
+   * unknown paths are dropped silently. See `docs/local-driver.md`.
+   */
+  #deriveRootEnv(spec: SessionSpec, mounts: SessionSpec['containers'][number]['mounts']): Record<string, string> {
+    const env: Record<string, string> = {};
+    const extras: Array<{ name: string; hostPath: string }> = [];
+
+    for (const mount of mounts) {
+      const variable = ROOT_ENV_BY_CONTAINER_PATH[mount.containerPath];
+      if (variable) {
+        env[variable] = mount.hostPath;
+        continue;
+      }
+      if (mount.containerPath.startsWith(EXTRA_PREFIX)) {
+        extras.push({ name: mount.containerPath.slice(EXTRA_PREFIX.length), hostPath: mount.hostPath });
+        continue;
+      }
+      // Nested read-only views over the group directory need no action.
+      // On the host, container.json and CLAUDE.md already sit at those paths
+      // inside the group directory. The read-only part is the reduction this
+      // driver reports rather than fakes.
+    }
+
+    if (!env.NANOCLAW_AGENT_DIR) {
+      throw specInvalid('no mount at /workspace/agent — the runner has no working directory');
+    }
+    if (!env.NANOCLAW_SESSION_DIR) {
+      throw specInvalid('no mount at /workspace — the runner has no mailbox');
+    }
+
+    env.NANOCLAW_EXTRA_DIR = this.#realizeExtras(spec.key, extras);
+    return env;
+  }
+
+  /**
+   * Build the one directory of symlinks this driver does plant.
+   *
+   * `/workspace/extra` entries are leaves — a whole repository per entry, with
+   * nothing else mounted inside it — so a link is exact. Rebuilt per prepare so
+   * a removed mount disappears rather than lingering from a previous session.
+   */
+  #realizeExtras(key: SessionKey, extras: Array<{ name: string; hostPath: string }>): string {
+    const dir = path.join(this.#sessionStateDir(key.installSlug), `${key.agentGroupId}__${key.sessionId}`, 'extra');
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.mkdirSync(dir, { recursive: true });
+    for (const extra of extras) {
+      fs.symlinkSync(extra.hostPath, path.join(dir, extra.name));
+    }
+    return dir;
+  }
+
+  /**
+   * Remove the symlink directory `#realizeExtras` planted for this session.
+   *
+   * `prepare` rebuilds it, so a respawn is unaffected. Without this the tree
+   * grew one directory per session for the life of the install.
+   */
+  #removeExtras(key: SessionKey): void {
+    const dir = path.join(this.#sessionStateDir(key.installSlug), `${key.agentGroupId}__${key.sessionId}`);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  #sessionStateDir(installSlug: string): string {
+    return path.join(this.#policy.dataRoot, 'local-sessions', installSlug);
+  }
+
+  /**
+   * Say once, loudly, that the runner has no dependencies installed.
+   *
+   * Nothing installs `container/agent-runner` under this driver. Without a
+   * warning, every spawn dies on a missing module and the host respawns every
+   * 2 seconds forever. Latched rather than thrown. See `docs/local-driver.md`.
+   */
+  #reportMissingRunnerDeps(name: string): void {
+    if (this.#runnerDepsReported) return;
+    const runnerRoot = path.resolve(path.dirname(this.#runnerEntry), '..');
+    const sdk = path.join(runnerRoot, 'node_modules', '@anthropic-ai', 'claude-agent-sdk');
+    if (fs.existsSync(sdk)) {
+      this.#runnerDepsReported = true;
+      return;
+    }
+    this.#runnerDepsReported = true;
+    log.error(
+      'Agent runner has no dependencies installed — every session will fail instantly and respawn in a loop. ' +
+        `Fix with: (cd ${runnerRoot} && bun install --frozen-lockfile)`,
+      { name, runnerRoot },
+    );
+  }
+
+  /**
+   * Say once that no `claude` was found on this host's PATH.
+   *
+   * The provider contributes the path and cannot know whether it matters: under
+   * Docker the image has its own binary, so warning from there fired on every
+   * spawn of a session that was never going to use the value. Here the answer
+   * is both known and relevant. Latched, like the runner-deps check above.
+   */
+  #reportMissingProviderExecutable(name: string, env: Record<string, string>): void {
+    if (this.#providerExecutableReported) return;
+    this.#providerExecutableReported = true;
+    if (env.NANOCLAW_PROVIDER_EXECUTABLE) return;
+    log.warn('No `claude` on this PATH — the runner will fall back to the container default path, which no host has', {
+      name,
+    });
+  }
+
+  #spawnRunner(
+    name: string,
+    spec: SessionSpec,
+    containerEnv: Record<string, string>,
+    contributedEnv: Record<string, string> | undefined,
+    rootEnv: Record<string, string>,
+  ): ChildProcess {
+    const hostEnv: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined) hostEnv[k] = v;
+    }
+
+    // Scrub what this process INHERITED, before the composed lanes land.
+    // Scrubbing the merged environment instead deleted a value the spec
+    // deliberately contributed: `types.ts` names a provider registering
+    // `ANTHROPIC_AUTH_TOKEN=placeholder` as the sanctioned pattern, and
+    // `providers/claude.ts` registers exactly that whenever a custom
+    // ANTHROPIC_BASE_URL is set. Deleting it left the base URL with no
+    // Authorization header for the OneCLI proxy to rewrite, so every turn
+    // failed auth. Docker does not scrub the composed lanes either.
+    stripInheritedClaudeEnv(hostEnv);
+
+    const env = { ...hostEnv };
+    // Composed env first, then the contributed lane, matching the seam's
+    // stated collision order.
+    Object.assign(env, containerEnv, contributedEnv ?? {}, rootEnv);
+
+    // Then take the host's own back, unconditionally. These describe this
+    // machine, and a spec composed for a container cannot know them.
+    for (const key of HOST_OWNED_ENV) {
+      if (hostEnv[key] !== undefined) env[key] = hostEnv[key];
+      else delete env[key];
+    }
+
+    this.#reportMissingRunnerDeps(name);
+    this.#reportMissingProviderExecutable(name, env);
+
+    // A previous run under this name must not decide this one's status.
+    // `sessionName` is deterministic, so a woken session reuses the key, and
+    // `status()` reads this map before any liveness check — a single non-zero
+    // exit otherwise reported 'failed' for every later spawn of that session
+    // for the life of the host process.
+    this.#exits.delete(name);
+
+    const child = spawn(this.#runtimeBin, ['run', this.#runnerEntry], {
+      cwd: this.#records.get(name)?.cwd,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+    });
+
+    // A spawn failure arrives as an event, not a throw. With no listener Node
+    // re-raises it as an uncaught exception, and `log.ts` answers that with
+    // process.exit(1) — so a missing runtime binary, or a group directory that
+    // does not exist, took the whole HOST down instead of failing one session.
+    child.once('error', (error: Error) => {
+      log.error('Local session failed to spawn', { name, runtime: this.#runtimeBin, error: error.message });
+      this.#children.delete(name);
+      this.#records.delete(name);
+      this.#removeRecord(spec.key.installSlug, name);
+      this.#emit({ key: spec.key, kind: 'terminal' });
+    });
+
+    child.stdout?.on('data', (chunk: Buffer) => log.info(`[${name}] ${chunk.toString().trimEnd()}`));
+    child.stderr?.on('data', (chunk: Buffer) => log.info(`[${name}] ${chunk.toString().trimEnd()}`));
+
+    child.once('exit', (code) => {
+      this.#exits.set(name, code);
+      this.#children.delete(name);
+      // Drop the on-disk record too, which only `stop()` used to do. A runner
+      // that exits on its own is the normal end of a session, and its record
+      // kept `listSessions` returning a 'terminal' snapshot forever — so the
+      // 2s poll re-emitted a terminal event for the dead key on every tick,
+      // each one costing the events hub a status() read.
+      this.#records.delete(name);
+      this.#removeRecord(spec.key.installSlug, name);
+      this.#removeExtras(spec.key);
+      this.#emit({ key: spec.key, kind: 'terminal' });
+    });
+
+    this.#children.set(name, child);
+    const record = this.#records.get(name);
+    if (record) {
+      record.pid = child.pid ?? 0;
+      record.startedAt = new Date().toISOString();
+      this.#writeRecord(spec.key.installSlug, record);
+    }
+    return child;
+  }
+
+  #writeRecord(installSlug: string, record: SessionRecord): void {
+    const dir = this.#sessionStateDir(installSlug);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${record.name}.json`), JSON.stringify(record, null, 2));
+  }
+
+  #removeRecord(installSlug: string, name: string): void {
+    fs.rmSync(path.join(this.#sessionStateDir(installSlug), `${name}.json`), { force: true });
+  }
+
+  /** @internal — used by the handle. */
+  _child(name: string): ChildProcess | undefined {
+    return this.#children.get(name);
+  }
+
+  /** @internal — used by the handle. */
+  _exitCode(name: string): number | null | undefined {
+    return this.#exits.get(name);
+  }
+
+  /** @internal — used by the handle. */
+  _record(name: string): SessionRecord | undefined {
+    return this.#records.get(name);
+  }
+
+  /** @internal — used by the handle. */
+  _forget(installSlug: string, name: string): void {
+    this.#children.delete(name);
+    this.#records.delete(name);
+    this.#exits.delete(name);
+    this.#removeRecord(installSlug, name);
+  }
+
+  /** @internal — used by the handle. */
+  _emitTerminal(key: SessionKey): void {
+    this.#emit({ key, kind: 'terminal' });
+  }
+
+  async listSessions(installSlug: string): Promise<SessionSnapshot[]> {
+    const dir = this.#sessionStateDir(installSlug);
+    if (!fs.existsSync(dir)) return [];
+
+    const snapshots: SessionSnapshot[] = [];
+    for (const entry of fs.readdirSync(dir)) {
+      if (!entry.endsWith('.json')) continue;
+      let record: SessionRecord;
+      try {
+        record = JSON.parse(fs.readFileSync(path.join(dir, entry), 'utf-8')) as SessionRecord;
+      } catch {
+        // A truncated record is residue, not a session. reapResidue clears it.
+        continue;
+      }
+      const alive = record.pid > 0 && isAlive(record.pid);
+      // A record whose pid is gone is a corpse, and the seam is explicit that
+      // a self-exited runtime must never be dressed up as live.
+      snapshots.push({ handle: this.#adopt(record), phase: alive ? 'running' : 'terminal' });
+    }
+    return snapshots;
+  }
+
+  #adopt(record: SessionRecord): SessionHandle {
+    return new LocalSessionHandle({
+      key: record.key,
+      name: record.name,
+      driver: this,
+      spawn: () => {
+        throw specInvalid('an adopted local session cannot be started again — it has no spec');
+      },
+      stopGraceSeconds: 10,
+      adoptedPid: record.pid,
+    });
+  }
+
+  watchSessions(installSlug: string, onEvent: (event: SessionEvent) => void): SessionWatch {
+    this.#listeners.add(onEvent);
+
+    // One subscription per driver, never one per session. A host process
+    // reports its own exit synchronously through the child handle. The poll
+    // exists only for records this process did not spawn, such as a host
+    // restarted under an adopted session. A slow interval is therefore correct.
+    this.#watchTimer ??= setInterval(() => {
+      void this.listSessions(installSlug)
+        .then((snapshots) => {
+          for (const snapshot of snapshots) {
+            if (snapshot.phase === 'terminal') this.#emit({ key: snapshot.handle.key, kind: 'terminal' });
+          }
+        })
+        .catch((error: unknown) => log.warn('Local session poll failed', { error: String(error) }));
+    }, POLL_INTERVAL_MS);
+    this.#watchTimer.unref?.();
+
+    return {
+      stop: () => {
+        this.#listeners.delete(onEvent);
+        if (this.#listeners.size === 0 && this.#watchTimer) {
+          clearInterval(this.#watchTimer);
+          this.#watchTimer = undefined;
+        }
+      },
+    };
+  }
+
+  #emit(event: SessionEvent): void {
+    for (const listener of this.#listeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        log.warn('Local session event listener threw', { error: String(error) });
+      }
+    }
+  }
+
+  async reapResidue(installSlug: string): Promise<void> {
+    const dir = this.#sessionStateDir(installSlug);
+    if (!fs.existsSync(dir)) return;
+    for (const entry of fs.readdirSync(dir)) {
+      if (!entry.endsWith('.json')) continue;
+      const file = path.join(dir, entry);
+      try {
+        const record = JSON.parse(fs.readFileSync(file, 'utf-8')) as SessionRecord;
+        if (record.pid > 0 && isAlive(record.pid)) continue;
+      } catch {
+        // fall through — an unparseable record is residue by definition
+      }
+      fs.rmSync(file, { force: true });
+    }
+  }
+}
+
+interface HandleOptions {
+  key: SessionKey;
+  name: string;
+  driver: LocalSessionDriver;
+  spawn: () => ChildProcess;
+  stopGraceSeconds: number;
+  adoptedPid?: number;
+}
+
+class LocalSessionHandle implements SessionHandle {
+  readonly key: SessionKey;
+  readonly name: string;
+
+  readonly #driver: LocalSessionDriver;
+  readonly #spawn: () => ChildProcess;
+  readonly #stopGraceSeconds: number;
+  readonly #adoptedPid: number | undefined;
+  #started = false;
+
+  constructor(options: HandleOptions) {
+    this.key = options.key;
+    this.name = options.name;
+    this.#driver = options.driver;
+    this.#spawn = options.spawn;
+    this.#stopGraceSeconds = options.stopGraceSeconds;
+    this.#adoptedPid = options.adoptedPid;
+  }
+
+  async start(): Promise<void> {
+    if (this.#started) return;
+    this.#started = true;
+    const child = this.#spawn();
+    if (!child.pid) {
+      throw asFailureError({ kind: 'runtime-unavailable', retryable: true });
+    }
+  }
+
+  async status(): Promise<SessionStatus> {
+    const exitCode = this.#driver._exitCode(this.name);
+    if (exitCode !== undefined && exitCode !== null && exitCode !== 0) {
+      return { phase: 'failed', failure: { kind: 'started-then-died', retryable: false, exitCode } };
+    }
+    if (exitCode === 0) return { phase: 'stopped' };
+
+    const child = this.#driver._child(this.name);
+    if (child?.pid && isAlive(child.pid)) return { phase: 'running' };
+    if (this.#adoptedPid && isAlive(this.#adoptedPid)) return { phase: 'running' };
+    if (!this.#started && !this.#adoptedPid) return { phase: 'ready' };
+    return { phase: 'stopped' };
+  }
+
+  async stop(reason: string): Promise<void> {
+    const pid = this.#driver._child(this.name)?.pid ?? this.#adoptedPid;
+    log.info('Stopping local session', { name: this.name, reason, pid });
+
+    if (pid && isAlive(pid)) {
+      try {
+        process.kill(pid, 'SIGTERM');
+      } catch {
+        // already gone between the liveness check and the signal
+      }
+      const deadline = Date.now() + this.#stopGraceSeconds * 1000;
+      while (isAlive(pid) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      if (isAlive(pid)) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // raced with its own exit
+        }
+      }
+    }
+
+    this.#driver._forget(this.key.installSlug, this.name);
+    this.#driver._emitTerminal(this.key);
+  }
+
+  execSpec(command: string[]): SessionExecSpec {
+    // Pure description, never performed here — the terminal belongs to the
+    // caller's stdio. There is no container to enter, so an attach is the
+    // command itself, run in the agent's working directory.
+    const record = this.#driver._record(this.name);
+    const cwd = record?.cwd || process.cwd();
+    const args = ['-c', 'cd "$0" && exec "$@"', cwd, ...command];
+    return { bin: '/bin/sh', argsTty: args, argsPlain: args };
+  }
+}
+
+/** Every label key a realized local session carries, for adoption. */
+export const LOCAL_SESSION_LABELS = LABELS;
