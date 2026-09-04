@@ -23,7 +23,18 @@ import {
 // Side-effect import: the barrel overlays append their registration to.
 import './installed.js';
 
-const DEFAULT_GATEWAY_PROVIDER_KIND = 'onecli';
+/**
+ * This fork defaults to `direct` where upstream defaults to `onecli`, because
+ * it runs the agent on the host under the `local` driver: the agent
+ * authenticates as the user through the local `claude`, so there is no
+ * credential for a broker to inject. Keeping `onecli` as the default made
+ * every spawn depend on a network call that can only fail here — and it is
+ * fail-closed, so a 401 aborted the spawn before the driver ran at all.
+ *
+ * `onecli` is still registered. Set NANOCLAW_GATEWAY_PROVIDER=onecli to use it,
+ * which is what an isolating driver needs.
+ */
+const DEFAULT_GATEWAY_PROVIDER_KIND = 'direct';
 
 export function configuredGatewayProviderKind(env: NodeJS.ProcessEnv = process.env): GatewayProviderKind {
   const configured =
