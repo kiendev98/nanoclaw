@@ -9,13 +9,22 @@
  * Measured: 9 of 25 threads that mention the agent tag it mid-thread, with up
  * to 12 messages already posted.
  *
- * Be precise about the reach, because two conditions narrow it sharply and
- * both are deliberate. Seeding runs only on an 'accumulate' wiring, and
- * 'drop' is the schema default — so a fresh install gets nothing until an
- * operator opts in. And it runs only when the mention CREATED the session, so
- * on an accumulate wiring whose earlier messages did reach us, those messages
- * already created the session and there is nothing to seed. What is left is
- * exactly the gap above, which is the case that was reported.
+ * One condition narrows the reach, and it is the right one: seeding runs only
+ * when the mention CREATED the session. If the thread's earlier messages did
+ * reach us, they created the session already and their content is in it, so
+ * there is nothing to fetch.
+ *
+ * It is NOT gated on the wiring's ignored-message policy. That gate was tried
+ * and removed, because it excluded the feature's own best case. A 'drop'
+ * wiring discards non-engaging messages, so a thread there NEVER creates a
+ * session until the mention arrives — which is exactly when seeding fires and
+ * exactly when nothing local exists to fall back on. 'drop' also being the
+ * schema default meant a fresh install got nothing at all.
+ *
+ * The policy governs ambient chatter the agent was never asked about. This is
+ * the context of a message it WAS asked to answer, which is a different
+ * question, and the approver answered it: any message in the thread is
+ * context. See the blueprint below.
  *
  * So we ask the platform. At session birth the adapter reads the thread's
  * own earlier messages and they are written as trigger=0 session-echo rows
@@ -32,7 +41,7 @@ import { isTaskThread } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import { withExistingMailboxSession } from '../../session-manager.js';
 import type { MessagePresence } from '../../mailbox/types.js';
-import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from '../../types.js';
+import type { AgentGroup, MessagingGroup, Session } from '../../types.js';
 import type { ThreadHistoryMessage } from '../../channels/adapter.js';
 import { preludeSurface, writePreludeRows } from './prelude.js';
 
@@ -70,12 +79,6 @@ export interface SeedThreadHistoryInput {
   readThreadHistory: ThreadHistoryReader | undefined;
   platformId: string;
   threadId: string | null;
-  /**
-   * The wiring's policy for messages that do not engage the agent. 'drop' is
-   * the operator asking for no ambient context between mentions, so reading
-   * the same messages off the platform would defeat the setting they chose.
-   */
-  ignoredMessagePolicy: MessagingGroupAgent['ignored_message_policy'];
   /** Platform id of the mention that created this session. Never re-seeded. */
   triggerMessageId: string | undefined;
   /**
@@ -110,9 +113,8 @@ export function threadHistoryRowId(platformMessageId: string, sessionId: string)
  * no prelude and the triggering message is delivered as it is today.
  */
 async function fetchThreadMessages(input: SeedThreadHistoryInput): Promise<ThreadHistoryMessage[]> {
-  const { readThreadHistory, session, threadId, platformId, ignoredMessagePolicy } = input;
+  const { readThreadHistory, session, threadId, platformId } = input;
   if (!readThreadHistory) return [];
-  if (ignoredMessagePolicy !== 'accumulate') return [];
   if (threadId === null) return [];
   if (isTaskThread(threadId)) return [];
 

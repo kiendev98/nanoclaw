@@ -54,7 +54,6 @@ interface SeedOverrides {
   readThreadHistory?: ((platformId: string, threadId: string, limit: number) => Promise<ThreadHistoryMessage[]>) | null;
   mg?: never;
   threadId?: string | null;
-  ignoredMessagePolicy?: 'drop' | 'accumulate';
   triggerMessageId?: string;
   triggerTimestamp?: string;
 }
@@ -78,7 +77,6 @@ async function seedCounting(over: SeedOverrides = {}): Promise<number> {
     readThreadHistory,
     platformId: 'slack:C1',
     threadId: over.threadId === undefined ? 'slack:C1:100.0' : over.threadId,
-    ignoredMessagePolicy: over.ignoredMessagePolicy ?? 'accumulate',
     triggerMessageId: over.triggerMessageId ?? 'trigger-1',
     triggerTimestamp: over.triggerTimestamp ?? '2026-09-03T06:00:00.000Z',
     toLocalMessageId: (platformMessageId: string) => `${platformMessageId}:ag-1`,
@@ -199,13 +197,6 @@ describe('seedThreadHistory', () => {
   it('no-ops when the channel cannot read thread history', async () => {
     await seed({ readThreadHistory: null, messages: [history('m1', 'hi')] });
 
-    expect(written).toEqual([]);
-  });
-
-  it('no-ops on a drop wiring, which asks for no ambient context', async () => {
-    await seed({ messages: [history('m1', 'hi')], ignoredMessagePolicy: 'drop' });
-
-    expect(calls).toEqual([]);
     expect(written).toEqual([]);
   });
 

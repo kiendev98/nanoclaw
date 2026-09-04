@@ -248,13 +248,17 @@ describe('router — thread-history seeding', () => {
     expect(fetchCalls.map((c) => c.threadId)).toEqual(['testchat:C1:100.0', 'testchat:C1:200.0']);
   });
 
-  it('never reads on a drop wiring, which asks for no ambient context', async () => {
+  it('reads on a drop wiring, which is the case with no local fallback', async () => {
+    // A drop wiring discards non-engaging messages, so its threads never
+    // create a session until the mention lands — making it the case most in
+    // need of a platform read, not the case to exclude. 'drop' is also the
+    // schema default, so gating it out left a fresh install with nothing.
     await activate();
     await seedWiring({ ignoredMessagePolicy: 'drop' });
 
     await inbound('m1', 'testchat:C1:100.0', '@saber PBC-13 blueprint');
 
-    expect(fetchCalls).toEqual([]);
+    expect(fetchCalls).toEqual([{ platformId: 'testchat:C1', threadId: 'testchat:C1:100.0', limit: 12 }]);
   });
 
   it('never reads for an accumulated message, which does not wake the agent', async () => {

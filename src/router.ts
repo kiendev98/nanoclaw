@@ -626,8 +626,8 @@ async function deliverToAgent(context: DeliveryContext): Promise<void> {
     // thread's opener, so thread history is asked first and the sibling
     // timeline is the fallback when it yields nothing.
     //
-    // Every no-op condition, the wiring's ignored-message policy included,
-    // lives in the thread-history module beside its siblings.
+    // Every no-op condition lives in the thread-history module, beside its
+    // siblings, so this stays one call.
     const seededFromThread = await seedThreadHistory({
       agentGroup,
       session,
@@ -635,7 +635,6 @@ async function deliverToAgent(context: DeliveryContext): Promise<void> {
       readThreadHistory: adapter?.fetchThreadHistory?.bind(adapter),
       platformId: event.platformId,
       threadId: effectiveThreadId,
-      ignoredMessagePolicy: agent.ignored_message_policy,
       triggerMessageId: event.message.id,
       triggerTimestamp: event.message.timestamp,
       toLocalMessageId: (platformMessageId) => messageIdForAgent(platformMessageId, agent.agent_group_id),
