@@ -101,6 +101,13 @@ export interface GatewayProvider {
   /** Identity, for logs and selection — never a branch above the seam. */
   readonly kind: string;
   /**
+   * Whether this gateway supplies the agent's credentials at request time.
+   * A model provider config that ships a placeholder token depends on it,
+   * because nothing rewrites the Authorization header when it is false.
+   * Stated as a capability so a consumer never has to read `kind`.
+   */
+  readonly injectsCredentials: boolean;
+  /**
    * Called per spawn, before composition validates the spec. Fail-closed: a
    * throw aborts the spawn, the inbound message stays pending, and the next
    * sweep tick retries — a session without its gateway is a session without

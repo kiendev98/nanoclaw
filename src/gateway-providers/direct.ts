@@ -18,24 +18,29 @@
  * Named `direct` rather than `none` because it is a statement about how
  * credentials are obtained — straight from the host — not the absence of a
  * decision. Selecting it is a claim that the runtime already has the identity
- * it needs. **Do not pair it with a driver that isolates**, because there it
- * would be exactly that absence: a container with no way to authenticate.
+ * it needs. It refuses a driver that isolates the session, because there the
+ * claim is false: a container with no way to authenticate.
  */
-import { log } from '../log.js';
-
 import { registerGatewayProvider, type GatewayProviderInput } from './gateway-provider-registry.js';
 
 registerGatewayProvider('direct', () => ({
   kind: 'direct',
+  injectsCredentials: false,
 
   contribute: async (input: GatewayProviderInput) => {
-    // Loud once per spawn rather than silent: an operator who selected this by
-    // accident on an isolating driver gets a session whose agent cannot
-    // authenticate, and this line is the only thing that names why.
-    if (input.capabilities.isolationTiers.length > 0 && !input.capabilities.sharedNetworkNamespace) {
-      log.warn(
-        'direct gateway contributes no credentials, but the driver isolates the network — the agent may have no way to authenticate',
-        { group: input.groupName, kind: 'direct' },
+    // `isolationTiers` names the spec tiers a driver ACCEPTS, not what it
+    // contains: the local driver reports 'container' and isolates nothing.
+    // `sharedNetworkNamespace` is the only capability that separates a host
+    // process from an isolated session, so it carries the whole check.
+    // A driver that isolates while sharing one namespace must select `onecli`.
+    if (!input.capabilities.sharedNetworkNamespace) {
+      // Fail closed, per the `contribute` contract. A warning let the spawn
+      // continue, and the container then failed auth on every agent turn with
+      // no host-side error to read.
+      throw new Error(
+        `The direct gateway contributes no credentials, and the driver of agent group '${input.groupName}' ` +
+          'does not share a network namespace. The agent would start with no way to authenticate. ' +
+          'Set NANOCLAW_GATEWAY_PROVIDER=onecli for an isolating driver.',
       );
     }
     return {};

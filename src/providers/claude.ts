@@ -15,15 +15,32 @@
  *   - ANTHROPIC_BASE_URL — so the SDK knows where to call
  *   - ANTHROPIC_AUTH_TOKEN=placeholder — so the SDK adds an
  *     Authorization: Bearer header for OneCLI to overwrite
+ *
+ * That pair only works behind a gateway that injects credentials, so this
+ * config reads the gateway capability before it contributes the pair. The
+ * check belongs here, on the side that ships the placeholder: the gateway seam
+ * is model-provider-neutral and must not learn any `ANTHROPIC_*` name.
  */
 import { resolveClaudeExecutable } from './claude-executable.js';
 import { readEnvFile } from '../env.js';
+import { getGatewayProvider } from '../gateway-providers/index.js';
 import { registerProviderContainerConfig } from './provider-container-registry.js';
 
 registerProviderContainerConfig('claude', (ctx) => {
   const dotenv = readEnvFile(['ANTHROPIC_BASE_URL']);
   const env: Record<string, string> = {};
   if (dotenv.ANTHROPIC_BASE_URL) {
+    const gateway = getGatewayProvider();
+    // Refuse the spawn rather than ship a token nothing rewrites. The silent
+    // shape is worse: the agent sends `Bearer placeholder`, every turn fails
+    // auth inside the runtime, and the host logs nothing.
+    if (!gateway.injectsCredentials) {
+      throw new Error(
+        `ANTHROPIC_BASE_URL is set, but the '${gateway.kind}' gateway injects no credentials. ` +
+          'The agent would send a placeholder token to that endpoint. ' +
+          'Unset ANTHROPIC_BASE_URL, or set NANOCLAW_GATEWAY_PROVIDER=onecli.',
+      );
+    }
     env.ANTHROPIC_BASE_URL = dotenv.ANTHROPIC_BASE_URL;
     env.ANTHROPIC_AUTH_TOKEN = 'placeholder';
   }

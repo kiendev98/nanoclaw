@@ -1,8 +1,9 @@
 /**
  * Gateway provider selection.
  *
- * `NANOCLAW_GATEWAY_PROVIDER` is read once, at first use, and defaults to
- * `onecli` — an install that never sets it behaves exactly as it always has.
+ * `NANOCLAW_GATEWAY_PROVIDER` is read once, at first use. The default lives on
+ * `DEFAULT_GATEWAY_PROVIDER_KIND` below, which is the one place that states it
+ * and the reason for it.
  * One active provider per install; a configured kind with no registered
  * provider throws the same operator-error shape as an unknown runtime driver,
  * for the same reason: a host configured for one gateway must not silently

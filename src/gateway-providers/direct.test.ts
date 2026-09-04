@@ -72,28 +72,54 @@ describe('the direct gateway provider', () => {
     expect(directProvider().approvals).toBeUndefined();
   });
 
-  it('warns when the driver isolates the network and no credential arrives', async () => {
-    await directProvider().contribute({
-      key: KEY,
-      groupName: 'g1',
-      capabilities: capabilities({ isolationTiers: ['container'], sharedNetworkNamespace: false }),
-    });
-
-    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('no way to authenticate'), {
-      group: 'g1',
-      kind: 'direct',
-    });
+  it('declares that it injects no credentials', () => {
+    expect(directProvider().injectsCredentials).toBe(false);
   });
 
-  it('stays quiet when the driver shares the host network', async () => {
+  // A warning here let the spawn continue. The container then started with no
+  // proxy env, failed auth on every turn, and lost its logs on exit.
+  it('refuses the spawn when the driver does not share a network namespace', async () => {
+    await expect(
+      directProvider().contribute({
+        key: KEY,
+        groupName: 'g1',
+        capabilities: capabilities({ isolationTiers: ['container'], sharedNetworkNamespace: false }),
+      }),
+    ).rejects.toThrow(/NANOCLAW_GATEWAY_PROVIDER=onecli/);
+  });
+
+  // Red if the check reads `isolationTiers` again: that list names the spec
+  // tiers a driver accepts, so a driver can isolate and report none.
+  it('refuses a driver that reports no isolation tier and a private network', async () => {
+    await expect(
+      directProvider().contribute({
+        key: KEY,
+        groupName: 'g1',
+        capabilities: capabilities({ isolationTiers: [], sharedNetworkNamespace: false }),
+      }),
+    ).rejects.toThrow(/no way to authenticate/);
+  });
+
+  it('names the agent group, because the container keeps no log of its own', async () => {
+    await expect(
+      directProvider().contribute({
+        key: KEY,
+        groupName: 'billing-bot',
+        capabilities: capabilities({ sharedNetworkNamespace: false }),
+      }),
+    ).rejects.toThrow(/billing-bot/);
+  });
+
+  it('contributes and stays quiet when the driver shares the host network', async () => {
     vi.mocked(log.warn).mockClear();
 
-    await directProvider().contribute({
+    const contribution = await directProvider().contribute({
       key: KEY,
       groupName: 'g1',
       capabilities: capabilities({ isolationTiers: ['container'], sharedNetworkNamespace: true }),
     });
 
+    expect(contribution).toEqual({});
     expect(log.warn).not.toHaveBeenCalled();
   });
 });
