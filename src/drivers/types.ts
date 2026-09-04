@@ -77,6 +77,16 @@ export interface ContainerSpec {
    */
   contributedEnv?: Record<string, string>;
   /**
+   * Working directory for this container's process, when it must differ from
+   * the image's own. Set for a REPO WORKER, whose cwd is its worktree.
+   *
+   * Typed rather than an environment variable because cwd is a property of how
+   * the process is started, not something it reads. A driver that cannot honour
+   * it (a container, where the path is a mount target) may ignore it: the
+   * runner learns the same fact from `container.json`.
+   */
+  cwd?: string;
+  /**
    * PID 1 and its arguments. Split because not every runtime can express a
    * single argv the way `docker --entrypoint X image -c Y` can: `command`
    * maps to the container entrypoint, `args` to what follows it.
