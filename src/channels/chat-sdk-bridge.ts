@@ -496,7 +496,23 @@ export function appendRawText(
  * `raw` are dropped: history is ambient context, and staging a non-triggering
  * sender's files to disk is what the access gate exists to prevent.
  */
-function toThreadHistoryMessage(message: ChatMessage): ThreadHistoryMessage {
+/**
+ * Text the platform reports, plus whatever the SDK left only in `raw`.
+ *
+ * The live path recovers that through appendRawText, and history must too. A
+ * Slack thread of bot cards and unfurls carries empty `text` on every message,
+ * so without this the exact case thread history exists for — a conversation
+ * settled through Jira cards — reads as an empty thread and seeds nothing.
+ */
+function historyText(message: ChatMessage, extract?: RawTextExtractor): string {
+  const serialized: Record<string, unknown> = {
+    text: typeof message.text === 'string' ? message.text : '',
+  };
+  if (message.raw) appendRawText(serialized, message.raw as Record<string, unknown>, extract);
+  return typeof serialized.text === 'string' ? serialized.text : '';
+}
+
+function toThreadHistoryMessage(message: ChatMessage, extract?: RawTextExtractor): ThreadHistoryMessage {
   const author = message.author;
   const name = author?.fullName ?? author?.userName ?? 'unknown';
   return {
@@ -504,15 +520,15 @@ function toThreadHistoryMessage(message: ChatMessage): ThreadHistoryMessage {
     timestamp: message.metadata.dateSent.toISOString(),
     sender: name,
     senderId: author?.userId ?? '',
-    text: typeof message.text === 'string' ? message.text : '',
+    text: historyText(message, extract),
     self: author?.isMe === true,
   };
 }
 
 /** A platform message the bridge must not surface as conversation history. */
-function isRenderableHistory(message: ChatMessage): boolean {
+function isRenderableHistory(message: ChatMessage, extract?: RawTextExtractor): boolean {
   if (message.author?.isSystem === true) return false;
-  return typeof message.text === 'string' && message.text.trim().length > 0;
+  return historyText(message, extract).trim().length > 0;
 }
 
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
@@ -1089,7 +1105,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // still orders each page oldest-first — which is the order the
       // formatter renders and the order the seeder assigns seq in.
       const result = await adapter.fetchMessages(threadId, { direction: 'backward', limit });
-      return result.messages.filter(isRenderableHistory).map(toThreadHistoryMessage);
+      return result.messages
+        .filter((message) => isRenderableHistory(message, config.extractRawText))
+        .map((message) => toThreadHistoryMessage(message, config.extractRawText));
     };
   }
 

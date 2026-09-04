@@ -37,7 +37,7 @@ function cell(value: string): string {
   return value.replace(/\s+/g, ' ').replace(/\|/g, '/').trim().slice(0, HISTORY_TEXT_MAX_CHARS);
 }
 
-function parseText(raw: string): { text: string; sender: string | null } {
+function parseText(raw: string): { text: string; sender: string | null; sentAt: string | null } {
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     const text =
@@ -46,9 +46,19 @@ function parseText(raw: string): { text: string; sender: string | null } {
         : typeof parsed.action === 'string'
           ? `[${parsed.action}]`
           : '';
-    return { text, sender: typeof parsed.sender === 'string' ? parsed.sender : null };
+    // A prelude row's `timestamp` column is when it was SEEDED — the echo
+    // pruner ages pending rows by it. The message's own time is in
+    // echo.sentAt, and that is what an operator reading a transcript wants,
+    // both for the stamp and for the sort.
+    const echo =
+      typeof parsed.echo === 'object' && parsed.echo !== null ? (parsed.echo as Record<string, unknown>) : {};
+    return {
+      text,
+      sender: typeof parsed.sender === 'string' ? parsed.sender : null,
+      sentAt: typeof echo.sentAt === 'string' ? echo.sentAt : null,
+    };
   } catch {
-    return { text: raw, sender: null };
+    return { text: raw, sender: null, sentAt: null };
   }
 }
 
@@ -81,8 +91,8 @@ export async function sessionHistory(args: Record<string, unknown>, ctx: CallerC
 
   if (history) {
     for (const r of history.inbound) {
-      const { text, sender } = parseText(r.content);
-      rows.push({ timestamp: r.timestamp, direction: 'in', kind: r.kind, sender: sender ?? '', text });
+      const { text, sender, sentAt } = parseText(r.content);
+      rows.push({ timestamp: sentAt ?? r.timestamp, direction: 'in', kind: r.kind, sender: sender ?? '', text });
     }
     for (const r of history.outbound) {
       const { text } = parseText(r.content);

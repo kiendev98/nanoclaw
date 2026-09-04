@@ -45,8 +45,18 @@ import type { AgentGroup, MessagingGroup, Session } from '../../types.js';
 import type { ThreadHistoryMessage } from '../../channels/adapter.js';
 import { preludeSurface, writePreludeRows } from './prelude.js';
 
-/** Matches BACKFILL_LIMIT, and the measured p90 of 12 preceding messages. */
-export const THREAD_HISTORY_LIMIT = 12;
+/**
+ * How many earlier messages to seed.
+ *
+ * Nine, not the measured p90 of twelve, because the container reads at most
+ * `maxMessagesPerPrompt` rows per turn — ten by default — and gives the
+ * triggering message a slot first. Seeding twelve leaves the three OLDEST
+ * pending, and they surface on a later turn as fresh prelude: the start of
+ * the thread arriving after the agent already answered from the end of it.
+ * Nine is the largest batch the default cap reads in one turn, and the newest
+ * nine are the relevant ones.
+ */
+export const THREAD_HISTORY_LIMIT = 9;
 
 /**
  * A platform read must never hold up delivery of the triggering message.
@@ -171,9 +181,9 @@ async function selectUnseen(
   return seen ? candidates.filter((m) => !seen.has(m.id)) : candidates;
 }
 
-async function writeHistoryRows(input: SeedThreadHistoryInput, rows: ThreadHistoryMessage[]): Promise<void> {
+async function writeHistoryRows(input: SeedThreadHistoryInput, rows: ThreadHistoryMessage[]): Promise<number> {
   const { agentGroup, session, mg } = input;
-  await writePreludeRows(agentGroup.id, session.id, rows, {
+  return await writePreludeRows(agentGroup.id, session.id, rows, {
     surface: preludeSurface(mg),
     label: 'this thread, before the agent was brought in',
     rowId: (row) => threadHistoryRowId(row.id, session.id),
@@ -196,16 +206,19 @@ export async function seedThreadHistory(input: SeedThreadHistoryInput): Promise<
     const messages = await fetchThreadMessages(input);
     if (messages.length === 0) return 0;
 
-    const unseen = await selectUnseen(input, messages);
+    // Clamp on the write side. `limit` is a request, and the SDK notes each
+    // adapter has its own default page size — an adapter that treats it as
+    // advisory must not be able to fill the mailbox with pending echo rows.
+    const unseen = (await selectUnseen(input, messages)).slice(-THREAD_HISTORY_LIMIT);
     if (unseen.length === 0) return 0;
 
-    await writeHistoryRows(input, unseen);
+    const written = await writeHistoryRows(input, unseen);
     log.debug('Seeded new session with thread history', {
       sessionId: input.session.id,
       fetched: messages.length,
-      written: unseen.length,
+      written,
     });
-    return unseen.length;
+    return written;
   } catch (err) {
     log.warn('Thread-history seeding failed (continuing without context)', {
       sessionId: input.session.id,

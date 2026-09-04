@@ -7,9 +7,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const written: Array<Record<string, unknown>> = [];
+/** Row index (1-based) whose write should throw. 0 disables the failure. */
+let failOnRow = 0;
 
 vi.mock('../../session-manager.js', () => ({
   writeSessionMessage: async (agentGroupId: string, sessionId: string, msg: Record<string, unknown>) => {
+    if (failOnRow > 0 && written.length + 1 === failOnRow + 1) throw new Error('mailbox io');
     written.push({ agentGroupId, sessionId, ...msg });
   },
 }));
@@ -61,6 +64,7 @@ function parsed(index: number): ParsedRow {
 
 beforeEach(() => {
   written.length = 0;
+  failOnRow = 0;
 });
 
 describe('preludeSurface', () => {
@@ -151,5 +155,30 @@ describe('writePreludeRows', () => {
     await write([]);
 
     expect(written).toEqual([]);
+  });
+
+  it('returns how many rows landed', async () => {
+    const count = await writePreludeRows('ag-1', 'sess-1', [row('a'), row('b')], {
+      surface: 'channel-timeline',
+      label: 'l',
+      rowId: (_r, index) => `r${index}`,
+    });
+
+    expect(count).toBe(2);
+  });
+
+  it('reports a partial write instead of throwing, so no second prelude follows', async () => {
+    // A caller that reads zero writes another prelude on top, and the
+    // container's per-prompt cap cannot absorb two.
+    failOnRow = 2;
+
+    const count = await writePreludeRows('ag-1', 'sess-1', [row('a'), row('b'), row('c')], {
+      surface: 'channel-timeline',
+      label: 'l',
+      rowId: (_r, index) => `r${index}`,
+    });
+
+    expect(count).toBe(2);
+    expect(written.map((r) => r.id)).toEqual(['r0', 'r1']);
   });
 });

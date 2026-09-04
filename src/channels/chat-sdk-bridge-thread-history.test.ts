@@ -42,7 +42,11 @@ function message(id: string, text: string, author: AuthorOverrides = {}): Messag
   } as unknown as Message;
 }
 
-function bridgeReturning(messages: Message[], capture?: Array<{ threadId: string; options?: FetchOptions }>) {
+function bridgeReturning(
+  messages: Message[],
+  capture?: Array<{ threadId: string; options?: FetchOptions }>,
+  extractRawText?: (raw: Record<string, unknown>) => string | null,
+) {
   return createChatSdkBridge({
     adapter: stubAdapter({
       fetchMessages: async (threadId: string, options?: FetchOptions) => {
@@ -51,6 +55,7 @@ function bridgeReturning(messages: Message[], capture?: Array<{ threadId: string
       },
     }),
     supportsThreads: true,
+    extractRawText,
   });
 }
 
@@ -112,6 +117,29 @@ describe('createChatSdkBridge — fetchThreadHistory', () => {
     const history = await bridge.fetchThreadHistory!('slack:C1', 'slack:C1:100.0', 12);
 
     expect(history.map((h) => h.id)).toEqual(['m3']);
+  });
+
+  it('recovers text the SDK left only in raw, as the live path does', async () => {
+    // A Slack thread of Jira cards and unfurls carries empty `text` on every
+    // message. Without the same recovery the live path applies, the exact
+    // case thread history exists for reads as an empty thread.
+    const card = message('m1', '', {});
+    (card as unknown as { raw: Record<string, unknown> }).raw = { blocks: ['PBC-13 created'] };
+    const bridge = bridgeReturning([card], undefined, (raw) => (raw.blocks as string[])?.join('') ?? null);
+
+    const history = await bridge.fetchThreadHistory!('slack:C1', 'slack:C1:100.0', 12);
+
+    expect(history.map((h) => h.text)).toEqual(['PBC-13 created']);
+  });
+
+  it('still drops a blocks-only message when the channel has no extractor', async () => {
+    const card = message('m1', '', {});
+    (card as unknown as { raw: Record<string, unknown> }).raw = { blocks: ['PBC-13 created'] };
+    const bridge = bridgeReturning([card]);
+
+    const history = await bridge.fetchThreadHistory!('slack:C1', 'slack:C1:100.0', 12);
+
+    expect(history).toEqual([]);
   });
 
   it('propagates a platform failure rather than swallowing it', async () => {

@@ -109,7 +109,22 @@ describe('seedThreadHistory', () => {
     await seed({ messages: [history('m1', 'hi')] });
 
     expect(calls).toEqual([{ platformId: 'slack:C1', threadId: 'slack:C1:100.0', limit: THREAD_HISTORY_LIMIT }]);
-    expect(THREAD_HISTORY_LIMIT).toBe(12);
+    // Nine, not the measured p90 of twelve: the container reads 10 rows per
+    // turn and the trigger takes one, so a larger batch leaves its OLDEST
+    // rows pending to resurface later as fresh prelude.
+    expect(THREAD_HISTORY_LIMIT).toBe(9);
+  });
+
+  it('clamps to THREAD_HISTORY_LIMIT even if the adapter returns more', async () => {
+    // `limit` is a request. The SDK notes each adapter has its own default
+    // page size, so an adapter that treats it as advisory must not be able to
+    // fill the mailbox with pending echo rows.
+    const many = Array.from({ length: 40 }, (_, i) => history(`m${i}`, `msg ${i}`));
+
+    await seed({ messages: many });
+
+    expect(written).toHaveLength(THREAD_HISTORY_LIMIT);
+    expect(textOf(written[written.length - 1])).toBe('msg 39');
   });
 
   it('never re-seeds the mention that created the session', async () => {

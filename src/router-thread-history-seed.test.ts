@@ -2,10 +2,12 @@
  * When the router seeds a new thread session with platform thread history.
  *
  * Exercised through the REAL routeInbound path with a registered adapter, so
- * the conditions asserted here are the live ones: the mention must have
- * CREATED the session, and the wiring must be on 'accumulate'. A 'drop'
- * wiring is the operator asking for no ambient context between mentions, and
- * reading the same messages off the platform would defeat that setting.
+ * the condition asserted here is the live one: the mention must have CREATED
+ * the session. If the thread's earlier messages reached us they created it
+ * already, and their content is in it.
+ *
+ * The read is per thread, not per wiring, and it must stay that way — every
+ * agent group wired to a chat asks about the same thread.
  */
 import fs from 'fs';
 import Database from 'better-sqlite3';
@@ -23,6 +25,7 @@ import { getSessionsByAgentGroup } from './db/sessions.js';
 import { inboundDbPath } from './mailbox/sqlite/paths.js';
 import { initChannelAdapters, registerChannelAdapter, teardownChannelAdapters } from './channels/channel-registry.js';
 import { routeInbound } from './router.js';
+import { THREAD_HISTORY_LIMIT } from './modules/cross-session-context/index.js';
 import type { ChannelAdapter, ChannelDefaults, ThreadHistoryMessage } from './channels/adapter.js';
 import type { MessagingGroupAgent } from './types.js';
 
@@ -171,7 +174,45 @@ describe('router — thread-history seeding', () => {
 
     await inbound('m1', 'testchat:C1:100.0', '@saber PBC-13 blueprint');
 
-    expect(fetchCalls).toEqual([{ platformId: 'testchat:C1', threadId: 'testchat:C1:100.0', limit: 12 }]);
+    expect(fetchCalls).toEqual([
+      { platformId: 'testchat:C1', threadId: 'testchat:C1:100.0', limit: THREAD_HISTORY_LIMIT },
+    ]);
+  });
+
+  it('reads the platform once even when several agent groups are wired', async () => {
+    // The read is per thread, and each wiring creates its own session, so an
+    // unshared read would issue N identical round trips in series — each
+    // paying the adapter's per-author enrichment while the user waits.
+    await activate();
+    await seedWiring({});
+    await createAgentGroup({
+      id: 'ag-2',
+      name: 'Second',
+      folder: 'second',
+      agent_provider: null,
+      created_at: now(),
+    });
+    await createMessagingGroupAgent({
+      id: 'mga-2',
+      messaging_group_id: 'mg-1',
+      agent_group_id: 'ag-2',
+      engage_mode: 'mention-sticky',
+      engage_pattern: null,
+      sender_scope: 'all',
+      ignored_message_policy: 'accumulate',
+      session_mode: 'per-thread',
+      priority: 0,
+      threads: 1,
+      created_at: now(),
+    });
+
+    await inbound('m1', 'testchat:C1:100.0', '@saber PBC-13 blueprint');
+
+    const sessions = await getSessionsByAgentGroup('ag-1');
+    const others = await getSessionsByAgentGroup('ag-2');
+    expect(sessions).toHaveLength(1);
+    expect(others).toHaveLength(1);
+    expect(fetchCalls).toHaveLength(1);
   });
 
   it('lands every history row at a lower seq than the mention that fetched it', async () => {
@@ -258,7 +299,9 @@ describe('router — thread-history seeding', () => {
 
     await inbound('m1', 'testchat:C1:100.0', '@saber PBC-13 blueprint');
 
-    expect(fetchCalls).toEqual([{ platformId: 'testchat:C1', threadId: 'testchat:C1:100.0', limit: 12 }]);
+    expect(fetchCalls).toEqual([
+      { platformId: 'testchat:C1', threadId: 'testchat:C1:100.0', limit: THREAD_HISTORY_LIMIT },
+    ]);
   });
 
   it('never reads for an accumulated message, which does not wake the agent', async () => {

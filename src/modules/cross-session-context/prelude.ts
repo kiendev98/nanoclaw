@@ -17,6 +17,7 @@
  * last-entry rule, so folding it in would need a flag per caller — which is
  * where duplication beats the abstraction.
  */
+import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { MessagingGroup } from '../../types.js';
 import { ECHO_CHANNEL_TIMELINE_SURFACE, ECHO_CHANNEL_TYPE, ECHO_TIMELINE_SURFACE } from './config.js';
@@ -66,13 +67,18 @@ export function preludeSurface(mg: MessagingGroup): string {
  * BEFORE the triggering message, which then sorts after the whole prelude.
  *
  * @param rows Chronological, oldest first. The last is treated as newest.
+ * @returns How many rows reached the mailbox. A caller that decides whether to
+ *   write a second prelude must branch on this and not on whether the call
+ *   threw: a throw partway through still leaves the earlier rows written, and
+ *   treating that as "nothing written" produces the double prelude the
+ *   per-prompt cap cannot absorb.
  */
 export async function writePreludeRows<T extends PreludeRow>(
   agentGroupId: string,
   sessionId: string,
   rows: T[],
   meta: PreludeMeta<T>,
-): Promise<void> {
+): Promise<number> {
   // The row timestamp is when this row was SEEDED, not when the message was
   // sent. The echo pruner drops pending rows older than ECHO_MAX_AGE_DAYS by
   // this column, and a thread wired weeks after it started — the case thread
@@ -80,21 +86,37 @@ export async function writePreludeRows<T extends PreludeRow>(
   // container's first poll. The true send time rides in echo.sentAt, which is
   // what the formatter displays.
   const seededAt = new Date().toISOString();
+  let written = 0;
   for (const [index, row] of rows.entries()) {
     const isLast = index === rows.length - 1;
-    await writeSessionMessage(agentGroupId, sessionId, {
-      id: meta.rowId(row, index),
-      kind: 'chat',
-      timestamp: seededAt,
-      channelType: ECHO_CHANNEL_TYPE,
-      content: JSON.stringify({
-        text: isLast ? row.text.slice(0, LAST_ENTRY_MAX_CHARS) : truncateEchoText(row.text),
-        sender: row.sender,
-        senderId: row.senderId,
-        ...(row.self ? { self: true } : {}),
-        echo: { surface: meta.surface, label: meta.label, sentAt: row.timestamp },
-      }),
-      trigger: false,
-    });
+    try {
+      await writeSessionMessage(agentGroupId, sessionId, {
+        id: meta.rowId(row, index),
+        kind: 'chat',
+        timestamp: seededAt,
+        channelType: ECHO_CHANNEL_TYPE,
+        content: JSON.stringify({
+          text: isLast ? row.text.slice(0, LAST_ENTRY_MAX_CHARS) : truncateEchoText(row.text),
+          sender: row.sender,
+          senderId: row.senderId,
+          ...(row.self ? { self: true } : {}),
+          echo: { surface: meta.surface, label: meta.label, sentAt: row.timestamp },
+        }),
+        trigger: false,
+      });
+    } catch (err) {
+      // Stop rather than press on, and report what did land. A caller that
+      // reads zero writes a second prelude, which the per-prompt cap cannot
+      // absorb — so a partial write must never look like no write.
+      log.warn('Prelude row write failed (keeping the rows already seeded)', {
+        sessionId,
+        written,
+        remaining: rows.length - index,
+        err,
+      });
+      return written;
+    }
+    written += 1;
   }
+  return written;
 }
