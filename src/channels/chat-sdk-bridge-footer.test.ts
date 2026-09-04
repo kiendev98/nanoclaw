@@ -47,10 +47,11 @@ function markdownOf(calls: PostCall[]): string | undefined {
   return (calls[0]?.message as { markdown?: string } | undefined)?.markdown;
 }
 
-function bridgeWith(postMessage: Adapter['postMessage']) {
+function bridgeWith(postMessage: Adapter['postMessage'], maxTextLength?: number) {
   return createChatSdkBridge({
     adapter: stubAdapter({ postMessage }),
     supportsThreads: false,
+    ...(maxTextLength ? { maxTextLength } : {}),
   });
 }
 
@@ -107,6 +108,36 @@ describe('telemetry footer rendering', () => {
 
     expect(calls.length).toBeGreaterThan(0);
     expect(calls.map((c) => (c.message as { markdown?: string }).markdown ?? '').join('')).toContain(FOOTER);
+  });
+
+  it('takes the markdown path when the body is too long for THIS adapter', async () => {
+    // The card path posts one message and cannot split. Gating it on the
+    // Slack section cap alone sent a 2,500-character reply through it unsplit
+    // on an adapter capped at 2,000 — over that adapter's limit, where before
+    // the footer existed the body was chunked.
+    const { calls, postMessage } = makePostCapture();
+    const body = 'x'.repeat(2_500);
+    await bridgeWith(postMessage, 2_000).deliver('slack:C1', null, {
+      kind: 'chat',
+      content: { text: body, footer: FOOTER },
+    });
+
+    expect(calls.length).toBeGreaterThan(1);
+    for (const call of calls) {
+      expect(((call.message as { markdown?: string }).markdown ?? '').length).toBeLessThanOrEqual(2_000);
+      expect((call.message as { card?: unknown }).card).toBeUndefined();
+    }
+    expect(calls.map((c) => (c.message as { markdown?: string }).markdown ?? '').join('')).toContain(FOOTER);
+  });
+
+  it('still styles the footer when the body fits the adapter limit', async () => {
+    const { calls, postMessage } = makePostCapture();
+    await bridgeWith(postMessage, 2_000).deliver('slack:C1', null, {
+      kind: 'chat',
+      content: { text: 'body', footer: FOOTER },
+    });
+
+    expect(cardChildren(calls).length).toBe(2);
   });
 
   it('ignores a blank footer instead of posting an empty muted block', async () => {

@@ -18,6 +18,10 @@ export function resolveClaudeExecutable(pathEnv: string | undefined): string | u
     const candidate = path.join(dir, 'claude');
     try {
       fs.accessSync(candidate, fs.constants.X_OK);
+      // A DIRECTORY named `claude` carries the execute bit too, and handing
+      // one to the SDK as `pathToClaudeCodeExecutable` fails inside the child
+      // with a message that names neither this PATH entry nor this function.
+      if (!fs.statSync(candidate).isFile()) continue;
       return candidate;
     } catch {
       // not here, keep looking

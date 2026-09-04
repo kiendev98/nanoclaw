@@ -152,6 +152,8 @@ export class LocalSessionDriver implements SessionDriver {
   #listeners = new Set<(event: SessionEvent) => void>();
   /** Latched so the preflight below reports once, not once per respawn. */
   #runnerDepsReported = false;
+  /** Latched for the same reason. See `#reportMissingProviderExecutable`. */
+  #providerExecutableReported = false;
 
   constructor(options: LocalDriverOptions) {
     this.#policy = options.policy;
@@ -176,6 +178,12 @@ export class LocalSessionDriver implements SessionDriver {
       // spec is unrealizable. Naming them is what stops a feature from gating
       // on driver identity instead of on capability.
       unrealized: ['memoryMb', 'cpus', 'pidsLimit', 'shmSizeMb'],
+      // A mount here is the host directory itself, so `ro` states intent and
+      // nothing enforces it. Named rather than implied: composition marks the
+      // group's `plugins` tree and `container.json` read-only precisely
+      // because the agent executes what they hold, and a consumer that gates
+      // on capability could not otherwise discover the loss.
+      readonlyMounts: false,
       sharedNetworkNamespace: true,
       auxiliaryContainers: false,
       imageBuild: false,
@@ -210,6 +218,30 @@ export class LocalSessionDriver implements SessionDriver {
 
     const container = agents[0]!;
     const name = sessionName(spec.key);
+
+    // Idempotency on key, which `SessionDriver.prepare` requires and the
+    // Docker driver implements: an existing live child for this key IS the
+    // session. Re-realizing one spawned a second runner against the same
+    // mailbox databases, overwrote the first child so it could never be
+    // stopped through the driver, and rmSync'd the live session's extra/ tree.
+    const live = this.#children.get(name);
+    if (live?.pid && isAlive(live.pid)) {
+      return new LocalSessionHandle({
+        key: spec.key,
+        name,
+        driver: this,
+        // Already running: hand back the child rather than starting a second.
+        spawn: () => live,
+        stopGraceSeconds: spec.stopGraceSeconds,
+        adoptedPid: live.pid,
+      });
+    }
+
+    // A fresh realization of this key starts a new lifecycle, so no earlier
+    // run's exit code may answer for it. Cleared here as well as at spawn so
+    // a prepared-but-unstarted handle reports 'ready' rather than 'failed'.
+    this.#exits.delete(name);
+
     const rootEnv = this.#deriveRootEnv(spec, container.mounts);
 
     const record: SessionRecord = {
@@ -286,6 +318,17 @@ export class LocalSessionDriver implements SessionDriver {
     return dir;
   }
 
+  /**
+   * Remove the symlink directory `#realizeExtras` planted for this session.
+   *
+   * `prepare` rebuilds it, so a respawn is unaffected. Without this the tree
+   * grew one directory per session for the life of the install.
+   */
+  #removeExtras(key: SessionKey): void {
+    const dir = path.join(this.#sessionStateDir(key.installSlug), `${key.agentGroupId}__${key.sessionId}`);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
   #sessionStateDir(installSlug: string): string {
     return path.join(this.#policy.dataRoot, 'local-sessions', installSlug);
   }
@@ -313,6 +356,23 @@ export class LocalSessionDriver implements SessionDriver {
     );
   }
 
+  /**
+   * Say once that no `claude` was found on this host's PATH.
+   *
+   * The provider contributes the path and cannot know whether it matters: under
+   * Docker the image has its own binary, so warning from there fired on every
+   * spawn of a session that was never going to use the value. Here the answer
+   * is both known and relevant. Latched, like the runner-deps check above.
+   */
+  #reportMissingProviderExecutable(name: string, env: Record<string, string>): void {
+    if (this.#providerExecutableReported) return;
+    this.#providerExecutableReported = true;
+    if (env.NANOCLAW_PROVIDER_EXECUTABLE) return;
+    log.warn('No `claude` on this PATH — the runner will fall back to the container default path, which no host has', {
+      name,
+    });
+  }
+
   #spawnRunner(
     name: string,
     spec: SessionSpec,
@@ -325,6 +385,16 @@ export class LocalSessionDriver implements SessionDriver {
       if (v !== undefined) hostEnv[k] = v;
     }
 
+    // Scrub what this process INHERITED, before the composed lanes land.
+    // Scrubbing the merged environment instead deleted a value the spec
+    // deliberately contributed: `types.ts` names a provider registering
+    // `ANTHROPIC_AUTH_TOKEN=placeholder` as the sanctioned pattern, and
+    // `providers/claude.ts` registers exactly that whenever a custom
+    // ANTHROPIC_BASE_URL is set. Deleting it left the base URL with no
+    // Authorization header for the OneCLI proxy to rewrite, so every turn
+    // failed auth. Docker does not scrub the composed lanes either.
+    stripInheritedClaudeEnv(hostEnv);
+
     const env = { ...hostEnv };
     // Composed env first, then the contributed lane, matching the seam's
     // stated collision order.
@@ -336,9 +406,16 @@ export class LocalSessionDriver implements SessionDriver {
       if (hostEnv[key] !== undefined) env[key] = hostEnv[key];
       else delete env[key];
     }
-    stripInheritedClaudeEnv(env);
 
     this.#reportMissingRunnerDeps(name);
+    this.#reportMissingProviderExecutable(name, env);
+
+    // A previous run under this name must not decide this one's status.
+    // `sessionName` is deterministic, so a woken session reuses the key, and
+    // `status()` reads this map before any liveness check — a single non-zero
+    // exit otherwise reported 'failed' for every later spawn of that session
+    // for the life of the host process.
+    this.#exits.delete(name);
 
     const child = spawn(this.#runtimeBin, ['run', this.#runnerEntry], {
       cwd: this.#records.get(name)?.cwd,
@@ -347,12 +424,32 @@ export class LocalSessionDriver implements SessionDriver {
       detached: false,
     });
 
+    // A spawn failure arrives as an event, not a throw. With no listener Node
+    // re-raises it as an uncaught exception, and `log.ts` answers that with
+    // process.exit(1) — so a missing runtime binary, or a group directory that
+    // does not exist, took the whole HOST down instead of failing one session.
+    child.once('error', (error: Error) => {
+      log.error('Local session failed to spawn', { name, runtime: this.#runtimeBin, error: error.message });
+      this.#children.delete(name);
+      this.#records.delete(name);
+      this.#removeRecord(spec.key.installSlug, name);
+      this.#emit({ key: spec.key, kind: 'terminal' });
+    });
+
     child.stdout?.on('data', (chunk: Buffer) => log.info(`[${name}] ${chunk.toString().trimEnd()}`));
     child.stderr?.on('data', (chunk: Buffer) => log.info(`[${name}] ${chunk.toString().trimEnd()}`));
 
     child.once('exit', (code) => {
       this.#exits.set(name, code);
       this.#children.delete(name);
+      // Drop the on-disk record too, which only `stop()` used to do. A runner
+      // that exits on its own is the normal end of a session, and its record
+      // kept `listSessions` returning a 'terminal' snapshot forever — so the
+      // 2s poll re-emitted a terminal event for the dead key on every tick,
+      // each one costing the events hub a status() read.
+      this.#records.delete(name);
+      this.#removeRecord(spec.key.installSlug, name);
+      this.#removeExtras(spec.key);
       this.#emit({ key: spec.key, kind: 'terminal' });
     });
 
@@ -395,6 +492,7 @@ export class LocalSessionDriver implements SessionDriver {
   _forget(installSlug: string, name: string): void {
     this.#children.delete(name);
     this.#records.delete(name);
+    this.#exits.delete(name);
     this.#removeRecord(installSlug, name);
   }
 

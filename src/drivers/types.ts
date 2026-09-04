@@ -255,6 +255,17 @@ export interface DriverCapabilities {
    */
   unrealized: readonly (keyof SessionResources)[];
   /**
+   * Whether a mount marked `readonly` is actually enforced as read-only.
+   *
+   * Not expressible through `unrealized`, which names resource caps only. A
+   * driver that realizes a mount as the host directory itself cannot enforce
+   * a mode, so `readonly` on such a spec states intent and guarantees nothing
+   * — and composition marks trees the agent EXECUTES read-only, so the loss
+   * is a real one a consumer must be able to discover without asking which
+   * driver it got.
+   */
+  readonlyMounts: boolean;
+  /**
    * Whether the containers of a session share one network namespace. An egress
    * overlay reads this to decide the proxy URL it puts in the agent's env:
    * localhost when true, a resolvable name when the proxy is a separate host.

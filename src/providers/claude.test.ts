@@ -63,4 +63,28 @@ describe('claude provider container config', () => {
 
     expect(contribution.env?.NANOCLAW_PROVIDER_EXECUTABLE).toBeUndefined();
   });
+
+  it('ignores a DIRECTORY of the right name, which carries the execute bit too', async () => {
+    // `access(X_OK)` passes on a directory. Handing one to the SDK as
+    // `pathToClaudeCodeExecutable` fails inside the child, with a message
+    // naming neither this PATH entry nor the resolver.
+    fs.mkdirSync(path.join(binDir, 'claude'));
+
+    const contribution = await getProviderContainerConfig('claude')!(contextWith(binDir));
+
+    expect(contribution.env?.NANOCLAW_PROVIDER_EXECUTABLE).toBeUndefined();
+  });
+
+  it('keeps looking past a directory and finds a real binary later on PATH', async () => {
+    const second = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-claude-bin2-'));
+    fs.mkdirSync(path.join(binDir, 'claude'));
+    const binary = path.join(second, 'claude');
+    fs.writeFileSync(binary, '#!/bin/sh\n', { mode: 0o755 });
+
+    const contribution = await getProviderContainerConfig('claude')!(
+      contextWith(`${binDir}${path.delimiter}${second}`),
+    );
+
+    expect(contribution.env?.NANOCLAW_PROVIDER_EXECUTABLE).toBe(binary);
+  });
 });

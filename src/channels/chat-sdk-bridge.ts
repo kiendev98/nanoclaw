@@ -426,6 +426,9 @@ function terminalApprovalMessage(spec: TerminalApprovalCard) {
  * cannot become one section, so it takes the markdown path and the footer is
  * appended instead of styled. Held below the cap to leave room for the
  * mrkdwn escaping the converter adds.
+ *
+ * It is a ceiling, not the whole gate: `buildFooterCard` also honours the
+ * adapter's own `maxTextLength`, whichever is lower.
  */
 const CARD_SECTION_LIMIT = 2800;
 
@@ -438,8 +441,16 @@ export function buildFooterCard(
   text: string,
   footerText: string,
   hasFiles: boolean,
+  maxTextLength?: number,
 ): Parameters<Adapter['postMessage']>[1] | null {
-  if (!text || !footerText || hasFiles || text.length > CARD_SECTION_LIMIT) return null;
+  // The lower of the two caps. The card path posts ONE message and cannot
+  // split, so a body this adapter would have had to chunk must take the
+  // markdown path instead — on a bridge whose own limit is under the Slack
+  // section cap (Discord is 2000), gating on the section cap alone sent a
+  // 2500-character reply through the card path unsplit, over that adapter's
+  // limit, where before the footer existed it was chunked.
+  const cap = Math.min(CARD_SECTION_LIMIT, maxTextLength ?? Number.POSITIVE_INFINITY);
+  if (!text || !footerText || hasFiles || text.length > cap) return null;
   return {
     card: Card({ title: '', children: [CardText(text), CardText(footerText, { style: 'muted' })] }),
     fallbackText: appendFooter(text, footerText),
@@ -957,7 +968,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // Its own field so a channel can style it. See `buildFooterCard`.
       const footerText = readFooter(content);
       const hasFiles = Boolean(message.files && message.files.length > 0);
-      const footerCard = buildFooterCard(text, footerText, hasFiles);
+      const footerCard = buildFooterCard(text, footerText, hasFiles, config.maxTextLength);
       if (footerCard) {
         const result = await adapter.postMessage(tid, footerCard);
         return result?.id;

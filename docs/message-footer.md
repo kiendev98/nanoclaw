@@ -42,6 +42,14 @@ after the fact is a race against the outbound poller.
 The usual turn sends exactly one message. There, per-message and per-turn are
 the same thing.
 
+"Every message" means every agent reply to a channel — `sendToDestination` is
+the only site that renders one. Four other outbound writes deliberately carry
+none: an agent-to-agent message (machine input, see below), the `task_log` row
+(never delivered), and the two command acknowledgements `Session cleared.` and
+the trace-upload notice (no turn was spent, so every number would be the
+previous turn's). The error notices are the arguable case — a turn WAS spent
+there — and they carry no footer today.
+
 ## Where the organisation name comes from
 
 `CLAUDE_CONFIG_DIR` is read per call rather than captured at import, because

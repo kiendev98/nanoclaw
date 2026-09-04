@@ -79,6 +79,7 @@ class FakeDriver implements SessionDriver {
       networkPolicy: 'topology',
       encryptedVolumes: false,
       unrealized: [],
+      readonlyMounts: true,
       sharedNetworkNamespace: false,
       auxiliaryContainers: false,
       imageBuild: false,

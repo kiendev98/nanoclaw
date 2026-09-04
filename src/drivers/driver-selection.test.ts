@@ -54,6 +54,7 @@ function registerFake(seen: MountPolicy[] = []): { kind: string; seen: MountPoli
         networkPolicy: 'topology',
         encryptedVolumes: false,
         unrealized: [],
+        readonlyMounts: true,
         sharedNetworkNamespace: false,
         auxiliaryContainers: false,
         imageBuild: false,

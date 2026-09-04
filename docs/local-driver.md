@@ -13,8 +13,15 @@ radius is the user account the host runs as.
 
 So this driver provides no isolation. It does not sandbox the filesystem. It
 does not confine the network. It cannot enforce a read-only mount, because a
-symlink has no mode of its own. The spec's `ro` states intent, not a guarantee.
-`capabilities()` reports every one of those reductions honestly.
+mount here is the host directory itself. The spec's `ro` states intent, not a
+guarantee.
+
+`capabilities()` names each reduction, so a consumer discovers it without
+asking which driver it got: `readonlyMounts: false`, `admissionEnforced: false`,
+`encryptedVolumes: false`, and every resource cap in `unrealized`.
+`isolationTiers` still reads `['container']`, which is the one honest gap — the
+seam has no `process` tier to name, and refusing every spec would be the worse
+lie.
 
 The provider runs with `permissionMode: 'auto'`, not `bypassPermissions`. Auto
 denies a dangerous call and states a reason. It does not prompt, so it needs no

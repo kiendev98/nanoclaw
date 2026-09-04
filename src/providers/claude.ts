@@ -18,7 +18,6 @@
  */
 import { resolveClaudeExecutable } from './claude-executable.js';
 import { readEnvFile } from '../env.js';
-import { log } from '../log.js';
 import { registerProviderContainerConfig } from './provider-container-registry.js';
 
 registerProviderContainerConfig('claude', (ctx) => {
@@ -36,9 +35,11 @@ registerProviderContainerConfig('claude', (ctx) => {
   // image has its own at a path this one would not name.
   const executable = resolveClaudeExecutable(ctx.hostEnv.PATH);
   if (executable) env.NANOCLAW_PROVIDER_EXECUTABLE = executable;
-  // Warned here because this is where the answer is known. A host session with
-  // no binary dies inside the child, where nothing is left to read.
-  else log.warn('No `claude` on this PATH — a host-driver session will fail with the container default path');
+  // Absence is NOT warned here. A provider config is loaded for every spawn on
+  // every driver, and under Docker the image carries its own binary — so a
+  // warning from this point fired once per message on installs where the value
+  // was never going to be read. The local driver reports it instead, once, in
+  // `#reportMissingProviderExecutable`, where the value's absence matters.
 
   return { env };
 });
