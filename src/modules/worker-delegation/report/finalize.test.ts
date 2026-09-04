@@ -12,18 +12,26 @@ import { closeDb, initTestDb } from '../../../db/connection.js';
 import { runMigrations } from '../../../db/migrations/index.js';
 import { registerWorkerMigration } from '../db/migrate.js';
 
-const { delivered, failNextDelivery, sessionGone, routed } = vi.hoisted(() => ({
+const { delivered, failNextDelivery, sessionGone, routed, projected } = vi.hoisted(() => ({
   delivered: [] as Array<{ agentGroupId: string; sessionId: string; text: string; sender: string }>,
   failNextDelivery: { value: false },
   // A throw is transient; `false` is a session that no longer exists. The two
   // must not be handled the same way, so the mock can produce either.
   sessionGone: { value: false },
   routed: [] as Array<{ group: string; session: string }>,
+  projected: [] as Array<{ group: string; session: string }>,
 }));
 
 vi.mock('../../../session-manager.js', () => ({
   writeSessionRouting: (group: string, session: string) => {
     routed.push({ group, session });
+    return Promise.resolve();
+  },
+}));
+
+vi.mock('../../agent-to-agent/write-destinations.js', () => ({
+  writeDestinations: (group: string, session: string) => {
+    projected.push({ group, session });
     return Promise.resolve();
   },
 }));
@@ -68,6 +76,7 @@ function aRunningTask(overrides: Partial<WorkerTask> = {}): WorkerTask {
 beforeEach(async () => {
   delivered.length = 0;
   routed.length = 0;
+  projected.length = 0;
   failNextDelivery.value = false;
   sessionGone.value = false;
   registerWorkerMigration();
@@ -146,6 +155,31 @@ describe('finalizeWorkerTaskIfRunning', () => {
 
     expect(await findLiveGrantForTask('wt-1')).toBeUndefined();
     expect(routed).toContainEqual({ group: 'ag-helper', session: 'sess-helper' });
+  });
+
+  // The central row is deleted, but the worker resolves names from its own
+  // session's projected map. Left there, the lent name still resolves and the
+  // worker is told its message was sent — for a message the host then refuses.
+  it('re-projects the destination list when it releases a lent conversation', async () => {
+    await createTask(aRunningTask());
+    await createGrant({
+      task_id: 'wt-1',
+      helper_agent_group_id: 'ag-helper',
+      helper_session_id: 'sess-helper',
+      messaging_group_id: 'mg-lent',
+      channel_type: 'slack',
+      platform_id: 'slack:C123',
+      root_message_id: 'wlend-1',
+      thread_id: '1788.42',
+      local_destination_name: 'conversation',
+      granted_by_session_id: 'sess-principal',
+      granted_at: new Date().toISOString(),
+      released_at: null,
+    });
+
+    expect(await finalizeWorkerTaskIfRunning('sess-helper', 'done')).toBe(true);
+
+    expect(projected).toContainEqual({ group: 'ag-helper', session: 'sess-helper' });
   });
 
   it('refreshes no routing when the task held no conversation', async () => {

@@ -33,11 +33,8 @@ import { registerExemptThreadQuery } from '../../channels/thread-exemptions.js';
 import { registerSessionTerminalHook } from '../../container-runner.js';
 import { registerWorkerMigration } from './db/migrate.js';
 import { registerDeliveryAction, registerPostDeliveryHook, reenterGuardedDeliveryAction } from '../../delivery.js';
-import { log } from '../../log.js';
-import { writeSessionRouting } from '../../session-manager.js';
 import { unguarded } from '../../guard/index.js';
 import { registerApprovalHandler } from '../approvals/index.js';
-import { bindGrantThread } from './db/worker-channel-grants.js';
 import { delegateTask, requestDelegateTaskHold, validateDelegateTask } from './delegate/delegate-task.js';
 import { finalizeWorkerTaskIfRunning } from './report/finalize.js';
 import {
@@ -46,8 +43,9 @@ import {
   workerDelegate,
   workerLendConversation,
 } from './guard.js';
+import { bindLentConversationThread } from './lend/bind-grant.js';
 import { lendConversation, requestLendConversationHold, validateLendConversation } from './lend/lend-conversation.js';
-import { isLentThread, rememberLentThread } from './lend/lent-threads.js';
+import { isLentThread } from './lend/lent-threads.js';
 import { replyToCaller } from './notify.js';
 import { sendProgressNote } from './report/progress-notes.js';
 import { askPrincipal, answerWorkerQuestion } from './ask/questions.js';
@@ -119,22 +117,4 @@ registerSessionTerminalHook(async (sessionId, kind) => {
 /** A thread a worker holds is a deliberate loop, not a runaway one. */
 registerExemptThreadQuery(isLentThread);
 
-/**
- * Bind a lent conversation to the thread its root post started.
- *
- * Only delivery knows the id the platform gave that post, and only after it
- * lands — so the grant is written unbound and stamped here.
- */
-registerPostDeliveryHook(async (msg, _session, info) => {
-  if (!info.platformMsgId) return;
-  const grant = await bindGrantThread(msg.id, info.platformMsgId);
-  if (!grant) return;
-  // The grant was unbound when routing was last written, so the worker still
-  // has no thread to continue. Re-project now that the platform has named it.
-  await writeSessionRouting(grant.helper_agent_group_id, grant.helper_session_id);
-  log.info('Lent conversation bound to its thread', { threadId: info.platformMsgId });
-  // A review loop is bot-to-bot, and a channel's admission policy stops after
-  // a few consecutive bot turns unless a human speaks. Claim this one thread,
-  // so every other room keeps the cap.
-  rememberLentThread(msg.channelType, msg.platformId, info.platformMsgId);
-});
+registerPostDeliveryHook(bindLentConversationThread);

@@ -111,6 +111,7 @@ export const moduleWorkerDelegation: ModuleMigration = {
         granted_at TEXT NOT NULL,
         released_at TEXT
       );
+      CREATE INDEX idx_worker_grants_root ON worker_channel_grants(root_message_id);
       CREATE INDEX idx_worker_grants_live ON worker_channel_grants(helper_session_id, released_at);
       CREATE INDEX idx_worker_grants_thread ON worker_channel_grants(messaging_group_id, thread_id, released_at);
     `);

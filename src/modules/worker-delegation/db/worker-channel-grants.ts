@@ -39,6 +39,19 @@ export async function bindGrantThread(
   );
 }
 
+/**
+ * The grant a delivered message opened, bound or not.
+ *
+ * Asked of every delivered message that carries no platform id, so it is
+ * indexed on `root_message_id`.
+ */
+export async function findGrantByRootMessage(rootMessageId: string): Promise<WorkerChannelGrant | undefined> {
+  return getDb().get<WorkerChannelGrant>(
+    'SELECT * FROM worker_channel_grants WHERE root_message_id = ?',
+    rootMessageId,
+  );
+}
+
 /** The live grant for a helper session, if it holds one. */
 export async function findLiveGrantForSession(helperSessionId: string): Promise<WorkerChannelGrant | undefined> {
   return getDb().get<WorkerChannelGrant>(

@@ -10,6 +10,7 @@
 import { log } from '../../../log.js';
 import { writeSessionRouting } from '../../../session-manager.js';
 import { deleteDestination } from '../../agent-to-agent/db/agent-destinations.js';
+import { writeDestinations } from '../../agent-to-agent/write-destinations.js';
 import { releaseGrant } from '../db/worker-channel-grants.js';
 import { deleteQuestionsForTask } from '../db/worker-questions.js';
 import { claimTaskForFinalize, findRunningTask, releaseTaskClaim } from '../db/worker-tasks.js';
@@ -106,6 +107,16 @@ async function releaseLentConversation(task: WorkerTask): Promise<void> {
     await deleteDestination(grant.helper_agent_group_id, grant.local_destination_name);
   } catch (err) {
     log.warn('Could not remove a lent destination', { taskId: task.task_id, err });
+  }
+
+  // The worker resolves names from its own session's projected map, so the
+  // central delete has to reach the live session too. Left there, `findByName`
+  // still resolves the lent name and the worker is told its message was sent —
+  // for a message the host then refuses.
+  try {
+    await writeDestinations(grant.helper_agent_group_id, grant.helper_session_id);
+  } catch (err) {
+    log.warn('Could not refresh destinations after releasing a lent conversation', { taskId: task.task_id, err });
   }
 
   // The grant and the destination are gone, so re-projecting now writes the
