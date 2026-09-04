@@ -282,8 +282,18 @@ export async function writeSessionRouting(agentGroupId: string, sessionId: strin
 async function liveLentConversation(sessionId: string) {
   const db = getDbIfInitialized();
   if (!db || !(await hasTable(db, 'worker_channel_grants'))) return undefined;
-  const { findLiveGrantForSession } = await import('./modules/worker-delegation/db/worker-channel-grants.js');
-  return findLiveGrantForSession(sessionId);
+
+  // The tables outlive the module: removing it from an install that already
+  // ran its migration leaves them, so the guard above still passes. This runs
+  // on every wake for every agent group, so a throw here would stop the whole
+  // host, not just worker sessions.
+  try {
+    const { findLiveGrantForSession } = await import('./modules/worker-delegation/db/worker-channel-grants.js');
+    return await findLiveGrantForSession(sessionId);
+  } catch (err) {
+    log.error('Worker-delegation tables exist but the module does not', { sessionId, err });
+    return undefined;
+  }
 }
 
 /**

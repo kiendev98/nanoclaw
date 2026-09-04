@@ -16,13 +16,21 @@ import { generateId } from './ids.js';
  *
  * Ordinary on purpose: a late answer still lands as something the agent reads
  * in its next turn, so a missed deadline destroys nothing (C8).
+ *
+ * Two failures, and callers must tell them apart. A throw is transient — the
+ * write failed and a retry may work. `false` is permanent: the target session
+ * no longer exists, so no retry can ever succeed and a caller that treats it
+ * as transient will retry forever.
+ *
+ * @returns True when the message was written and the session woken. False when
+ * the target session is gone.
  */
 export async function deliverToSession(
   agentGroupId: string,
   sessionId: string,
   text: string,
   sender: string,
-): Promise<void> {
+): Promise<boolean> {
   // The session is read BEFORE the write. A scheduled-task session can be
   // deleted while the worker it started is still running, and writing to a
   // session that no longer exists creates a mailbox nothing ever polls — a
@@ -30,7 +38,7 @@ export async function deliverToSession(
   const target = await getSession(sessionId);
   if (!target) {
     log.error('Worker message undeliverable — the target session is gone', { agentGroupId, sessionId, sender });
-    return;
+    return false;
   }
 
   await writeSessionMessage(agentGroupId, sessionId, {
@@ -43,9 +51,10 @@ export async function deliverToSession(
     content: JSON.stringify({ text, sender, senderId: sender }),
   });
   await requestWake(target, 'worker-delegation');
+  return true;
 }
 
 /** Answer the agent that made a request, in its own session. */
-export async function replyToCaller(session: { agent_group_id: string; id: string }, text: string): Promise<void> {
-  await deliverToSession(session.agent_group_id, session.id, text, 'system');
+export async function replyToCaller(session: { agent_group_id: string; id: string }, text: string): Promise<boolean> {
+  return deliverToSession(session.agent_group_id, session.id, text, 'system');
 }

@@ -36,11 +36,11 @@ vi.mock('./container-runner.js', () => ({
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from './db/index.js';
 import { createSession } from './db/sessions.js';
-import { isContainerRunning, restartContainer, wakeContainer } from './container-runner.js';
+import { isContainerRunning, killContainer, restartContainer, wakeContainer } from './container-runner.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { log } from './log.js';
 import { getAgentMailbox } from './mailbox/index.js';
-import { outboundDbPath } from './mailbox/sqlite/paths.js';
+import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
 import { initSessionFolder, writeSessionMessage } from './session-manager.js';
 
 const TEST_DIR = '/tmp/nanoclaw-test-host-sweep-grace';
@@ -52,6 +52,13 @@ const SWEEP_INTERVAL_MS = 60_000;
 
 function now(): string {
   return new Date().toISOString();
+}
+
+/** Spend the message's retry budget, so the reset has nothing left to requeue. */
+function exhaustRetries(messageId: string): void {
+  const db = new Database(inboundDbPath(AG, SESS));
+  db.prepare('UPDATE messages_in SET tries = 5 WHERE id = ?').run(messageId);
+  db.close();
 }
 
 function seedStaleClaim(messageId: string, ageMs: number): void {
@@ -90,6 +97,7 @@ async function runSweepTick(): Promise<void> {
 beforeEach(async () => {
   vi.mocked(isContainerRunning).mockReset().mockReturnValue(false);
   vi.mocked(restartContainer).mockReset();
+  vi.mocked(killContainer).mockReset();
   vi.mocked(wakeContainer)
     .mockReset()
     // Simulate a successful spawn honoring the runner's claim-first contract:
@@ -211,5 +219,26 @@ describe('host sweep incarnation-gated grace period', () => {
     await runSweepTick();
     expect(restartContainer).toHaveBeenCalledTimes(1);
     expect(restartContainer).toHaveBeenCalledWith(SESS, 'claim-stuck');
+    expect(killContainer).not.toHaveBeenCalled();
+  });
+
+  // A restart says the work continues. Once every message has spent its
+  // retries there is nothing left to requeue and no wake is coming, so this
+  // stop is an ending — and a module holding state for the session has to be
+  // told that, or it waits for a run that never resumes.
+  it('ends rather than restarts when the message has spent its retries', async () => {
+    exhaustRetries('m-1');
+
+    await runSweepTick();
+    const { getDb } = await import('./db/index.js');
+    await getDb().run(
+      'UPDATE session_claims SET claimed_at = ? WHERE session_id = ?',
+      new Date(Date.now() - 2 * 60 * 1000).toISOString(),
+      SESS,
+    );
+    await runSweepTick();
+
+    expect(killContainer).toHaveBeenCalledWith(SESS, 'claim-stuck');
+    expect(restartContainer).not.toHaveBeenCalled();
   });
 });

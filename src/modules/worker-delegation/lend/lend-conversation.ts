@@ -17,7 +17,7 @@ import { requestApproval } from '../../approvals/index.js';
 import { createDestination, getDestinationByName, normalizeName } from '../../agent-to-agent/db/agent-destinations.js';
 import { writeDestinations } from '../../agent-to-agent/write-destinations.js';
 import { getAgentGroup } from '../../../db/agent-groups.js';
-import { createGrant, findLiveGrantForSession, releaseGrant } from '../db/worker-channel-grants.js';
+import { createGrant, deleteGrant, findLiveGrantForSession } from '../db/worker-channel-grants.js';
 import { getHelperForPrincipal } from '../db/worker-helpers.js';
 import { findWorkerSession } from '../db/worker-sessions.js';
 import { findRunningTask } from '../db/worker-tasks.js';
@@ -180,7 +180,11 @@ async function openLentConversation(
       created_at: now,
     });
   } catch (error) {
-    await releaseGrant(task.task_id, new Date().toISOString());
+    // Deleted, not released. This grant never granted anything, and the row
+    // would otherwise hold `task_id` forever — every retry for this task would
+    // then be refused as "already holds a conversation" for a conversation it
+    // never had.
+    await deleteGrant(task.task_id);
     throw error;
   }
 

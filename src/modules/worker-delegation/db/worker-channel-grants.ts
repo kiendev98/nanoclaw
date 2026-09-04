@@ -82,3 +82,16 @@ export async function releaseGrant(taskId: string, releasedAt: string): Promise<
   );
   return grant;
 }
+
+/**
+ * Remove a grant that never took effect.
+ *
+ * A released grant keeps its row, because `task_id` is the primary key that
+ * makes "one conversation per task" true under concurrency. That is right for a
+ * grant that was used and is now spent. It is wrong for one whose destination
+ * never got written: the task never held a conversation, and a row left behind
+ * reads as a live collision, so every later attempt is refused for good.
+ */
+export async function deleteGrant(taskId: string): Promise<void> {
+  await getDb().run('DELETE FROM worker_channel_grants WHERE task_id = ?', taskId);
+}

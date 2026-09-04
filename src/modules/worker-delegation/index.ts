@@ -59,7 +59,9 @@ registerDeliveryAction(WORKER_DELEGATE_ACTION, delegateTask, {
   guardAction: workerDelegate,
   precheck: validateDelegateTask,
   requestHold: requestDelegateTaskHold,
-  onDeny: (_content, session, reason) => replyToCaller(session, `delegate_task denied: ${reason}`),
+  onDeny: async (_content, session, reason) => {
+    await replyToCaller(session, `delegate_task denied: ${reason}`);
+  },
 });
 registerApprovalHandler(WORKER_DELEGATE_ACTION, reenterGuardedDeliveryAction(WORKER_DELEGATE_ACTION));
 
@@ -67,7 +69,9 @@ registerDeliveryAction(WORKER_LEND_CONVERSATION_ACTION, lendConversation, {
   guardAction: workerLendConversation,
   precheck: validateLendConversation,
   requestHold: requestLendConversationHold,
-  onDeny: (_content, session, reason) => replyToCaller(session, `lend_conversation denied: ${reason}`),
+  onDeny: async (_content, session, reason) => {
+    await replyToCaller(session, `lend_conversation denied: ${reason}`);
+  },
 });
 registerApprovalHandler(WORKER_LEND_CONVERSATION_ACTION, reenterGuardedDeliveryAction(WORKER_LEND_CONVERSATION_ACTION));
 

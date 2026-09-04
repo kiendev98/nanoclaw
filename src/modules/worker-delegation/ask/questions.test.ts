@@ -12,19 +12,22 @@ import { runMigrations } from '../../../db/migrations/index.js';
 import { registerWorkerMigration } from '../db/migrate.js';
 import type { Session } from '../../../types.js';
 
-const { delivered, refusals } = vi.hoisted(() => ({
+const { delivered, refusals, unreachable } = vi.hoisted(() => ({
   delivered: [] as Array<{ sessionId: string; text: string }>,
   refusals: [] as string[],
+  /** Session ids whose delivery reports the target as gone. */
+  unreachable: new Set<string>(),
 }));
 
 vi.mock('../notify.js', () => ({
   deliverToSession: (_agentGroupId: string, sessionId: string, text: string) => {
+    if (unreachable.has(sessionId)) return Promise.resolve(false);
     delivered.push({ sessionId, text });
-    return Promise.resolve();
+    return Promise.resolve(true);
   },
   replyToCaller: (_session: Session, text: string) => {
     refusals.push(text);
-    return Promise.resolve();
+    return Promise.resolve(true);
   },
 }));
 
@@ -62,6 +65,7 @@ async function askOne(question = 'should --dry-run skip the seed step?'): Promis
 beforeEach(async () => {
   delivered.length = 0;
   refusals.length = 0;
+  unreachable.clear();
   registerWorkerMigration();
   await runMigrations(await initTestDb());
   await createTask(task);
@@ -91,6 +95,29 @@ describe('askPrincipal', () => {
     await askPrincipal({ question: 'anything?' }, { id: 'sess-other', agent_group_id: 'ag-x' } as Session);
     expect(delivered).toHaveLength(0);
     expect(refusals.at(-1)).toContain('no running task');
+  });
+
+  // Nobody can answer a question that reached no one, and C9 forbids asking
+  // again. Left open, the helper would wait out its whole bound for an answer
+  // that was never coming.
+  it('takes the question back when the principal cannot be reached', async () => {
+    unreachable.add('sess-principal');
+
+    await askPrincipal({ question: 'should --dry-run skip the seed step?' }, HELPER_SESSION);
+
+    expect(await findOpenQuestion('sess-helper')).toBeUndefined();
+    expect(refusals.at(-1)).toContain('no longer reachable');
+  });
+
+  it('lets the helper ask again after an undeliverable question', async () => {
+    unreachable.add('sess-principal');
+    await askPrincipal({ question: 'first' }, HELPER_SESSION);
+    unreachable.clear();
+
+    await askPrincipal({ question: 'second' }, HELPER_SESSION);
+
+    expect(delivered.filter((d) => d.sessionId === 'sess-principal')).toHaveLength(1);
+    expect(await findOpenQuestion('sess-helper')).toBeDefined();
   });
 });
 

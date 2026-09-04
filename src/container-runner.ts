@@ -855,8 +855,18 @@ async function resolveProviderContribution(
 async function workerWorktreePath(sessionId: string): Promise<string | null> {
   const db = getDbIfInitialized();
   if (!db || !(await hasTable(db, 'worker_sessions'))) return null;
-  const { getWorkerSession } = await import('./modules/worker-delegation/db/worker-sessions.js');
-  return (await getWorkerSession(sessionId))?.worktree_path ?? null;
+
+  // The tables outlive the module: removing it from an install that already
+  // ran its migration leaves them, so the guard above still passes. This runs
+  // on every spawn for every agent group, so a throw here would stop every
+  // container from starting, not just worker ones.
+  try {
+    const { getWorkerSession } = await import('./modules/worker-delegation/db/worker-sessions.js');
+    return (await getWorkerSession(sessionId))?.worktree_path ?? null;
+  } catch (err) {
+    log.error('Worker-delegation tables exist but the module does not', { sessionId, err });
+    return null;
+  }
 }
 
 export async function buildMounts(

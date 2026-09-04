@@ -36,7 +36,7 @@ import { getSession, isTaskThread, updateSession } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { log } from './log.js';
 import { heartbeatPath, withExistingMailboxSession } from './session-manager.js';
-import { getContainerStartedAtMs, isContainerRunning, restartContainer } from './container-runner.js';
+import { getContainerStartedAtMs, isContainerRunning, killContainer, restartContainer } from './container-runner.js';
 import { requestWake } from './request-wake.js';
 import type { Session } from './types.js';
 import type { ContainerState, InboundMailbox, OutboundMailbox } from './mailbox/index.js';
@@ -264,8 +264,7 @@ async function enforceRunningContainerSla(
       heartbeatAgeMs: decision.heartbeatAgeMs,
       ceilingMs: decision.ceilingMs,
     });
-    restartContainer(session.id, 'absolute-ceiling');
-    resetStuckProcessingRows(inDb, outDb, session, 'absolute-ceiling');
+    stopStuckContainer(inDb, outDb, session, 'absolute-ceiling');
     return;
   }
 
@@ -275,8 +274,23 @@ async function enforceRunningContainerSla(
     claimAgeMs: decision.claimAgeMs,
     toleranceMs: decision.toleranceMs,
   });
-  restartContainer(session.id, 'claim-stuck');
-  resetStuckProcessingRows(inDb, outDb, session, 'claim-stuck');
+  stopStuckContainer(inDb, outDb, session, 'claim-stuck');
+}
+
+/**
+ * Stop a stuck container, and say whether its work continues.
+ *
+ * The reset decides that, not this function: it requeues what can still be
+ * retried, so a stop that leaves something requeued is a restart. A stop that
+ * leaves nothing is an ending — every message hit `MAX_TRIES` and no wake is
+ * coming. A module holding state for this session has to hear the difference.
+ * Told "restarting" when nothing will restart, it waits for a run that never
+ * resumes.
+ */
+function stopStuckContainer(inDb: InboundMailbox, outDb: OutboundMailbox, session: Session, reason: string): void {
+  const resumes = resetStuckProcessingRows(inDb, outDb, session, reason);
+  if (resumes) restartContainer(session.id, reason);
+  else killContainer(session.id, reason);
 }
 
 export function _resetStuckProcessingRowsForTesting(
@@ -288,14 +302,22 @@ export function _resetStuckProcessingRowsForTesting(
   resetStuckProcessingRows(inDb, outDb, session, reason);
 }
 
+/**
+ * Requeue what a fresh container can still pick up.
+ *
+ * @returns True when at least one message is waiting for a respawn, so the
+ * caller knows whether stopping the container ends the run or only interrupts
+ * it. False means every message is spent and nothing will wake this session.
+ */
 function resetStuckProcessingRows(
   inDb: InboundMailbox,
   outDb: OutboundMailbox,
   session: Session,
   reason: string,
-): void {
+): boolean {
   const claims = outDb.getProcessingClaims();
   const now = Date.now();
+  let resumes = false;
   for (const { messageId } of claims) {
     const msg = inDb.getMessageForRetry(messageId, 'pending');
     if (!msg) continue;
@@ -303,7 +325,10 @@ function resetStuckProcessingRows(
     // Already rescheduled for a future retry — don't bump tries again. The
     // wake path (sweep step 2) will fire when process_after elapses and a
     // fresh container will clean the orphan claim on startup.
-    if (msg.processAfter && Date.parse(msg.processAfter) > now) continue;
+    if (msg.processAfter && Date.parse(msg.processAfter) > now) {
+      resumes = true;
+      continue;
+    }
 
     if (msg.tries >= MAX_TRIES) {
       inDb.markMessageFailed(msg.id);
@@ -313,6 +338,7 @@ function resetStuckProcessingRows(
         reason,
       });
     } else {
+      resumes = true;
       const backoffMs = BACKOFF_BASE_MS * Math.pow(2, msg.tries);
       const backoffSec = Math.floor(backoffMs / 1000);
       inDb.retryWithBackoff(msg.id, backoffSec);
@@ -337,4 +363,6 @@ function resetStuckProcessingRows(
   } catch (err) {
     log.warn('Failed to clear orphan processing claims', { sessionId: session.id, err });
   }
+
+  return resumes;
 }

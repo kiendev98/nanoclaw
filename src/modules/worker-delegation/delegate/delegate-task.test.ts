@@ -23,10 +23,10 @@ const { refusals, holds } = vi.hoisted(() => ({
 }));
 
 vi.mock('../notify.js', () => ({
-  deliverToSession: vi.fn().mockResolvedValue(undefined),
+  deliverToSession: vi.fn().mockResolvedValue(true),
   replyToCaller: (_session: Session, text: string) => {
     refusals.push(text);
-    return Promise.resolve();
+    return Promise.resolve(true);
   },
 }));
 

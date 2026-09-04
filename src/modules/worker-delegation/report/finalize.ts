@@ -57,8 +57,14 @@ export async function finalizeWorkerTaskIfRunning(helperSessionId: string, reaso
   // same task twice. So a delivery that fails after it would turn "exactly
   // one report" into none. Hand the claim back instead, and let the terminal
   // event try again.
+  //
+  // Only a THROW earns that handback. A `false` means the principal's session
+  // no longer exists, and no number of retries brings it back — handing the
+  // claim back there would leave the task running for good, holding its lent
+  // conversation, waiting for a reader that is gone.
+  let delivered: boolean;
   try {
-    await deliverToSession(
+    delivered = await deliverToSession(
       claimed.principal_agent_group_id,
       claimed.principal_session_id,
       reportText(claimed, reason),
@@ -69,6 +75,14 @@ export async function finalizeWorkerTaskIfRunning(helperSessionId: string, reaso
     log.error('Worker report undelivered', { taskId: claimed.task_id, reason, willRetry: handedBack, err });
     if (handedBack) return false;
     throw err;
+  }
+
+  if (!delivered) {
+    log.error('Worker report has no reader — finalizing anyway so the task does not hang', {
+      taskId: claimed.task_id,
+      reason,
+      principalSessionId: claimed.principal_session_id,
+    });
   }
 
   // Only now: the lent conversation and the open question outlive a failed

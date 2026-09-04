@@ -55,7 +55,7 @@ export async function askPrincipal(content: Record<string, unknown>, session: Se
   };
   await createQuestion(question);
 
-  await deliverToSession(
+  const delivered = await deliverToSession(
     task.principal_agent_group_id,
     task.principal_session_id,
     [
@@ -67,6 +67,20 @@ export async function askPrincipal(content: Record<string, unknown>, session: Se
     ].join('\n'),
     `${task.repo_name}-worker`,
   );
+
+  // Nobody can answer a question that reached no one, and C9 forbids asking
+  // again. Left open, the helper would wait out its whole bound for an answer
+  // that was never coming. Take the question back and say so instead.
+  if (!delivered) {
+    await consumeQuestion(question.question_id);
+    await replyToCaller(
+      session,
+      'ask_principal failed: your principal is no longer reachable, so nobody can answer. Say what you are blocked on and stop.',
+    );
+    log.error('Worker question undeliverable', { questionId: question.question_id, taskId: task.task_id });
+    return;
+  }
+
   log.info('Worker question raised', { questionId: question.question_id, taskId: task.task_id });
 }
 

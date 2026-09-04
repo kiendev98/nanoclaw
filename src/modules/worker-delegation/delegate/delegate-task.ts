@@ -13,7 +13,7 @@ import { log } from '../../../log.js';
 import type { Session } from '../../../types.js';
 import { requestApproval } from '../../approvals/index.js';
 import { isUniqueViolation } from '../../../db/errors.js';
-import { createTask, findRunningTask } from '../db/worker-tasks.js';
+import { claimTaskForFinalize, createTask, findRunningTask } from '../db/worker-tasks.js';
 import { ensureHelperAgentGroup, ensureHelperSession, providerOf } from './helper-session.js';
 import { deliverToSession, replyToCaller } from '../notify.js';
 import { WORKER_DELEGATE_ACTION } from '../guard.js';
@@ -145,12 +145,23 @@ export async function delegateTask(content: Record<string, unknown>, session: Se
     return;
   }
 
-  await deliverToSession(
+  const delivered = await deliverToSession(
     helper.helper_agent_group_id,
     helperSessionId,
     [`New task (id ${task.task_id}) in the ${repo.name} repository:`, '', request.task].join('\n'),
     'principal',
   );
+
+  // The task row would otherwise sit `running` with nobody working it, and the
+  // caller was promised exactly one report. Take it back and say so, rather
+  // than blocking the next delegation behind a task that never started.
+  if (!delivered) {
+    await claimTaskForFinalize(task.task_id, new Date().toISOString());
+    log.error('Worker task undeliverable', { taskId: task.task_id, helperSessionId });
+    await replyToCaller(session, `delegate_task failed: the ${repo.name} worker session could not be reached.`);
+    return;
+  }
+
   await replyToCaller(
     session,
     `Delegated to the ${repo.name} worker (task ${task.task_id}). You will receive exactly one report when it finishes.`,
