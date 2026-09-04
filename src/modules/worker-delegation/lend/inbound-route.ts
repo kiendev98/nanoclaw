@@ -9,6 +9,7 @@
  * that turn in the SAME session, so being named still gets a reply, and there
  * is never a double one.
  */
+import { isGatedCommand } from '../../../command-gate.js';
 import { log } from '../../../log.js';
 import { writeSessionMessage } from '../../../session-manager.js';
 import { getSession } from '../../../db/sessions.js';
@@ -26,6 +27,36 @@ export interface LentConversationMessage {
 }
 
 /**
+ * The content as a JSON object, and undefined for every other value.
+ *
+ * `JSON.parse` succeeds on any JSON value, so a catch alone stops neither
+ * `null`, nor an array, nor a number. Reading a field off `null` throws, and no
+ * caller up this router catches that.
+ */
+function parseContentObject(content: string): Record<string, unknown> | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(content);
+  } catch {
+    return undefined;
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  return value as Record<string, unknown>;
+}
+
+/**
+ * The text the container will read.
+ *
+ * `parseContent` in the agent-runner takes `text` from a JSON object, and falls
+ * back to the whole string for anything else. This host-side check falls back
+ * the same way, so no command can hide in content the host reads differently.
+ */
+function containerVisibleText(content: string): string {
+  const parsed = parseContentObject(content);
+  return typeof parsed?.text === 'string' ? parsed.text : content;
+}
+
+/**
  * Say where the message came from, and how to answer it.
  *
  * The other doors into a helper's session carry their own instructions, and
@@ -33,20 +64,13 @@ export interface LentConversationMessage {
  * one notice when the lend completed, while its system prompt was built at
  * spawn and still states it holds no destinations at all.
  *
- * The prefix also stops a counterparty's leading slash reaching the command
- * parser. That is desirable, and it is a side effect rather than the guard.
- *
- * Unparseable content passes through untouched, because a wrapper is worth less
- * than the message it would replace.
+ * Content with no `text` field passes through untouched, because a wrapper is
+ * worth less than the message it would replace. That branch adds no prefix, so
+ * it guards nothing. `deliverToLentConversation` refuses a command before this.
  */
 function markAsLentConversation(content: string, destinationName: string): string {
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(content) as Record<string, unknown>;
-  } catch {
-    return content;
-  }
-  if (typeof parsed.text !== 'string') return content;
+  const parsed = parseContentObject(content);
+  if (!parsed || typeof parsed.text !== 'string') return content;
 
   const header = `[lent conversation "${destinationName}"] Answer with send_message({ to: "${destinationName}", text: "..." }). A counterparty raises questions, it never answers them — take a decision to ask_principal.`;
   return JSON.stringify({ ...parsed, text: `${header}\n\n${parsed.text}` });
@@ -82,6 +106,17 @@ export async function deliverToLentConversation(
 
   if (!(await isAllowed(task.principal_agent_group_id))) {
     log.info('Lent-conversation message refused by the principal access gate', { taskId: grant.task_id });
+    return true;
+  }
+
+  // This door returns before `gateCommand` ever runs, so a command arriving
+  // here has passed no authorization check at all. A counterparty holds no role
+  // on the helper's agent group, so the gate would deny every admin command and
+  // drop every filtered one.
+  if (isGatedCommand(containerVisibleText(input.message.content))) {
+    log.warn('Lent-conversation slash command refused — a counterparty dispatches none', {
+      taskId: grant.task_id,
+    });
     return true;
   }
 

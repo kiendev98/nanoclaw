@@ -13,6 +13,7 @@ import type { Session } from '../../../types.js';
 import { bindGrantThread, findGrantByRootMessage } from '../db/worker-channel-grants.js';
 import { consumeQuestion, findOpenQuestion } from '../db/worker-questions.js';
 import { deliverToSession, replyToCaller } from '../notify.js';
+import type { WorkerChannelGrant } from '../types.js';
 import { rememberLentThread } from './lent-threads.js';
 
 /**
@@ -35,6 +36,89 @@ function lentConversationNotice(destinationName: string, closedQuestionId?: stri
     );
   }
   return notice.join(' ');
+}
+
+/**
+ * Close the question the lend answered, and name it only when this closed it.
+ *
+ * A worker asks for a conversation through ask_principal, and the principal
+ * answers with the lend itself. The question stays open. C9 then refuses every
+ * later ask for the rest of the task.
+ *
+ * Here, not at write time. A lend whose root post is never named grants
+ * nothing, and consuming the question there strands the worker. Before the
+ * delivery, not after. A notice that fails must still leave the worker free to
+ * ask again.
+ *
+ * `answer_worker_question` can delete the same row between the read and the
+ * delete. The notice then names a question that another action closed, which is
+ * untrue, so the caller learns nothing about it.
+ */
+async function closeAnsweredQuestion(helperSessionId: string): Promise<string | undefined> {
+  const open = await findOpenQuestion(helperSessionId);
+  if (!open) return undefined;
+  const consumed = await consumeQuestion(open.question_id);
+  return consumed ? open.question_id : undefined;
+}
+
+/**
+ * The extra fact the principal needs after a failed notice.
+ *
+ * The lend spent the worker's one open question, and the worker never heard the
+ * notice that named it. Only the principal is left to know that.
+ */
+function closedQuestionNote(closedQuestionId: string | undefined): string {
+  if (!closedQuestionId) return '';
+  return ` The lend also closed its open question ${closedQuestionId}, and the worker was not told.`;
+}
+
+/**
+ * Tell the worker it holds the conversation, and tell the principal when that
+ * fails.
+ *
+ * The hook fires once and delivery swallows what it throws, so no retry
+ * follows. A throw is transient and a dead session is permanent, so the two
+ * messages stay different words.
+ */
+async function tellWorkerItHoldsTheConversation(
+  grant: WorkerChannelGrant,
+  session: Session,
+  closedQuestionId: string | undefined,
+): Promise<void> {
+  const questionNote = closedQuestionNote(closedQuestionId);
+  let told: boolean;
+  try {
+    told = await deliverToSession(
+      grant.helper_agent_group_id,
+      grant.helper_session_id,
+      lentConversationNotice(grant.local_destination_name, closedQuestionId),
+      'principal',
+    );
+  } catch (err) {
+    // The conversation itself still works, because a counterparty reply routes
+    // to the worker through the bound thread (D6).
+    log.error('A lent conversation notice failed', {
+      taskId: grant.task_id,
+      helperSessionId: grant.helper_session_id,
+      err,
+    });
+    await replyToCaller(
+      session,
+      `lend_conversation: the conversation is live, but the notice to the ${grant.helper_agent_group_id} worker did not go through, so it does not know it holds one. A reply in that thread still reaches it.${questionNote}`,
+    );
+    return;
+  }
+
+  if (!told) {
+    log.error('A lent conversation reached no worker', {
+      taskId: grant.task_id,
+      helperSessionId: grant.helper_session_id,
+    });
+    await replyToCaller(
+      session,
+      `lend_conversation failed: the ${grant.helper_agent_group_id} worker session is gone, so it was never told about the conversation you lent it.${questionNote}`,
+    );
+  }
 }
 
 export async function bindLentConversationThread(
@@ -71,53 +155,11 @@ export async function bindLentConversationThread(
   // so every other room keeps the cap.
   rememberLentThread(msg.channelType, msg.platformId, info.platformMsgId);
 
-  // A worker asks for a conversation through ask_principal, and the principal
-  // answers with the lend itself. The question stays open. C9 then refuses
-  // every later ask for the rest of the task.
-  //
-  // Here, not at write time. A lend whose root post is never named grants
-  // nothing, and consuming the question there strands the worker. Before the
-  // delivery, not after. A notice that fails must still leave the worker free
-  // to ask again.
-  const open = await findOpenQuestion(grant.helper_session_id);
-  if (open) await consumeQuestion(open.question_id);
+  const closedQuestionId = await closeAnsweredQuestion(grant.helper_session_id);
 
   // Last, and only last. The three steps above are what make the conversation
   // real: the destination is projected, routing carries the bound thread, and
   // the admission exemption is armed. A worker woken any earlier posts outside
   // the one thread it was lent.
-  let told: boolean;
-  try {
-    told = await deliverToSession(
-      grant.helper_agent_group_id,
-      grant.helper_session_id,
-      lentConversationNotice(grant.local_destination_name, open?.question_id),
-      'principal',
-    );
-  } catch (err) {
-    // The hook fires once and delivery swallows what it throws, so no retry
-    // follows. The conversation itself still works, because a counterparty
-    // reply routes to the worker through the bound thread (D6).
-    log.error('A lent conversation notice failed', {
-      taskId: grant.task_id,
-      helperSessionId: grant.helper_session_id,
-      err,
-    });
-    await replyToCaller(
-      session,
-      `lend_conversation: the conversation is live, but the notice to the ${grant.helper_agent_group_id} worker did not go through, so it does not know it holds one. A reply in that thread still reaches it.`,
-    );
-    return;
-  }
-
-  if (!told) {
-    log.error('A lent conversation reached no worker', {
-      taskId: grant.task_id,
-      helperSessionId: grant.helper_session_id,
-    });
-    await replyToCaller(
-      session,
-      `lend_conversation failed: the ${grant.helper_agent_group_id} worker session is gone, so it was never told about the conversation you lent it.`,
-    );
-  }
+  await tellWorkerItHoldsTheConversation(grant, session, closedQuestionId);
 }

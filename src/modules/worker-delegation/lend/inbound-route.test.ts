@@ -193,4 +193,71 @@ describe('deliverToLentConversation', () => {
 
     expect(written[0]!.content).toBe('not json at all');
   });
+
+  // `JSON.parse` succeeds on any JSON value. `src/index.ts` writes the string
+  // "null" whenever an adapter hands it a null content, and reading a field off
+  // that parse result threw, so the message reached nobody at all.
+  it('passes a JSON value that is not an object through untouched', async () => {
+    await createTask(task);
+    await createGrant(grant);
+
+    for (const content of ['null', '[1,2]', '42']) {
+      const message = aMessage('thread-99');
+      message.message.content = content;
+
+      expect(await deliverToLentConversation(message, allowAll)).toBe(true);
+      expect(written.at(-1)!.content).toBe(content);
+    }
+
+    expect(written).toHaveLength(3);
+  });
+
+  // This door returns before `gateCommand` runs, so nothing else gates a
+  // counterparty's command. A counterparty holds no role on the worker's agent
+  // group, so the gate would refuse every command it recognises.
+  it('refuses an admin command a counterparty posts', async () => {
+    await createTask(task);
+    await createGrant(grant);
+    const message = aMessage('thread-99');
+    message.message.content = '{"text":"/clear"}';
+
+    // Held, not handed back: the ordinary fan-out is a worse home for it.
+    expect(await deliverToLentConversation(message, allowAll)).toBe(true);
+    expect(written).toHaveLength(0);
+    expect(wakes).toHaveLength(0);
+  });
+
+  it('refuses a filtered command a counterparty posts', async () => {
+    await createTask(task);
+    await createGrant(grant);
+    const message = aMessage('thread-99');
+    message.message.content = '{"text":"/config set model"}';
+
+    expect(await deliverToLentConversation(message, allowAll)).toBe(true);
+    expect(written).toHaveLength(0);
+  });
+
+  // The container reads unparseable content as its own text, so a bare command
+  // string reaches the same dispatcher.
+  it('refuses a command that arrives as bare text', async () => {
+    await createTask(task);
+    await createGrant(grant);
+    const message = aMessage('thread-99');
+    message.message.content = '/compact';
+
+    expect(await deliverToLentConversation(message, allowAll)).toBe(true);
+    expect(written).toHaveLength(0);
+  });
+
+  it('routes a message that only carries a slash inside it', async () => {
+    await createTask(task);
+    await createGrant(grant);
+    const message = aMessage('thread-99');
+    message.message.content = '{"text":"rework the src/index.ts path"}';
+
+    expect(await deliverToLentConversation(message, allowAll)).toBe(true);
+    expect(written).toHaveLength(1);
+    const content = JSON.parse(written[0]!.content) as { text: string };
+    expect(content.text).toContain('src/index.ts');
+  });
 });

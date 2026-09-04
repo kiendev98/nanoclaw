@@ -12,13 +12,28 @@ import type { OutboundMessage } from '../../../mailbox/index.js';
 import type { Session } from '../../../types.js';
 import type { WorkerChannelGrant, WorkerQuestion } from '../types.js';
 
-const { steps, delivered, warnings, deliveryFails, deliveryThrows } = vi.hoisted(() => ({
+const { steps, delivered, warnings, deliveryFails, deliveryThrows, answerRace } = vi.hoisted(() => ({
   steps: [] as string[],
   delivered: [] as Array<{ agentGroupId: string; sessionId: string; text: string; sender: string }>,
   warnings: [] as string[],
   deliveryFails: { value: false },
   deliveryThrows: { value: false },
+  answerRace: { value: false },
 }));
+
+// `answer_worker_question` can delete the row between the hook's read and its
+// delete. This mock consumes it in exactly that window.
+vi.mock('../db/worker-questions.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../db/worker-questions.js')>();
+  return {
+    ...actual,
+    findOpenQuestion: async (helperSessionId: string) => {
+      const open = await actual.findOpenQuestion(helperSessionId);
+      if (open && answerRace.value) await actual.consumeQuestion(open.question_id);
+      return open;
+    },
+  };
+});
 
 vi.mock('../notify.js', () => ({
   deliverToSession: vi.fn((agentGroupId: string, sessionId: string, text: string, sender: string) => {
@@ -109,6 +124,7 @@ beforeEach(async () => {
   warnings.length = 0;
   deliveryFails.value = false;
   deliveryThrows.value = false;
+  answerRace.value = false;
   registerWorkerMigration();
   await runMigrations(await initTestDb());
 });
@@ -247,5 +263,53 @@ describe('bindLentConversationThread', () => {
     expect(warnings.at(-1)).toContain('the conversation is live');
     expect(warnings.at(-1)).not.toContain('worker session is gone');
     expect((await findLiveGrantForTask('wt-1'))?.thread_id).toBe('1788.42');
+  });
+
+  // The question is closed before the notice, so a failed notice costs the
+  // worker its one open ask and tells it nothing. The principal is the only
+  // party left who can learn both halves of that.
+  it('tells the principal the question closed when the notice throws', async () => {
+    await createGrant(aGrant());
+    await createQuestion(anOpenQuestion({ question_id: 'wq-7' }));
+    deliveryThrows.value = true;
+
+    await bindLentConversationThread(aRootPost(), PRINCIPAL, { firstDelivery: false, platformMsgId: '1788.42' });
+
+    expect(warnings.at(-1)).toContain('did not go through');
+    expect(warnings.at(-1)).toContain('closed its open question wq-7');
+    expect(warnings.at(-1)).toContain('the worker was not told');
+  });
+
+  it('tells the principal the question closed when the worker session is gone', async () => {
+    await createGrant(aGrant());
+    await createQuestion(anOpenQuestion({ question_id: 'wq-7' }));
+    deliveryFails.value = true;
+
+    await bindLentConversationThread(aRootPost(), PRINCIPAL, { firstDelivery: false, platformMsgId: '1788.42' });
+
+    expect(warnings.at(-1)).toContain('worker session is gone');
+    expect(warnings.at(-1)).toContain('closed its open question wq-7');
+  });
+
+  it('says nothing about a question when the worker had none open and the notice throws', async () => {
+    await createGrant(aGrant());
+    deliveryThrows.value = true;
+
+    await bindLentConversationThread(aRootPost(), PRINCIPAL, { firstDelivery: false, platformMsgId: '1788.42' });
+
+    expect(warnings.at(-1)).not.toContain('question');
+  });
+
+  // Another answer can close the same question first. Naming it then credits
+  // this lend with a close it never made.
+  it('names no question when another answer closed it first', async () => {
+    await createGrant(aGrant());
+    await createQuestion(anOpenQuestion({ question_id: 'wq-7' }));
+    answerRace.value = true;
+
+    await bindLentConversationThread(aRootPost(), PRINCIPAL, { firstDelivery: false, platformMsgId: '1788.42' });
+
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]!.text).not.toContain('question');
   });
 });
