@@ -121,3 +121,113 @@ describe('ensureWorktree', () => {
     expect((thrown as Error).message).not.toContain(tmp);
   });
 });
+
+/**
+ * `git worktree add` writes each gitlink and leaves the directory empty, and
+ * git calls its own submodule support in worktrees incomplete. Observed: a
+ * worker handed an empty submodule read the operator's checkout instead.
+ *
+ * The submodule is named `shared-lib` and checked out at `vendor/lib` on
+ * purpose. git stores it under the name, so a lookup keyed on the path misses
+ * it and falls back to the network.
+ */
+describe('ensureWorktree with a submodule', () => {
+  let modulePath: string;
+
+  beforeEach(() => {
+    modulePath = path.join(tmp, 'shared-lib');
+    fs.mkdirSync(modulePath, { recursive: true });
+    git(modulePath, ['init', '--quiet']);
+    git(modulePath, ['config', 'user.name', 'Test Operator']);
+    git(modulePath, ['config', 'user.email', 'operator@example.com']);
+    fs.writeFileSync(path.join(modulePath, 'lib.txt'), 'shared\n');
+    git(modulePath, ['add', 'lib.txt']);
+    git(modulePath, ['commit', '--quiet', '-m', 'lib']);
+
+    git(repoPath, [
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '--quiet',
+      '--name',
+      'shared-lib',
+      modulePath,
+      'vendor/lib',
+    ]);
+    git(repoPath, ['commit', '--quiet', '-m', 'add submodule']);
+  });
+
+  it('checks the submodule out into the working copy', () => {
+    const handle = ensureWorktree(repoPath, 'nanoclaw', 'sess-1');
+
+    expect(fs.readFileSync(path.join(handle.worktreePath, 'vendor/lib/lib.txt'), 'utf-8')).toBe('shared\n');
+  });
+
+  // The source clone already holds the objects. Cloning per worker costs a full
+  // copy and a network round trip, on a thread this module caps at 30 seconds.
+  it('takes the submodule from the source clone, never the remote', () => {
+    fs.renameSync(modulePath, `${modulePath}-gone`);
+
+    const handle = ensureWorktree(repoPath, 'nanoclaw', 'sess-1');
+
+    expect(fs.readFileSync(path.join(handle.worktreePath, 'vendor/lib/lib.txt'), 'utf-8')).toBe('shared\n');
+  });
+
+  it('leaves the superproject tree clean', () => {
+    const handle = ensureWorktree(repoPath, 'nanoclaw', 'sess-1');
+
+    expect(git(handle.worktreePath, ['status', '--porcelain'])).toBe('');
+  });
+
+  // The worker commits its work inside the submodule, so that copy has to be a
+  // writable checkout rather than a read-only export.
+  it('gives the worker a submodule it can commit in', () => {
+    const handle = ensureWorktree(repoPath, 'nanoclaw', 'sess-1');
+    const submodule = path.join(handle.worktreePath, 'vendor/lib');
+    fs.writeFileSync(path.join(submodule, 'lib.txt'), 'worker edit\n');
+
+    git(submodule, ['-c', 'user.name=w', '-c', 'user.email=w@example.invalid', 'commit', '--quiet', '-am', 'edit']);
+
+    expect(git(submodule, ['log', '--oneline', '-1'])).toContain('edit');
+  });
+
+  // A prune inside the submodule would take the worker's uncommitted work.
+  it('locks the submodule copy against a prune', () => {
+    const handle = ensureWorktree(repoPath, 'nanoclaw', 'sess-1');
+    const moduleDir = path.join(repoPath, '.git', 'modules', 'shared-lib');
+
+    expect(git(moduleDir, ['worktree', 'list', '--porcelain'])).toContain('locked');
+    git(moduleDir, ['worktree', 'prune']);
+    expect(fs.existsSync(path.join(handle.worktreePath, 'vendor/lib/lib.txt'))).toBe(true);
+  });
+
+  // A respawned helper must not lose what it wrote inside the submodule.
+  it('adopts the populated submodule on a second call', () => {
+    const first = ensureWorktree(repoPath, 'nanoclaw', 'sess-1');
+    fs.writeFileSync(path.join(first.worktreePath, 'vendor/lib/in-progress.txt'), 'half-done\n');
+
+    const again = ensureWorktree(repoPath, 'nanoclaw', 'sess-1');
+
+    expect(fs.readFileSync(path.join(again.worktreePath, 'vendor/lib/in-progress.txt'), 'utf-8')).toBe('half-done\n');
+  });
+
+  // E3 again: the submodule refusal carries its own message, and the agent
+  // reads it. A hollow submodule must fail loudly rather than reach the worker.
+  it('refuses without naming a host path when neither route can supply it', () => {
+    fs.rmSync(path.join(repoPath, '.git', 'modules', 'shared-lib'), { recursive: true, force: true });
+    fs.renameSync(modulePath, `${modulePath}-gone`);
+
+    let thrown: unknown;
+    try {
+      ensureWorktree(repoPath, 'nanoclaw', 'sess-1');
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(WorktreeError);
+    expect((thrown as Error).message).toContain('vendor/lib');
+    expect((thrown as Error).message).toContain('nanoclaw');
+    expect((thrown as Error).message).not.toContain(tmp);
+  });
+});
