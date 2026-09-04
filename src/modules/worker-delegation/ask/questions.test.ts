@@ -167,6 +167,20 @@ describe('answerWorkerQuestion', () => {
     expect(refusals.at(-1)).toContain('not open');
   });
 
+  // The question is spent by the time delivery is attempted, so there is
+  // nothing to re-ask. Reporting success would tell the principal its answer
+  // landed when the worker never saw it.
+  it('tells the principal when the worker session is gone', async () => {
+    const questionId = await askOne();
+    unreachable.add('sess-helper');
+
+    await answerWorkerQuestion({ questionId, answer: 'yes' }, PRINCIPAL_SESSION);
+
+    expect(delivered.some((d) => d.sessionId === 'sess-helper')).toBe(false);
+    expect(refusals.at(-1)).toContain('reached nobody');
+    expect(refusals.at(-1)).not.toContain('Answer delivered');
+  });
+
   it('requires both a question id and an answer', async () => {
     await answerWorkerQuestion({ questionId: 'wq-1' }, PRINCIPAL_SESSION);
     expect(refusals.at(-1)).toContain('required');

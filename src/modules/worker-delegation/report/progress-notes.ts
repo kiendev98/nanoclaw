@@ -31,7 +31,7 @@ export async function sendProgressNote(content: Record<string, unknown>, session
     return;
   }
 
-  await deliverToSession(
+  const delivered = await deliverToSession(
     task.principal_agent_group_id,
     task.principal_session_id,
     [
@@ -41,4 +41,18 @@ export async function sendProgressNote(content: Record<string, unknown>, session
     ].join('\n'),
     `${task.repo_name}-worker`,
   );
+
+  // The allowance is already spent, and a note is not worth re-spending it on.
+  // But the worker must not read silence as delivery: its principal is gone,
+  // which is the same thing its report will hit at the end of the task.
+  if (!delivered) {
+    log.error('Worker progress note undeliverable', {
+      taskId: task.task_id,
+      principalSessionId: task.principal_session_id,
+    });
+    await replyToCaller(
+      session,
+      'send_progress_note: your principal is no longer reachable, so the note went nowhere.',
+    );
+  }
 }

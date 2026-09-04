@@ -11,19 +11,21 @@ import { runMigrations } from '../../../db/migrations/index.js';
 import { registerWorkerMigration } from '../db/migrate.js';
 import type { Session } from '../../../types.js';
 
-const { delivered, refusals } = vi.hoisted(() => ({
+const { delivered, refusals, principalGone } = vi.hoisted(() => ({
   delivered: [] as string[],
   refusals: [] as string[],
+  principalGone: { value: false },
 }));
 
 vi.mock('../notify.js', () => ({
   deliverToSession: (_agentGroupId: string, _sessionId: string, text: string) => {
+    if (principalGone.value) return Promise.resolve(false);
     delivered.push(text);
-    return Promise.resolve();
+    return Promise.resolve(true);
   },
   replyToCaller: (_session: Session, text: string) => {
     refusals.push(text);
-    return Promise.resolve();
+    return Promise.resolve(true);
   },
 }));
 
@@ -58,6 +60,7 @@ function spacedOut(index: number): Date {
 beforeEach(async () => {
   delivered.length = 0;
   refusals.length = 0;
+  principalGone.value = false;
   registerWorkerMigration();
   await runMigrations(await initTestDb());
   await createTask(task);
@@ -68,6 +71,17 @@ afterEach(async () => {
 });
 
 describe('sendProgressNote', () => {
+  // The allowance is spent either way, so silence would read to the worker as
+  // a delivered note — and its report will hit the same gone principal later.
+  it('tells the worker when its principal is no longer reachable', async () => {
+    principalGone.value = true;
+
+    await sendProgressNote({ text: 'tests pass' }, HELPER_SESSION);
+
+    expect(delivered).toHaveLength(0);
+    expect(refusals.at(-1)).toContain('no longer reachable');
+  });
+
   it('marks the note as progress and says it is not the report (B5)', async () => {
     await sendProgressNote({ text: 'tests pass' }, HELPER_SESSION);
     expect(delivered).toHaveLength(1);

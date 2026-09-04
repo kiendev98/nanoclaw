@@ -122,11 +122,24 @@ export async function answerWorkerQuestion(content: Record<string, unknown>, ses
 
   // The question travels with the answer, so the helper reads both together
   // however long it waited.
-  await deliverToSession(
+  const delivered = await deliverToSession(
     question.helper_agent_group_id,
     question.helper_session_id,
     [`Answer to your question ${questionId}:`, '', `> ${question.question_text}`, '', answer].join('\n'),
     'principal',
   );
+
+  // The question is already spent, so there is nothing to re-ask and no worker
+  // left to ask it. Say the answer did not land, rather than reporting a
+  // delivery that did not happen.
+  if (!delivered) {
+    log.error('Worker answer undeliverable', { questionId, helperSessionId: question.helper_session_id });
+    await replyToCaller(
+      session,
+      `answer_worker_question failed: the ${question.helper_agent_group_id} worker session is gone, so the answer to ${questionId} reached nobody.`,
+    );
+    return;
+  }
+
   await replyToCaller(session, `Answer delivered to the worker (question ${questionId}).`);
 }
