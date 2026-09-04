@@ -251,12 +251,9 @@ interface GroupTelemetry {
 /**
  * Resolved per call, not captured at import.
  *
- * `roots.ts` reads its environment once at module load, and `bunfig.toml`
- * preloads the modules barrel — which pulls `roots.ts` in before any test
- * file runs. So a captured AGENT_DIR is always the container default under
- * test, pointing at a path no test can write. Reading the variable here keeps
- * the group store exercisable, and also picks up a driver that exports the
- * root after this module was first imported.
+ * A captured value would be the container default under test, pointing at a
+ * path no test can write. Reading the variable here keeps the group store
+ * exercisable, and picks up a driver that sets the root after first import.
  */
 function groupFilePath(): string {
   const dir = (process.env.NANOCLAW_AGENT_DIR ?? '').trim() || AGENT_DIR;

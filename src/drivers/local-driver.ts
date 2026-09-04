@@ -1,63 +1,44 @@
 /**
  * Local driver — runs the agent as a host process instead of a container.
  *
- * ## What this trades away
+ * NO ISOLATION. Docker's container is the permission boundary. Here the
+ * boundary is the user account the host runs as. This driver does not sandbox
+ * the filesystem, confine the network, or enforce a read-only mount: a symlink
+ * has no mode, so the spec's `ro` states intent rather than a guarantee.
+ * `capabilities()` reports each reduction honestly.
  *
- * Read this before choosing it. The Docker driver's container IS the permission
- * boundary. Under Docker the blast radius is a container with an enumerated set
- * of mounts. Under this driver it is the user account the host runs as.
+ * The provider runs with `permissionMode: 'auto'`, not `bypassPermissions`.
+ * Auto denies a dangerous call with a stated reason instead of prompting, so it
+ * needs no approval UI. That was the constraint which made bypass look
+ * inevitable when chat is the only surface. It is a gate, not a boundary.
  *
- * The provider now runs with `permissionMode: 'auto'` rather than
- * `bypassPermissions`, precisely because of that difference: auto's classifier
- * denies a dangerous call with a stated reason instead of prompting, so it
- * needs no approval UI — the constraint that made bypass look inevitable when a
- * chat message is the only surface. It is a gate, not a boundary, and it does
- * not turn this driver into an isolated one.
+ * Three things work only on the host, and together they are the reason:
  *
- * So this driver provides **no isolation of any kind**. It does not sandbox the
- * filesystem, does not confine the network, and cannot enforce a read-only
- * mount — a symlink has no mode of its own, and the spec's `ro` becomes a
- * statement of intent rather than a guarantee. `capabilities()` reports every
- * one of those honestly rather than claiming a posture it does not have.
+ * - Credentials. Claude Code on macOS keeps its token in the Keychain, keyed by
+ *   a hash of `CLAUDE_CONFIG_DIR`. A container has no Keychain, so the Docker
+ *   path needs a separately minted `CLAUDE_CODE_OAUTH_TOKEN` on disk. Here the
+ *   SDK spawns the local `claude`, which authenticates itself.
+ * - The account pool. Auth belongs to that local `claude`, so an external
+ *   account switcher covers the agent too. This driver does not pin
+ *   `CLAUDE_CONFIG_DIR`. It inherits, which keeps the pool shared.
+ * - The network. A host process is on the host's VPN. Docker Desktop's VM has
+ *   its own network stack and ignores utun routes.
  *
- * ## Why it exists anyway
+ * The container's filesystem shape is not realized. The runner reads one
+ * environment variable per root, so this driver hands it real host directories
+ * and plants no symlink tree. Two container mounts overlap: `/workspace` is the
+ * session directory and `/workspace/agent` the group directory nested in its
+ * path. A symlink at the parent would swallow the child's writes.
+ * `/workspace/extra` is the exception, because its entries are leaves.
  *
- * Three things only work on the host, and together they are the whole reason:
- *
- * - **Credentials.** Claude Code on macOS keeps its token in the Keychain,
- *   keyed by a hash of `CLAUDE_CONFIG_DIR`. A Linux container has no Keychain,
- *   so the Docker path needs a separately minted `CLAUDE_CODE_OAUTH_TOKEN`
- *   written to disk. On the host the SDK spawns the local `claude`, which
- *   authenticates itself. No token is minted, and none is stored.
- * - **The account pool.** Because auth is the local `claude`'s, whatever
- *   account is active is the account the agent uses — so an external switcher
- *   rotating accounts against rate limits covers the agent too, at no cost.
- *   This driver therefore does NOT pin `CLAUDE_CONFIG_DIR`; it inherits, which
- *   is what makes the pool shared rather than partitioned.
- * - **The network.** A host process is on the host's VPN. Docker Desktop's VM
- *   has its own network stack and does not inherit routes from a utun
- *   interface, so anything reachable only over the VPN is unreachable from a
- *   container without configuring the VPN a second time inside it.
- *
- * ## How the container's filesystem shape is realized
- *
- * It is not. The runner names each of its roots and reads an environment
- * variable per root (`container/agent-runner/src/roots.ts`), so this driver
- * hands it real host directories and plants no symlink tree. That matters
- * because two of the container's mounts overlap — `/workspace` is the session
- * directory and `/workspace/agent` is the group directory nested inside its
- * path — and a symlink at the parent would swallow writes meant for the child.
- * The one exception is `/workspace/extra`, whose entries are genuine leaves, so
- * a directory of symlinks is both correct and cheap.
- *
- * `HOME` is inherited, which is the point: `~/.claude` is the user's real
- * harness, so commands, agents, skills and rules load with no wiring.
+ * `HOME` is inherited. `~/.claude` is therefore the user's real harness, so
+ * commands, agents, skills and rules load with no wiring.
  */
 import { spawn, type ChildProcess } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
-import { resolveClaudeExecutable } from '../claude-executable.js';
+import { resolveClaudeExecutable } from './claude-executable.js';
 import { log } from '../log.js';
 
 import {

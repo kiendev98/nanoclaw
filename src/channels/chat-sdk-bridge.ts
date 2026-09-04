@@ -936,14 +936,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       const rawText = (content.markdown as string) || (content.text as string);
       const text = rawText ? transformText(rawText) : rawText;
 
-      // Telemetry footer, carried as its own field so it can be STYLED rather
-      // than appended. A muted text element becomes a Slack `context` block —
-      // small and grey — which is what separates it from the reply visually.
-      //
-      // Only the simple case takes the card path. Files ride the markdown
-      // path, and a body long enough to need splitting cannot become one
-      // section block (Slack caps a section at 3000 characters). Both fall
-      // back to appending, so the footer is never silently dropped.
+      // Its own field so a channel can style it: muted renders as a Slack
+      // context block. Long bodies take the markdown path, because Slack caps
+      // a section at 3000 characters, and append it instead.
       const footerText = typeof content.footer === 'string' ? content.footer.trim() : '';
       const hasFiles = Boolean(message.files && message.files.length > 0);
       if (text && footerText && !hasFiles && text.length <= CARD_SECTION_LIMIT) {
