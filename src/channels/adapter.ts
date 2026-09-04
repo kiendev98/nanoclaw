@@ -195,6 +195,25 @@ export interface ChannelDefaults {
   mentions: 'platform' | 'dm-only' | 'never';
 }
 
+/**
+ * One earlier message in a conversation thread, as the platform reports it.
+ *
+ * The shape is flat and platform-neutral on purpose. The seeding module writes
+ * these straight into a session mailbox, and must not learn a platform's
+ * message model to do it.
+ */
+export interface ThreadHistoryMessage {
+  /** Platform message id. The seeder derives its dedup keys from this. */
+  id: string;
+  /** ISO-8601 UTC. */
+  timestamp: string;
+  sender: string;
+  senderId: string;
+  text: string;
+  /** Authored by this bot. The container formatter renders these as "you". */
+  self: boolean;
+}
+
 /** The v2 channel adapter contract. */
 export interface ChannelAdapter {
   name: string;
@@ -269,6 +288,23 @@ export interface ChannelAdapter {
    * treats absence as a no-op.
    */
   subscribe?(platformId: string, threadId: string): Promise<void>;
+
+  /**
+   * Read the messages already posted in a thread, oldest first.
+   *
+   * The router calls this once, when a mention creates a brand-new thread
+   * session, so an agent tagged mid-conversation can see what came before.
+   * It never runs for a session that already exists.
+   *
+   * Platforms with no thread-history API can omit this. Callers treat absence
+   * as a no-op, so the triggering message is delivered either way.
+   *
+   * @param platformId The channel the thread belongs to.
+   * @param threadId The thread to read.
+   * @param limit Maximum messages to return. The caller bounds this.
+   * @returns The most recent `limit` messages, in chronological order.
+   */
+  fetchThreadHistory?(platformId: string, threadId: string, limit: number): Promise<ThreadHistoryMessage[]>;
 
   /**
    * Open (or fetch) a DM with this user, returning the platform_id of the

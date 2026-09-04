@@ -41,3 +41,10 @@ export {
   type HistoryRow,
 } from './history.js';
 export { backfillNewSession, BACKFILL_LIMIT } from './backfill.js';
+export {
+  seedThreadHistory,
+  threadHistoryRowId,
+  THREAD_HISTORY_FETCH_TIMEOUT_MS,
+  THREAD_HISTORY_LIMIT,
+  type SeedThreadHistoryInput,
+} from './thread-history.js';

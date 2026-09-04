@@ -25,7 +25,7 @@ import { appendFooter, readFooter } from './message-footer.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
-import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
+import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage, ThreadHistoryMessage } from './adapter.js';
 import { INSTANCE_KEY_RE } from './channel-registry.js';
 import { resolveQuestionRender } from './question-render-registry.js';
 
@@ -487,6 +487,32 @@ export function appendRawText(
   if (!extra) return;
   const text = typeof serialized.text === 'string' ? serialized.text : '';
   serialized.text = text ? `${text}\n\n${extra}` : extra;
+}
+
+/**
+ * Project a Chat SDK message onto the platform-neutral history shape.
+ *
+ * Only the fields the container formatter renders are kept. Attachments and
+ * `raw` are dropped: history is ambient context, and staging a non-triggering
+ * sender's files to disk is what the access gate exists to prevent.
+ */
+function toThreadHistoryMessage(message: ChatMessage): ThreadHistoryMessage {
+  const author = message.author;
+  const name = author?.fullName ?? author?.userName ?? 'unknown';
+  return {
+    id: message.id,
+    timestamp: message.metadata.dateSent.toISOString(),
+    sender: name,
+    senderId: author?.userId ?? '',
+    text: typeof message.text === 'string' ? message.text : '',
+    self: author?.isMe === true,
+  };
+}
+
+/** A platform message the bridge must not surface as conversation history. */
+function isRenderableHistory(message: ChatMessage): boolean {
+  if (message.author?.isSystem === true) return false;
+  return typeof message.text === 'string' && message.text.trim().length > 0;
 }
 
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
@@ -1047,6 +1073,23 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     bridge.openDM = async (userHandle: string): Promise<string> => {
       const threadId = await adapter.openDM!(userHandle);
       return adapter.channelIdFromThreadId(threadId);
+    };
+  }
+
+  // fetchMessages is required on the Chat SDK Adapter contract, so every
+  // Chat SDK channel gets thread history from this one implementation. The
+  // guard covers a stale vendored adapter copy that predates the method.
+  if (typeof adapter.fetchMessages === 'function') {
+    bridge.fetchThreadHistory = async (
+      _platformId: string,
+      threadId: string,
+      limit: number,
+    ): Promise<ThreadHistoryMessage[]> => {
+      // 'backward' returns the most recent `limit` messages, and the SDK
+      // still orders each page oldest-first — which is the order the
+      // formatter renders and the order the seeder assigns seq in.
+      const result = await adapter.fetchMessages(threadId, { direction: 'backward', limit });
+      return result.messages.filter(isRenderableHistory).map(toThreadHistoryMessage);
     };
   }
 

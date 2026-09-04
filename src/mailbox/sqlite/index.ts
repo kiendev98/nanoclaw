@@ -284,6 +284,7 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
         .get() as MailboxTimelineMessage | undefined;
       return row && { ...row, timestamp: sqliteTimestamp(row.timestamp) };
     },
+    hasMessage: (id) => db.prepare('SELECT 1 FROM messages_in WHERE id = ? LIMIT 1').get(id) !== undefined,
     findTaskBySeriesSlug: (slug) => {
       const pattern = `${slug}-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]`;
       const row = db

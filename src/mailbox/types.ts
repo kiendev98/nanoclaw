@@ -129,6 +129,14 @@ export interface InboundMailbox {
   prunePendingMessages(channelType: string, before: string, keep: number): number;
   getInboundHistory(limit: number): MailboxHistoryMessage[];
   getConversationRoot(): MailboxTimelineMessage | undefined;
+  /**
+   * Whether a row with this exact id is already in messages_in.
+   *
+   * Thread-history seeding uses it to skip a message the accumulate path
+   * already stored, so an exact primary-key hit decides it and no text
+   * comparison is needed.
+   */
+  hasMessage(id: string): boolean;
   findTaskBySeriesSlug(slug: string): TaskRecord | undefined;
 }
 

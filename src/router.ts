@@ -28,14 +28,14 @@ import {
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
 import { findSessionForAgent } from './db/sessions.js';
-import { backfillNewSession, fanInboundMessage } from './modules/cross-session-context/index.js';
+import { backfillNewSession, fanInboundMessage, seedThreadHistory } from './modules/cross-session-context/index.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
 import { requestWake } from './request-wake.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from './types.js';
-import type { InboundEvent } from './channels/adapter.js';
+import type { ChannelAdapter, InboundEvent } from './channels/adapter.js';
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -396,7 +396,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     const scopeOk = engages && (!senderScopeGate || (await senderScopeGate(event, userId, mg, agent)).allowed);
 
     if (engages && accessOk && scopeOk) {
-      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, true);
+      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, true, adapter);
       engagedCount++;
 
       // Mention-sticky: ask the adapter to subscribe the thread so the
@@ -428,7 +428,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       // message (which also stages their attachments to disk via
       // writeSessionMessage → extractAttachmentFiles) is exactly what the
       // gate is meant to prevent.
-      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, false);
+      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, false, adapter);
       accumulatedCount++;
     } else {
       log.debug('Message not engaged for agent (drop policy)', {
@@ -523,6 +523,7 @@ async function deliverToAgent(
   threadsEnabled: boolean,
   effectiveThreadId: string | null,
   wake: boolean,
+  adapter: ChannelAdapter | undefined,
 ): Promise<void> {
   // Apply the resolved thread policy (wiring override AND channel declaration
   // AND adapter capability — resolveThreadPolicy at fanout): thread-enabled
@@ -583,6 +584,28 @@ async function deliverToAgent(
     // sessions BEFORE the triggering message is written, so replying to
     // something said in another thread lands with that context in view.
     await backfillNewSession(agentGroup, session, mg);
+
+    // Thread-history seeding: sibling backfill can only surface what we
+    // already stored, so a thread that predates the wiring — or one whose
+    // earlier messages were never accumulated — still arrives blind. Ask the
+    // platform for this thread's own preceding messages. Ordered AFTER the
+    // sibling prelude so the thread's own turns sit closest to the live one.
+    //
+    // Gated on 'accumulate' because a 'drop' wiring is the operator asking
+    // for zero ambient context between mentions. Reading the same messages
+    // off the platform instead would defeat the setting they chose.
+    if (agent.ignored_message_policy === 'accumulate') {
+      await seedThreadHistory({
+        agentGroup,
+        session,
+        mg,
+        adapter,
+        platformId: event.platformId,
+        threadId: effectiveThreadId,
+        triggerMessageId: event.message.id,
+        toLocalMessageId: (platformMessageId) => messageIdForAgent(platformMessageId, agent.agent_group_id),
+      });
+    }
   }
 
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
