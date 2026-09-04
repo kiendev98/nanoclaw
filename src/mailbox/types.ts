@@ -89,7 +89,6 @@ export interface MailboxTimelineMessage {
   content: string;
 }
 
-/** Host-visible inbound mailbox behavior. Storage layout and lifecycle are implementation-private. */
 /**
  * Whether a message id is already in the mailbox.
  *
@@ -108,6 +107,7 @@ export interface MessagePresence {
   hasMessage(id: string): boolean;
 }
 
+/** Host-visible inbound mailbox behavior. Storage layout and lifecycle are implementation-private. */
 export interface InboundMailbox extends MessagePresence {
   setRouting(routing: SessionRouting): void;
   replaceDestinations(entries: Destination[]): void;

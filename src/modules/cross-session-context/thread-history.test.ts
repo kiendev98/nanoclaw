@@ -56,17 +56,22 @@ interface SeedOverrides {
   threadId?: string | null;
   ignoredMessagePolicy?: 'drop' | 'accumulate';
   triggerMessageId?: string;
+  triggerTimestamp?: string;
 }
 
 const calls: Array<{ platformId: string; threadId: string; limit: number }> = [];
 
 async function seed(over: SeedOverrides = {}): Promise<void> {
+  await seedCounting(over);
+}
+
+async function seedCounting(over: SeedOverrides = {}): Promise<number> {
   const recording = async (platformId: string, threadId: string, limit: number) => {
     calls.push({ platformId, threadId, limit });
     return over.messages ?? [];
   };
   const readThreadHistory = over.readThreadHistory === undefined ? recording : (over.readThreadHistory ?? undefined);
-  await seedThreadHistory({
+  return await seedThreadHistory({
     agentGroup: AG,
     session: SESSION,
     mg: over.mg ?? ROOM_MG,
@@ -75,6 +80,7 @@ async function seed(over: SeedOverrides = {}): Promise<void> {
     threadId: over.threadId === undefined ? 'slack:C1:100.0' : over.threadId,
     ignoredMessagePolicy: over.ignoredMessagePolicy ?? 'accumulate',
     triggerMessageId: over.triggerMessageId ?? 'trigger-1',
+    triggerTimestamp: over.triggerTimestamp ?? '2026-09-03T06:00:00.000Z',
     toLocalMessageId: (platformMessageId: string) => `${platformMessageId}:ag-1`,
   });
 }
@@ -115,6 +121,27 @@ describe('seedThreadHistory', () => {
     });
 
     expect(written.map(textOf)).toEqual(['earlier']);
+  });
+
+  it('never seeds a message that landed while the fetch was in flight', async () => {
+    // It arrives as its own inbound row moments later, so seeding it too puts
+    // the same text in the prompt twice — once as history, once live.
+    await seed({
+      messages: [history('m1', 'earlier'), history('m2', 'raced in', { timestamp: '2026-09-03T06:00:01.000Z' })],
+      triggerTimestamp: '2026-09-03T06:00:00.000Z',
+    });
+
+    expect(written.map(textOf)).toEqual(['earlier']);
+  });
+
+  it('reports how many rows it wrote, so the caller can skip a second prelude', async () => {
+    const wrote = await seedCounting({ messages: [history('m1', 'a'), history('m2', 'b')] });
+    expect(wrote).toBe(2);
+
+    written.length = 0;
+    calls.length = 0;
+    const none = await seedCounting({ messages: [] });
+    expect(none).toBe(0);
   });
 
   it('skips a message the accumulate path already stored', async () => {

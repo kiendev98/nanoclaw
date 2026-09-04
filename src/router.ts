@@ -614,20 +614,21 @@ async function deliverToAgent(context: DeliveryContext): Promise<void> {
   }
 
   if (wake && created) {
-    // New-session backfill (cross-session context): a just-born session is
-    // seeded with its conversation's top-level timeline from sibling
-    // sessions BEFORE the triggering message is written, so replying to
-    // something said in another thread lands with that context in view.
-    await backfillNewSession(agentGroup, session, mg);
-
-    // Thread-history seeding: sibling backfill can only surface what we
-    // already stored, so a thread that predates the wiring — or one whose
-    // earlier messages were never accumulated — still arrives blind. Ask the
-    // platform for this thread's own preceding messages. Ordered AFTER the
-    // sibling prelude so the thread's own turns sit closest to the live one.
+    // A just-born session is seeded with context BEFORE the triggering
+    // message is written, so the prelude takes a lower seq and the container
+    // renders it ahead of the live turn.
+    //
+    // Two sources, and they are mutually exclusive on purpose. The container
+    // caps how many context rows reach one prompt and keeps the NEWEST by
+    // seq, so writing both guarantees one is written and never read, while
+    // its unread rows stay pending and resurface as stale prelude later. For
+    // a mid-thread mention this thread's own earlier turns beat another
+    // thread's opener, so thread history is asked first and the sibling
+    // timeline is the fallback when it yields nothing.
+    //
     // Every no-op condition, the wiring's ignored-message policy included,
-    // lives in the module beside its siblings.
-    await seedThreadHistory({
+    // lives in the thread-history module beside its siblings.
+    const seededFromThread = await seedThreadHistory({
       agentGroup,
       session,
       mg,
@@ -636,8 +637,13 @@ async function deliverToAgent(context: DeliveryContext): Promise<void> {
       threadId: effectiveThreadId,
       ignoredMessagePolicy: agent.ignored_message_policy,
       triggerMessageId: event.message.id,
+      triggerTimestamp: event.message.timestamp,
       toLocalMessageId: (platformMessageId) => messageIdForAgent(platformMessageId, agent.agent_group_id),
     });
+
+    if (seededFromThread === 0) {
+      await backfillNewSession(agentGroup, session, mg);
+    }
   }
 
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);

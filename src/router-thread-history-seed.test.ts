@@ -200,6 +200,34 @@ describe('router — thread-history seeding', () => {
     for (const row of seeded) expect(row.seq).toBeLessThan(trigger!.seq);
   });
 
+  it('suppresses the sibling backfill when thread history seeded rows', async () => {
+    // The container caps context rows per prompt and keeps the newest by seq,
+    // so writing both preludes leaves one written and never read, with its
+    // unread rows resurfacing as stale prelude in a later turn.
+    await activate();
+    await seedWiring({});
+
+    await inbound('m1', 'testchat:C1:100.0', '@saber first thread');
+    await inbound('m2', 'testchat:C1:200.0', '@saber second thread');
+
+    const sessions = await getSessionsByAgentGroup('ag-1');
+    const second = sessions.find((s) => s.thread_id === 'testchat:C1:200.0');
+    expect(second).toBeDefined();
+
+    const db = new Database(inboundDbPath('ag-1', second!.id), { readonly: true });
+    const echoes = db
+      .prepare("SELECT content FROM messages_in WHERE channel_type = 'session-echo' ORDER BY seq")
+      .all() as Array<{ content: string }>;
+    db.close();
+
+    // Exactly the two thread-history rows. A sibling-backfill row would carry
+    // no echo.sentAt, because only the platform read supplies one.
+    expect(echoes).toHaveLength(2);
+    for (const echo of echoes) {
+      expect(JSON.parse(echo.content).echo.sentAt).toBe('2026-09-03T05:00:00.000Z');
+    }
+  });
+
   it('does not read again for a session that already exists', async () => {
     await activate();
     await seedWiring({});

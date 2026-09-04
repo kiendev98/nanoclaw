@@ -109,9 +109,38 @@ describe('formatter rendering', () => {
     );
 
     const result = formatMessages(getPendingMessages());
-    expect(result).toContain('<channel-history sender="Gavriel"');
+    // `from` names which conversation the prelude came from. A new thread
+    // session is seeded by one of two sources — this thread's own earlier
+    // turns, or other threads' openers — and they read identically without it.
+    expect(result).toContain('<channel-history from="this channel, just before this conversation" sender="Gavriel"');
     expect(result).toContain('earlier in the channel</channel-history>');
     expect(result).not.toContain('<message');
+  });
+
+  it('shows the message send time from echo.sentAt, not the row timestamp', () => {
+    // Prelude rows are stamped with their SEEDING time, because the host's
+    // echo pruner ages pending rows by that column and a thread wired weeks
+    // after it started would otherwise be swept before the first poll. The
+    // real send time rides in echo.sentAt, and that is what the agent must
+    // see — a three-week-old message must not read as having arrived now.
+    insertMessage(
+      'bf-sent-1',
+      'chat',
+      {
+        text: 'said three weeks ago',
+        sender: 'Gavriel',
+        senderId: 'slack:U1',
+        echo: {
+          surface: 'channel-timeline',
+          label: 'this thread, before the agent was brought in',
+          sentAt: '2026-01-01T08:30:00.000Z',
+        },
+      },
+      { trigger: 0, channelType: 'session-echo' },
+    );
+
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('time="2026-01-01 08:30"');
   });
 
   it('XML-escapes label, sender, and text', () => {

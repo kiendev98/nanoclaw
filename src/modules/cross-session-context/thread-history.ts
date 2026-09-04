@@ -2,15 +2,20 @@
  * Thread-history seeding — the platform half of new-session context.
  *
  * backfill.ts seeds a new session from SIBLING sessions, so it can only
- * surface what nanoclaw already stored. Three things defeat that, and all
- * three were measured on a live install:
- *  - the messaging group was wired AFTER the thread started, so the earlier
- *    messages never reached the host at all,
- *  - the wiring drops non-engaging messages, so nothing was accumulated,
- *  - the thread is the conversation's first, so there are no siblings.
- * In each case an agent tagged mid-thread answers from nothing. Measured: 9
- * of 25 threads that mention the agent tag it mid-thread, with up to 12
- * messages already posted.
+ * surface what nanoclaw already stored. An agent tagged mid-thread therefore
+ * answers from nothing whenever the thread's own earlier messages never
+ * reached us — the messaging group was wired after the thread started, the
+ * host was down, or every earlier sender was refused by the access gate.
+ * Measured: 9 of 25 threads that mention the agent tag it mid-thread, with up
+ * to 12 messages already posted.
+ *
+ * Be precise about the reach, because two conditions narrow it sharply and
+ * both are deliberate. Seeding runs only on an 'accumulate' wiring, and
+ * 'drop' is the schema default — so a fresh install gets nothing until an
+ * operator opts in. And it runs only when the mention CREATED the session, so
+ * on an accumulate wiring whose earlier messages did reach us, those messages
+ * already created the session and there is nothing to seed. What is left is
+ * exactly the gap above, which is the case that was reported.
  *
  * So we ask the platform. At session birth the adapter reads the thread's
  * own earlier messages and they are written as trigger=0 session-echo rows
@@ -34,8 +39,15 @@ import { preludeSurface, writePreludeRows } from './prelude.js';
 /** Matches BACKFILL_LIMIT, and the measured p90 of 12 preceding messages. */
 export const THREAD_HISTORY_LIMIT = 12;
 
-/** A platform read must never hold up delivery of the triggering message. */
-export const THREAD_HISTORY_FETCH_TIMEOUT_MS = 4000;
+/**
+ * A platform read must never hold up delivery of the triggering message.
+ *
+ * Generous because the Slack adapter enriches per fetched message: a
+ * `users.info` lookup for each uncached author, plus a wait of up to two
+ * seconds for an un-unfurled link. Four seconds was inside that envelope, so
+ * a normal thread could time out and lose its prelude with only a warn line.
+ */
+export const THREAD_HISTORY_FETCH_TIMEOUT_MS = 8000;
 
 /**
  * The one channel capability this module needs.
@@ -66,6 +78,12 @@ export interface SeedThreadHistoryInput {
   ignoredMessagePolicy: MessagingGroupAgent['ignored_message_policy'];
   /** Platform id of the mention that created this session. Never re-seeded. */
   triggerMessageId: string | undefined;
+  /**
+   * ISO send time of that mention. Anything not strictly older is a message
+   * that landed while the fetch was in flight, and it arrives as its own
+   * inbound row — seeding it too would put the same text in the prompt twice.
+   */
+  triggerTimestamp: string;
   /**
    * Maps a platform message id to the id the router would store it under.
    * Passed in rather than imported so the id scheme stays owned by the
@@ -131,8 +149,8 @@ async function selectUnseen(
   input: SeedThreadHistoryInput,
   messages: ThreadHistoryMessage[],
 ): Promise<ThreadHistoryMessage[]> {
-  const { agentGroup, session, triggerMessageId, toLocalMessageId } = input;
-  const candidates = messages.filter((m) => m.id !== triggerMessageId);
+  const { agentGroup, session, triggerMessageId, triggerTimestamp, toLocalMessageId } = input;
+  const candidates = messages.filter((m) => m.id !== triggerMessageId && m.timestamp < triggerTimestamp);
   if (candidates.length === 0) return [];
 
   // Narrowed to the one capability used, so the type states the dependency
@@ -166,14 +184,18 @@ async function writeHistoryRows(input: SeedThreadHistoryInput, rows: ThreadHisto
  * Call BEFORE the triggering message is written, so the prelude takes a lower
  * seq. Non-throwing: any failure leaves the session with no prelude rather
  * than losing the message that created it.
+ *
+ * @returns How many rows were written. Zero means the caller may fall back to
+ *   another prelude source — the container caps how many context rows reach
+ *   one prompt, so two preludes would leave one of them written and unread.
  */
-export async function seedThreadHistory(input: SeedThreadHistoryInput): Promise<void> {
+export async function seedThreadHistory(input: SeedThreadHistoryInput): Promise<number> {
   try {
     const messages = await fetchThreadMessages(input);
-    if (messages.length === 0) return;
+    if (messages.length === 0) return 0;
 
     const unseen = await selectUnseen(input, messages);
-    if (unseen.length === 0) return;
+    if (unseen.length === 0) return 0;
 
     await writeHistoryRows(input, unseen);
     log.debug('Seeded new session with thread history', {
@@ -181,10 +203,12 @@ export async function seedThreadHistory(input: SeedThreadHistoryInput): Promise<
       fetched: messages.length,
       written: unseen.length,
     });
+    return unseen.length;
   } catch (err) {
     log.warn('Thread-history seeding failed (continuing without context)', {
       sessionId: input.session.id,
       err,
     });
+    return 0;
   }
 }

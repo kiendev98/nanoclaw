@@ -25,6 +25,10 @@ import { truncateEchoText } from './fan.js';
 /**
  * The newest entry is what a short opener ("sure", "do this") answers, so it
  * is delivered whole. Earlier entries take the normal echo cap.
+ *
+ * "Newest" means the last row of the batch handed to `writePreludeRows`. That
+ * is the newest in the session too, because the router seeds from one source
+ * per session — never both.
  */
 export const LAST_ENTRY_MAX_CHARS = 4000;
 
@@ -69,19 +73,26 @@ export async function writePreludeRows<T extends PreludeRow>(
   rows: T[],
   meta: PreludeMeta<T>,
 ): Promise<void> {
+  // The row timestamp is when this row was SEEDED, not when the message was
+  // sent. The echo pruner drops pending rows older than ECHO_MAX_AGE_DAYS by
+  // this column, and a thread wired weeks after it started — the case thread
+  // history exists for — would have its whole prelude swept before the
+  // container's first poll. The true send time rides in echo.sentAt, which is
+  // what the formatter displays.
+  const seededAt = new Date().toISOString();
   for (const [index, row] of rows.entries()) {
     const isLast = index === rows.length - 1;
     await writeSessionMessage(agentGroupId, sessionId, {
       id: meta.rowId(row, index),
       kind: 'chat',
-      timestamp: row.timestamp,
+      timestamp: seededAt,
       channelType: ECHO_CHANNEL_TYPE,
       content: JSON.stringify({
         text: isLast ? row.text.slice(0, LAST_ENTRY_MAX_CHARS) : truncateEchoText(row.text),
         sender: row.sender,
         senderId: row.senderId,
         ...(row.self ? { self: true } : {}),
-        echo: { surface: meta.surface, label: meta.label },
+        echo: { surface: meta.surface, label: meta.label, sentAt: row.timestamp },
       }),
       trigger: false,
     });

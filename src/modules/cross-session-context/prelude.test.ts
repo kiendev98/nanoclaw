@@ -47,8 +47,16 @@ async function write(rows: Row[]): Promise<void> {
   });
 }
 
-function parsed(index: number): Record<string, never> {
-  return JSON.parse(written[index].content as string);
+interface ParsedRow {
+  text: string;
+  sender: string;
+  senderId: string;
+  self?: boolean;
+  echo: { surface: string; label: string; sentAt: string };
+}
+
+function parsed(index: number): ParsedRow {
+  return JSON.parse(written[index].content as string) as ParsedRow;
 }
 
 beforeEach(() => {
@@ -90,14 +98,39 @@ describe('writePreludeRows', () => {
     expect(parsed(0).text).toBe('y'.repeat(3000));
   });
 
+  it('ages rows from when they were seeded, not from when the message was sent', async () => {
+    // The echo pruner drops pending rows older than 7 days by this column. A
+    // thread wired weeks after it started is the case thread history exists
+    // for, so the platform send time here would sweep the whole prelude
+    // before the container's first poll.
+    const before = Date.now();
+
+    await write([row('old', { timestamp: '2026-01-01T00:00:00.000Z' })]);
+
+    const stamped = Date.parse(written[0].timestamp as string);
+    expect(stamped).toBeGreaterThanOrEqual(before);
+    expect(stamped).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('keeps the real send time in echo.sentAt, which is what the agent sees', async () => {
+    await write([row('old', { timestamp: '2026-01-01T00:00:00.000Z' })]);
+
+    expect(parsed(0).echo.sentAt).toBe('2026-01-01T00:00:00.000Z');
+  });
+
+  it('stamps one seeding time across the whole batch, so seq and time agree', async () => {
+    await write([row('a'), row('b'), row('c')]);
+
+    const stamps = new Set(written.map((r) => r.timestamp));
+    expect(stamps.size).toBe(1);
+  });
+
   it('carries the surface and label onto every row', async () => {
     await write([row('a'), row('b')]);
 
     for (const index of [0, 1]) {
-      expect(parsed(index).echo).toEqual({
-        surface: 'channel-timeline',
-        label: 'this thread, before the agent was brought in',
-      });
+      expect(parsed(index).echo.surface).toBe('channel-timeline');
+      expect(parsed(index).echo.label).toBe('this thread, before the agent was brought in');
     }
   });
 
