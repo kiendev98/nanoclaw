@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@chat-adapter/slack':
-        specifier: 4.29.0
-        version: 4.29.0
+        specifier: 4.39.0
+        version: 4.39.0
       '@clack/core':
         specifier: ^1.2.0
         version: 1.2.0
@@ -24,8 +24,8 @@ importers:
         specifier: 13.0.3
         version: 13.0.3
       chat:
-        specifier: 4.29.0
-        version: 4.29.0
+        specifier: 4.39.0
+        version: 4.39.0
       cron-parser:
         specifier: 5.5.0
         version: 5.5.0
@@ -75,12 +75,12 @@ importers:
 
 packages:
 
-  '@chat-adapter/shared@4.29.0':
-    resolution: {integrity: sha512-ARqTDoHJHKN9rpytbFPJbNmqqx3fOg5xwsTZdlingQPAssOSeHDBdqrFJkgDhyCRGbmDtG09cuS0FkVzeoh2qg==}
+  '@chat-adapter/shared@4.39.0':
+    resolution: {integrity: sha512-zc5mB5rYqbp4ts+Z3tG/YwkCypPYphriYpG95ZMRNGiEYx3cYZJZFmAFFM4YLfdz3VIQ99Fd0HFDYVNyAMV7cg==}
     engines: {node: '>=20'}
 
-  '@chat-adapter/slack@4.29.0':
-    resolution: {integrity: sha512-s2DXAwkTpmiIKSATXgrO879s1pqFwS70Y0JPd+TRGRzDeh6nfqt5dnKt5Bug0P1zwkB6DoPurhnYS9nqhSmD/w==}
+  '@chat-adapter/slack@4.39.0':
+    resolution: {integrity: sha512-nDBYFEmD9MUobUH+HJbOYwKYcaeoCFJDXVvd41flh5sslpixSUG2SFcz7F3py62jJ9c0YYNEdwprIExO20IyZQ==}
     engines: {node: '>=20'}
 
   '@clack/core@1.2.0':
@@ -648,14 +648,17 @@ packages:
   character-entities@2.0.2:
     resolution: {integrity: sha512-shx7oQ0Awen/BRIdkjkvz54PnEEI/EjwXDSIZp86/KKdbafHh1Df/RYGBhn4hbe2+uKC9FnT5UCEdyPz3ai9hQ==}
 
-  chat@4.29.0:
-    resolution: {integrity: sha512-KdPfzaie5ivYytyRICTERg5xT+LeCbYefokvNAqTHe92eqkFaoTMXXkSitikxJVWhZIb2YoXF1b9UZHyzSzKzw==}
+  chat@4.39.0:
+    resolution: {integrity: sha512-o7D+oAbQAYFVoc9+OH8wya11609ybRThNTF3s/5C1LAABGGi6IrxoQQEN/aIe+4h5pmKYzUjXeqTcuOZcpIAZA==}
     engines: {node: '>=20'}
     peerDependencies:
-      ai: ^6.0.182
+      ai: ^6.0.182 || ^7.0.0
+      workflow: ^5.0.0-beta.35
       zod: ^3.0.0 || ^4.0.0
     peerDependenciesMeta:
       ai:
+        optional: true
+      workflow:
         optional: true
       zod:
         optional: true
@@ -1578,26 +1581,28 @@ packages:
 
 snapshots:
 
-  '@chat-adapter/shared@4.29.0':
+  '@chat-adapter/shared@4.39.0':
     dependencies:
-      chat: 4.29.0
+      chat: 4.39.0
     transitivePeerDependencies:
       - ai
       - supports-color
+      - workflow
       - zod
 
-  '@chat-adapter/slack@4.29.0':
+  '@chat-adapter/slack@4.39.0':
     dependencies:
-      '@chat-adapter/shared': 4.29.0
+      '@chat-adapter/shared': 4.39.0
       '@slack/socket-mode': 2.0.7
       '@slack/web-api': 7.19.0
-      chat: 4.29.0
+      chat: 4.39.0
     transitivePeerDependencies:
       - ai
       - bufferutil
       - debug
       - supports-color
       - utf-8-validate
+      - workflow
       - zod
 
   '@clack/core@1.2.0':
@@ -2119,7 +2124,7 @@ snapshots:
 
   character-entities@2.0.2: {}
 
-  chat@4.29.0:
+  chat@4.39.0:
     dependencies:
       '@workflow/serde': 4.1.0-beta.2
       mdast-util-to-string: 4.0.0
