@@ -42,6 +42,16 @@ describe('resolveRepo', () => {
     expect((result as { hostPath: string }).hostPath).toBe(fs.realpathSync(repo));
   });
 
+  // macOS and Windows match a path case-insensitively, and realpath returns the
+  // spelling the caller asked for. Unchecked, "Nanoclaw" and "nanoclaw" become
+  // two workers over one checkout, each with its own worktree and memory.
+  it('refuses a name whose case does not match the directory on disk', () => {
+    makeRepo('nanoclaw');
+    const result = resolveRepo('Nanoclaw');
+    expect(isRepoRefusal(result)).toBe(true);
+    expect((result as { kind: string }).kind).toBe('unknown-name');
+  });
+
   it('ignores a directory that is not a git checkout', () => {
     fs.mkdirSync(path.join(tempRoot, 'projects', 'notes'), { recursive: true });
     makeRepo('nanoclaw');

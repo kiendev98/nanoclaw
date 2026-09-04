@@ -45,8 +45,13 @@ function currentThreadId(): string | null {
   if (routing.thread_id) return routing.thread_id;
   if (!routing.channel_type || !routing.platform_id) return null;
   try {
-    return getAgentMailbox().operations.getLatestInboundRoute(routing.channel_type, routing.platform_id)?.threadId ?? null;
-  } catch {
+    return (
+      getAgentMailbox().operations.getLatestInboundRoute(routing.channel_type, routing.platform_id)?.threadId ?? null
+    );
+  } catch (err) {
+    // Falling back to null re-keys the worker onto the conversation instead of
+    // the thread, which silently reuses the wrong worker. Say so.
+    console.error(`[worker] inbound route lookup failed: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
 }
@@ -111,11 +116,11 @@ export const answerWorkerQuestion: McpToolDefinition = {
   tool: {
     name: 'answer_worker_question',
     description:
-      'Answer one question a worker asked you. This is not the same as sending it new work, and an ordinary message is never treated as an answer. Answer from your own knowledge when you can. When the decision is the person\'s, put it to them with ask_user_question first and relay their reply here.',
+      "Answer one question a worker asked you. This is not the same as sending it new work, and an ordinary message is never treated as an answer. Answer from your own knowledge when you can. When the decision is the person's, put it to them with ask_user_question first and relay their reply here.",
     inputSchema: {
       type: 'object' as const,
       properties: {
-        questionId: { type: 'string', description: 'The question id from the worker\'s question.' },
+        questionId: { type: 'string', description: "The question id from the worker's question." },
         answer: { type: 'string', description: 'The answer.' },
       },
       required: ['questionId', 'answer'],

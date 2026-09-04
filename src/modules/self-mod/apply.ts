@@ -17,7 +17,7 @@ import {
   validateMcpServerName,
   type McpServerConfig,
 } from '../../container-config.js';
-import { buildAgentGroupImage, killContainer } from '../../container-runner.js';
+import { buildAgentGroupImage, restartContainer } from '../../container-runner.js';
 import { requestWake } from '../../request-wake.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { setStopIntent, shadowWrite } from '../../db/coordination.js';
@@ -90,7 +90,7 @@ export async function applyInstallPackages(payload: Record<string, unknown>, ses
       onWake: true,
     });
     await shadowRespawnIntent(session.id);
-    killContainer(session.id, 'rebuild applied', () => {
+    restartContainer(session.id, 'rebuild applied', () => {
       void wakeSessionById(session.id);
     });
     log.info('Container rebuild completed (bundled with install)', { agentGroupId: session.agent_group_id });
@@ -164,7 +164,7 @@ export async function applyAddMcpServer(payload: Record<string, unknown>, sessio
     onWake: true,
   });
   await shadowRespawnIntent(session.id);
-  killContainer(session.id, 'mcp server added', () => {
+  restartContainer(session.id, 'mcp server added', () => {
     void wakeSessionById(session.id);
   });
   log.info('MCP server add approved', { agentGroupId: session.agent_group_id });

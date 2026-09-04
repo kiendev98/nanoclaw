@@ -59,6 +59,23 @@ function realPathOrUndefined(candidate: string): string | undefined {
   }
 }
 
+/**
+ * Does this folder hold an entry spelled exactly this way?
+ *
+ * macOS and Windows match a path case-insensitively, and `realpathSync` hands
+ * back the spelling the caller asked for rather than the one on disk. So
+ * "Nanoclaw" and "nanoclaw" both resolve to one checkout, and each becomes its
+ * own worker with its own worktree and memory. The directory listing is the
+ * only authority on how a name is really spelled.
+ */
+function hasExactEntry(root: string, name: string): boolean {
+  try {
+    return fs.readdirSync(root).includes(name);
+  } catch {
+    return false;
+  }
+}
+
 /** Every repository name the assistant may use, sorted, deduplicated. */
 export function listRepoNames(): string[] {
   const names = new Set<string>();
@@ -104,6 +121,7 @@ export function resolveRepo(name: string): ResolvedRepo | RepoRefusal {
   for (const root of roots) {
     const realRoot = realPathOrUndefined(root);
     if (!realRoot) continue;
+    if (!hasExactEntry(realRoot, name)) continue;
     const realCandidate = realPathOrUndefined(path.join(realRoot, name));
     if (!realCandidate) continue;
     if (realCandidate !== path.join(realRoot, name) && !realCandidate.startsWith(realRoot + path.sep)) continue;

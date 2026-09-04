@@ -12,9 +12,10 @@ import { runMigrations } from '../../db/migrations/index.js';
 import { createDestination, getDestinations } from '../agent-to-agent/db/agent-destinations.js';
 import type { Session } from '../../types.js';
 
-const { refusals, outbound } = vi.hoisted(() => ({
+const { refusals, outbound, routed } = vi.hoisted(() => ({
   refusals: [] as string[],
   outbound: [] as Array<{ id: string; threadId: string | null; content: string }>,
+  routed: [] as Array<{ group: string; session: string }>,
 }));
 
 vi.mock('./notify.js', () => ({
@@ -32,6 +33,10 @@ vi.mock('../../session-manager.js', () => ({
     msg: { id: string; threadId: string | null; content: string },
   ) => {
     outbound.push(msg);
+    return Promise.resolve();
+  },
+  writeSessionRouting: (group: string, session: string) => {
+    routed.push({ group, session });
     return Promise.resolve();
   },
 }));
@@ -94,6 +99,7 @@ const request = { repository: 'nanoclaw', destination: 'anya', text: 'Please rev
 beforeEach(async () => {
   refusals.length = 0;
   outbound.length = 0;
+  routed.length = 0;
   await runMigrations(await initTestDb());
 
   for (const id of ['ag-principal', 'ag-worker']) {
@@ -145,6 +151,22 @@ describe('lendConversation', () => {
     expect(outbound).toHaveLength(1);
     expect(outbound[0]!.threadId).toBeNull();
     expect(outbound[0]!.id).toBe(grant?.root_message_id);
+  });
+
+  // Routing is otherwise projected once, at container spawn. A worker lent a
+  // conversation mid-task is already running, so without a refresh here it
+  // keeps its pre-grant routing and every reply opens a new post (D6).
+  it('refreshes the worker session routing so later replies stay in the thread', async () => {
+    await createTask(aTask());
+    await lendConversation(request, PRINCIPAL);
+
+    expect(routed).toContainEqual({ group: 'ag-worker', session: 'sess-worker' });
+  });
+
+  it('refreshes no routing when the lend is refused', async () => {
+    await lendConversation(request, PRINCIPAL);
+
+    expect(routed).toHaveLength(0);
   });
 
   // The grant is bound to the thread the root post starts, and the platform

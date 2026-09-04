@@ -10,7 +10,7 @@
  */
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { log } from '../../log.js';
-import { writeOutboundDirect } from '../../session-manager.js';
+import { writeOutboundDirect, writeSessionRouting } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import { requestApproval } from '../approvals/index.js';
 import { createDestination, getDestinationByName, normalizeName } from '../agent-to-agent/db/agent-destinations.js';
@@ -172,6 +172,10 @@ async function openLentConversation(
   // The worker resolves names from its own session's projected map, so the new
   // destination has to reach the live session, not only the central DB.
   await writeDestinations(workerSession.helper_agent_group_id, workerSession.helper_session_id);
+  // Routing is otherwise projected once, at container spawn. A worker lent a
+  // conversation mid-task is already running, so without this its routing keeps
+  // the pre-grant state and every reply opens a new top-level post (D6).
+  await writeSessionRouting(workerSession.helper_agent_group_id, workerSession.helper_session_id);
   log.info('Worker conversation lent', { taskId: task.task_id, destination: localName });
   return localName;
 }

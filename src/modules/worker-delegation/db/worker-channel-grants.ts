@@ -23,13 +23,20 @@ export async function createGrant(grant: WorkerChannelGrant): Promise<void> {
  * The platform names the thread, and it only does so once the root message is
  * delivered — so the grant is written unbound and stamped here.
  */
-export async function bindGrantThread(rootMessageId: string, threadId: string): Promise<boolean> {
+export async function bindGrantThread(
+  rootMessageId: string,
+  threadId: string,
+): Promise<WorkerChannelGrant | undefined> {
   const result = await getDb().run(
     "UPDATE worker_channel_grants SET thread_id = ? WHERE root_message_id = ? AND thread_id = ''",
     threadId,
     rootMessageId,
   );
-  return result.changes > 0;
+  if (result.changes === 0) return undefined;
+  return getDb().get<WorkerChannelGrant>(
+    'SELECT * FROM worker_channel_grants WHERE root_message_id = ?',
+    rootMessageId,
+  );
 }
 
 /** The live grant for a helper session, if it holds one. */

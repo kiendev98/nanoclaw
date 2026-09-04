@@ -4,7 +4,7 @@
  * Writes an on_wake message to each session, kills the container, then
  * wakes a fresh container via the onExit callback — race-free.
  */
-import { isContainerRunning, killContainer } from './container-runner.js';
+import { isContainerRunning, restartContainer } from './container-runner.js';
 import { requestWake } from './request-wake.js';
 import { setStopIntent, shadowWrite } from './db/coordination.js';
 import { getSession, getSessionsByAgentGroup } from './db/sessions.js';
@@ -62,7 +62,7 @@ export async function restartAgentGroupContainers(
     if (willRespawn) {
       await shadowWrite('stop-intent', () => setStopIntent(session.id, 'respawn_after_stop', new Date().toISOString()));
     }
-    killContainer(
+    restartContainer(
       session.id,
       reason,
       willRespawn

@@ -120,6 +120,8 @@ interface ActiveSessionRuntime {
   finishedPromise: Promise<void>;
   resolveFinished: () => void;
   stopReason?: string;
+  /** Set by `restartContainer` so the terminal hooks are not told the run ended. */
+  endKind?: SessionEndKind;
   /** Incarnation this process shadow-claimed in session_claims, if the write landed. */
   claimIncarnation?: number;
   /** A deferred fenced finalization is already queued for this runtime. */
@@ -410,6 +412,19 @@ async function spawnContainer(session: Session): Promise<void> {
 }
 
 /**
+ * Why a session's container stopped.
+ *
+ * `restarting` means the host intends to bring the same session back, so work
+ * bound to the session outlives this exit. `ended` means the run is over,
+ * however it ended.
+ *
+ * The host states this rather than letting a hook infer it. A hook that guessed
+ * from a stop reason string, or from a respawn callback being present, would
+ * silently start finalizing live work the first time a caller added a reason.
+ */
+export type SessionEndKind = 'ended' | 'restarting';
+
+/**
  * Session-terminal hooks.
  *
  * Registered modules observe a session whose runtime has ended — the process
@@ -417,10 +432,13 @@ async function spawnContainer(session: Session): Promise<void> {
  * run has to mean something, and it cannot be an action the agent takes: a
  * crashed agent takes none.
  *
+ * A hook that finalizes work must check `kind` first. A restart exits the
+ * container without ending the run.
+ *
  * Hooks are decoration only. Each call is wrapped, so a failing hook can never
  * affect finalization, the claim release, or a respawn.
  */
-export type SessionTerminalHook = (sessionId: string) => void | Promise<void>;
+export type SessionTerminalHook = (sessionId: string, kind: SessionEndKind) => void | Promise<void>;
 
 const sessionTerminalHooks: SessionTerminalHook[] = [];
 
@@ -428,12 +446,12 @@ export function registerSessionTerminalHook(hook: SessionTerminalHook): void {
   sessionTerminalHooks.push(hook);
 }
 
-async function runSessionTerminalHooks(sessionId: string): Promise<void> {
+async function runSessionTerminalHooks(sessionId: string, kind: SessionEndKind): Promise<void> {
   for (const hook of sessionTerminalHooks) {
     try {
-      await hook(sessionId);
+      await hook(sessionId, kind);
     } catch (err) {
-      log.error('Session-terminal hook failed', { sessionId, err });
+      log.error('Session-terminal hook failed', { sessionId, kind, err });
     }
   }
 }
@@ -621,10 +639,24 @@ async function finish(sessionId: string, runtime: ActiveSessionRuntime, failure?
     }
   }
 
-  await runSessionTerminalHooks(sessionId);
+  await runSessionTerminalHooks(sessionId, runtime.endKind ?? 'ended');
 }
 
-/** Kill a container for a session. */
+/**
+ * Stop a container the host intends to bring back.
+ *
+ * Identical to `killContainer` except in what the session-terminal hooks are
+ * told. Work bound to the session survives a restart, so a hook that finalizes
+ * such work must not fire here. Two named functions rather than a flag, because
+ * the caller always knows which of the two it means.
+ */
+export function restartContainer(sessionId: string, reason: string, onExit?: () => void): void {
+  const entry = activeContainers.get(sessionId);
+  if (entry) entry.endKind = 'restarting';
+  killContainer(sessionId, reason, onExit);
+}
+
+/** Kill a container for a session. Ends the run — see `restartContainer`. */
 export function killContainer(sessionId: string, reason: string, onExit?: () => void): void {
   const entry = activeContainers.get(sessionId);
   if (!entry) return;
@@ -775,7 +807,7 @@ export async function honorPendingStopIntents(
       // The kill never completed — the container outlived the host that
       // ordered it. Re-issue the kill with the respawn re-armed.
       log.info('Re-issuing interrupted restart', { sessionId: session.id });
-      killContainer(session.id, 'restart-intent-recovery', () => void respawn());
+      restartContainer(session.id, 'restart-intent-recovery', () => void respawn());
     } else {
       await respawn();
     }

@@ -19,6 +19,7 @@ import { registerExemptThreadQuery } from '../../channels/thread-exemptions.js';
 import { registerSessionTerminalHook } from '../../container-runner.js';
 import { registerDeliveryAction, registerPostDeliveryHook, reenterGuardedDeliveryAction } from '../../delivery.js';
 import { log } from '../../log.js';
+import { writeSessionRouting } from '../../session-manager.js';
 import { unguarded } from '../../guard/index.js';
 import { registerApprovalHandler } from '../approvals/index.js';
 import { bindGrantThread } from './db/worker-channel-grants.js';
@@ -86,7 +87,11 @@ registerDeliveryAction(
  * helper's own action. The process ending is the signal, and it arrives whether
  * the run succeeded, failed, or was killed.
  */
-registerSessionTerminalHook(async (sessionId) => {
+registerSessionTerminalHook(async (sessionId, kind) => {
+  // A restart exits the container without ending the run. Reporting here would
+  // answer the principal while the worker is still on the task, and would tear
+  // down a lent conversation the worker is about to return to.
+  if (kind === 'restarting') return;
   await finalizeWorkerTaskIfRunning(sessionId, 'session-ended');
 });
 
@@ -101,7 +106,11 @@ registerExemptThreadQuery(isLentThread);
  */
 registerPostDeliveryHook(async (msg, _session, info) => {
   if (!info.platformMsgId) return;
-  if (!(await bindGrantThread(msg.id, info.platformMsgId))) return;
+  const grant = await bindGrantThread(msg.id, info.platformMsgId);
+  if (!grant) return;
+  // The grant was unbound when routing was last written, so the worker still
+  // has no thread to continue. Re-project now that the platform has named it.
+  await writeSessionRouting(grant.helper_agent_group_id, grant.helper_session_id);
   log.info('Lent conversation bound to its thread', { threadId: info.platformMsgId });
   // A review loop is bot-to-bot, and a channel's admission policy stops after
   // a few consecutive bot turns unless a human speaks. Claim this one thread,
