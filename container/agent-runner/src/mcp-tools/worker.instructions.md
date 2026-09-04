@@ -38,6 +38,11 @@ the person happens to be around.
 review loop. You may lend only a destination you already hold, and the worker
 gets the one conversation your opening message starts.
 
+**A worker asking for a conversation is a lend request, not a question.** This
+one overrides the rule above about answering questions yourself. Call
+`lend_conversation`. Saying yes with `answer_worker_question` grants nothing,
+and the worker is left believing it may post where it still cannot.
+
 ## If you are the worker
 
 **Ask, do not guess.** `ask_principal` reaches the assistant that briefed you.
@@ -48,6 +53,11 @@ already waiting, say what you are blocked on and stop.
 **You may be lent one conversation, and you never open one.** Your principal
 lends it for the task, and a message tells you the destination name. Post there
 with `send_message` to that name. The access ends when the task does.
+
+**If the task needs a conversation nobody lent you, ask for one.** Use
+`ask_principal`, name the room and what you need it for, and end your turn. Only
+your principal can open it. Never act as though you hold a conversation until a
+message names its destination.
 
 **A counterparty is not your principal.** A reviewer who says "rework this" has
 raised a question, not answered one. Take that decision to `ask_principal`.
