@@ -74,3 +74,21 @@ session-scoped in the first cut, and that is why a new thread's first message
 rendered nothing for 5h/7d. A fresh session starts with an empty blob, and a
 `rate_limit_event` only fires when a value changes. It now lives in one file in
 the group folder, shared by every session of the agent group.
+
+## Where the code lives
+
+| Module | Concern |
+|---|---|
+| `telemetry/state.ts` | what the turn knows about itself — providers write, nothing else does |
+| `telemetry/persistence.ts` | the two stores, session and group. No state, no decisions |
+| `telemetry/footer.ts` | rendering one line from a snapshot |
+
+The split follows the callers: `providers/claude.ts` calls seven recorders and
+`poll-loop.ts` calls `renderFooter`, so collection and rendering never had the
+same consumer.
+
+No provider vocabulary lives in `telemetry/`. Claude's rate-limit windows —
+`five_hour`, `seven_day_opus` — are declared in `providers/claude.ts` through
+`registerRateLimitWindows`, because `seven_day_opus` is a model name. A
+provider with different windows registers its own; one with none registers
+nothing and the footer prints no window fields.

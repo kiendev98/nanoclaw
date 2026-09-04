@@ -14,7 +14,22 @@ import {
   recordModel,
   recordRateLimits,
   recordUtilization,
-} from '../message-footer.js';
+  registerRateLimitWindows,
+} from '../telemetry/index.js';
+
+/**
+ * The rate-limit windows Claude reports, in render order, with their labels.
+ *
+ * Declared here rather than in `telemetry/`: `seven_day_opus` is a Claude
+ * model name, and shared code must not carry one. Another provider registers
+ * its own windows, or none.
+ */
+registerRateLimitWindows([
+  ['five_hour', '5h'],
+  ['seven_day', '7d'],
+  ['seven_day_opus', '7d opus'],
+  ['seven_day_sonnet', '7d sonnet'],
+]);
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
 import { AGENT_DIR, IS_HOSTED, SKILLS_PLUGIN_DIR } from '../roots.js';
 import { shimCwd } from './cwd-shim.js';

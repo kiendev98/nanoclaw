@@ -11,7 +11,7 @@ import path from 'path';
 
 import { describe, expect, it } from 'vitest';
 
-import { LocalSessionDriver, resolveSpawnCwd, stripInheritedClaudeEnv } from './local-driver.js';
+import { LocalSessionDriver, stripInheritedClaudeEnv } from './local-driver.js';
 import { FIXTURE_POLICY, fixtureSpec } from './spec-fixture.js';
 import type { MountPolicy, SessionSpec } from './types.js';
 
@@ -78,28 +78,6 @@ describe('stripInheritedClaudeEnv', () => {
  * agent loads. It used to double as the state directory, which is why an agent
  * could only work in one repository. See `docs/local-driver.md`.
  */
-describe('resolveSpawnCwd', () => {
-  it('defaults to the group folder, so an existing install is unaffected', () => {
-    expect(resolveSpawnCwd(undefined, { NANOCLAW_AGENT_DIR: '/groups/cli-with-kien' })).toBe('/groups/cli-with-kien');
-  });
-
-  it("uses the spec's cwd when one is set, leaving AGENT_DIR alone", () => {
-    const rootEnv = { NANOCLAW_AGENT_DIR: '/groups/cli-with-kien' };
-
-    expect(resolveSpawnCwd('/worktrees/saber-feat-abc', rootEnv)).toBe('/worktrees/saber-feat-abc');
-    // The state directory must NOT follow cwd: memory and footer telemetry
-    // stay with the agent, not with whatever repo it is visiting.
-    expect(rootEnv.NANOCLAW_AGENT_DIR).toBe('/groups/cli-with-kien');
-  });
-
-  it('treats a whitespace-only cwd as unset rather than chdir-ing to nothing', () => {
-    // An empty value reaching `spawn` would resolve cwd to the host's own
-    // directory, the nanoclaw checkout. That is how the 11,618-token
-    // CLAUDE.md leak got into every session in the first place.
-    expect(resolveSpawnCwd('   ', { NANOCLAW_AGENT_DIR: '/groups/g' })).toBe('/groups/g');
-  });
-});
-
 /**
  * Where an operator's `ncl` attach lands.
  *

@@ -76,17 +76,6 @@ const CLAUDE_SESSION_ENV_VARS = [
  * failure both prevent is silent: the agent starts, answers, and is simply
  * wrong about which account it is or whose session it belongs to.
  */
-/**
- * The agent's working directory.
- *
- * NOT necessarily the group folder. cwd alone decides which repository's context
- * an agent loads. `NANOCLAW_AGENT_DIR` stays its state directory. Falls back to
- * the group folder. See `docs/local-driver.md`.
- */
-export function resolveSpawnCwd(specCwd: string | undefined, rootEnv: NodeJS.ProcessEnv): string | undefined {
-  return (specCwd ?? '').trim() || rootEnv.NANOCLAW_AGENT_DIR;
-}
-
 export function stripInheritedClaudeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   for (const key of AUTH_OVERRIDE_ENV_VARS) delete env[key];
   for (const key of CLAUDE_SESSION_ENV_VARS) delete env[key];
@@ -227,7 +216,7 @@ export class LocalSessionDriver implements SessionDriver {
     const record: SessionRecord = {
       name,
       pid: 0,
-      cwd: resolveSpawnCwd(container.cwd, rootEnv),
+      cwd: rootEnv.NANOCLAW_AGENT_DIR,
       key: spec.key,
       labels: { ...labelsForKey(spec.key, AGENT_ROLE, spec.labels), ...(container.labels ?? {}) },
       startedAt: '',

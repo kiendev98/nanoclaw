@@ -10,7 +10,7 @@ import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { clearStaleProcessingAcks } from './db/container-state.js';
 import { touchHeartbeat } from './heartbeat.js';
 import { getAgentMailbox } from './mailbox/index.js';
-import { renderFooter } from './message-footer.js';
+import { renderFooter } from './telemetry/index.js';
 import {
   clearContinuation,
   clearCurrentInReplyTo,

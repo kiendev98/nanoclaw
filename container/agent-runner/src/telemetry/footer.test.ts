@@ -8,7 +8,7 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
-import { closeSessionDb, initTestSessionDb } from './mailbox/sqlite/connection.js';
+import { closeSessionDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
 import {
   accountName,
   recordAccountName,
@@ -23,7 +23,8 @@ import {
   formatTokens,
   shortenModel,
   withFooter,
-} from './message-footer.js';
+  registerRateLimitWindows,
+} from './index.js';
 
 let configDir: string;
 let previousConfigDir: string | undefined;
@@ -49,6 +50,14 @@ beforeEach(() => {
   process.env.CLAUDE_CONFIG_DIR = configDir;
   process.env.NANOCLAW_AGENT_DIR = groupDir;
   resetFooterTelemetry();
+  // Windows are a provider's vocabulary now, not this module's. These are the
+  // ones `providers/claude.ts` declares.
+  registerRateLimitWindows([
+    ['five_hour', '5h'],
+    ['seven_day', '7d'],
+    ['seven_day_opus', '7d opus'],
+    ['seven_day_sonnet', '7d sonnet'],
+  ]);
 });
 
 afterEach(() => {

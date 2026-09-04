@@ -87,8 +87,7 @@ export const OUTBOX_DIR = path.join(WORKSPACE_DIR, 'outbox');
  * composed project document went on naming them.
  *
  * A plugin is a runtime argument rather than a location, so it depends on
- * neither — including in a repo worker, whose cwd moves to its worktree and
- * takes `project` scope with it.
+ * neither. The host stages it here at spawn; see `src/skill-delivery.ts`.
  */
 export const SKILLS_PLUGIN_DIR = path.join(WORKSPACE_DIR, 'plugin');
 

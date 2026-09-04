@@ -71,7 +71,7 @@ export function migrateLegacyContinuation(providerName: string): string | undefi
  * until the SDK happened to mention those numbers again.
  *
  * Kept as an opaque string here so this module stays a key/value store and
- * the shape belongs to `message-footer.ts`.
+ * the shape belongs to `telemetry/persistence.ts`.
  */
 const FOOTER_TELEMETRY_KEY = 'footer_telemetry';
 

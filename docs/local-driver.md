@@ -90,18 +90,21 @@ which is the same failure from the other direction.
 
 ## The working directory
 
-cwd is NOT necessarily the group folder. Claude Code walks up from cwd to
-discover a project's `CLAUDE.md`, `.claude/skills/` and `.claude/settings.json`.
-The walk is verified, and it does not stop at a git repository root. So cwd
-alone decides which repository's context an agent loads.
+The agent starts in `NANOCLAW_AGENT_DIR`, the group folder that holds its
+memory and telemetry.
 
-`NANOCLAW_AGENT_DIR` stays the agent's own state directory, holding memory and
-footer telemetry. The two were once one value. That conflation is why an agent
-could only ever work in one repository, because moving it into a repo would have
-moved its memory in there too.
+Nothing overrides that today, and the override was removed rather than left
+speculative. `ContainerSpec` carried a `cwd` field that no composer ever set,
+documented for a repo worker this tree does not have. Only the local driver
+read it, so it could never be anything but the fallback.
 
-It falls back to the group folder, so an install that sets no override keeps its
-previous behaviour.
+The constraint it was written for is real and still applies to whatever adds
+it back. Claude Code walks up from cwd to discover a project's `CLAUDE.md`,
+`.claude/skills/` and `.claude/settings.json`. The walk is verified, and it
+does not stop at a git repository root — so cwd alone decides which
+repository's context an agent loads, and it must not be conflated with
+`NANOCLAW_AGENT_DIR`. Moving an agent into a repository would otherwise move
+its memory in there too.
 
 ## Host-owned environment
 
