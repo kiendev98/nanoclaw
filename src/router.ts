@@ -396,7 +396,17 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     const scopeOk = engages && (!senderScopeGate || (await senderScopeGate(event, userId, mg, agent)).allowed);
 
     if (engages && accessOk && scopeOk) {
-      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, true, adapter);
+      await deliverToAgent({
+        agent,
+        agentGroup,
+        mg,
+        event,
+        userId,
+        threadsEnabled,
+        effectiveThreadId,
+        wake: true,
+        adapter,
+      });
       engagedCount++;
 
       // Mention-sticky: ask the adapter to subscribe the thread so the
@@ -428,7 +438,17 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       // message (which also stages their attachments to disk via
       // writeSessionMessage → extractAttachmentFiles) is exactly what the
       // gate is meant to prevent.
-      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, false, adapter);
+      await deliverToAgent({
+        agent,
+        agentGroup,
+        mg,
+        event,
+        userId,
+        threadsEnabled,
+        effectiveThreadId,
+        wake: false,
+        adapter,
+      });
       accumulatedCount++;
     } else {
       log.debug('Message not engaged for agent (drop policy)', {
@@ -514,17 +534,32 @@ async function evaluateEngage(
   }
 }
 
-async function deliverToAgent(
-  agent: MessagingGroupAgent,
-  agentGroup: AgentGroup,
-  mg: MessagingGroup,
-  event: InboundEvent,
-  userId: string | null,
-  threadsEnabled: boolean,
-  effectiveThreadId: string | null,
-  wake: boolean,
-  adapter: ChannelAdapter | undefined,
-): Promise<void> {
+/**
+ * One inbound message, resolved as far as the fanout loop can resolve it.
+ *
+ * A parameter object because the positional list had reached nine, where a
+ * caller can silently transpose two same-typed arguments and the compiler
+ * cannot help. Everything here is decided once per message in routeInbound
+ * and read, never written, by delivery.
+ */
+interface DeliveryContext {
+  agent: MessagingGroupAgent;
+  agentGroup: AgentGroup;
+  mg: MessagingGroup;
+  event: InboundEvent;
+  userId: string | null;
+  /** Thread policy resolved for THIS wiring, not the adapter's raw capability. */
+  threadsEnabled: boolean;
+  effectiveThreadId: string | null;
+  /** True engages and wakes the container. False stores silent context. */
+  wake: boolean;
+  /** The adapter that delivered this message, absent when none is registered. */
+  adapter: ChannelAdapter | undefined;
+}
+
+async function deliverToAgent(context: DeliveryContext): Promise<void> {
+  const { agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, wake, adapter } = context;
+
   // Apply the resolved thread policy (wiring override AND channel declaration
   // AND adapter capability — resolveThreadPolicy at fanout): thread-enabled
   // wiring in a group chat → per-thread session regardless of wiring
