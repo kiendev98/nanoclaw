@@ -4,9 +4,13 @@
  * Every value is optional and every field is omitted when its source has not
  * reported. A footer that invents a number is worse than no footer.
  *
- * This module holds NO provider vocabulary. A provider names its own
- * rate-limit windows through `registerRateLimitWindows`, so a model id never
- * appears in shared code.
+ * Rate-limit windows are a provider's vocabulary and arrive through
+ * `registerRateLimitWindows`, so no model id appears here.
+ *
+ * Two things have NOT been inverted yet and are Claude's: `shortenModel`
+ * strips a `claude-` prefix, and `accountName` reads Claude Code's own
+ * `~/.claude.json`. A second provider inherits both, wrongly and silently.
+ * They want the same registration treatment.
  */
 import fs from 'fs';
 import os from 'os';

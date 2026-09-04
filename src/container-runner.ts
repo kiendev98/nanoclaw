@@ -1096,7 +1096,6 @@ export function parsePidsLimit(value: string): number | undefined {
   return Number.isFinite(pids) && pids > 0 ? Math.floor(pids) : undefined;
 }
 
-
 const execAsync = promisify(exec);
 
 /** Build a per-agent-group Docker image with custom packages. */

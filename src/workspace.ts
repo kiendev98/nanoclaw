@@ -23,7 +23,7 @@
  * explains why they cannot share a prefix.
  *
  * This module imports only `env.js`, which depends on fs, path and log. It
- * cannot import `config.ts`: config imports from modules that import this one.
+ * cannot import `config.ts`, because `config.ts` imports this one.
  */
 import fs from 'fs';
 import os from 'os';

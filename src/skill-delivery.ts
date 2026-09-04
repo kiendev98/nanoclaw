@@ -40,10 +40,7 @@ import type { ContainerConfig } from './container-config.js';
  * than lingering. Skills are additive: a failure here warns and leaves the
  * session to start without them.
  */
-export function stageSkillsPlugin(
-  sessDirPath: string,
-  containerConfig: ContainerConfig,
-): void {
+export function stageSkillsPlugin(sessDirPath: string, containerConfig: ContainerConfig): void {
   const dir = path.join(sessDirPath, 'plugin');
   const sharedSkillsDir = path.join(process.cwd(), 'container', 'skills');
   try {
@@ -84,10 +81,7 @@ export function stageSkillsPlugin(
  * scan that follows a link wherever it lands, and only `@` imports are gated on
  * resolving inside the project directory.
  */
-export function syncSkillSymlinks(
-  claudeDir: string,
-  containerConfig: ContainerConfig,
-): void {
+export function syncSkillSymlinks(claudeDir: string, containerConfig: ContainerConfig): void {
   const skillsDir = path.join(claudeDir, 'skills');
   if (!fs.existsSync(skillsDir)) {
     fs.mkdirSync(skillsDir, { recursive: true });
