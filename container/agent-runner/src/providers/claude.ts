@@ -2,7 +2,12 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
+import {
+  query as sdkQuery,
+  type HookCallback,
+  type PreCompactHookInput,
+  type Settings,
+} from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
@@ -197,6 +202,27 @@ export const SDK_DISALLOWED_TOOLS = [
   'DesignSync',
   'ReportFindings',
 ];
+
+/**
+ * What a nanoclaw bot is isolated from, on every session, in every install.
+ *
+ * A claude.ai connector is OAuth'd to the operator's personal account.
+ * The bot calling one authenticates as the human, not as itself.
+ *
+ * This rides the in-memory SDK call rather than a settings file, for a narrow
+ * reason. `writeMemorySessionHook` below already writes to the operator's own
+ * `${CLAUDE_CONFIG_DIR ?? ~/.claude}/settings.json`. A hook array is additive,
+ * so it can be shared there. This flag is any-source-true, so it cannot.
+ *
+ * `strictMcpConfig` was rejected. It also drops `code-review-graph` and the
+ * plugin servers, which the bot uses.
+ *
+ * This is a local divergence from upstream nanoclaw. Re-apply it after every
+ * `/update-nanoclaw`. See docs/blueprints/nanoclaw/MCP-ISOLATION.md.
+ */
+export const BOT_ISOLATION_SETTINGS: Settings = {
+  disableClaudeAiConnectors: true,
+};
 
 // Tool allowlist for NanoClaw agent containers. MCP-tool entries are derived
 // at the call site from the registered `mcpServers` map so that any server
@@ -683,10 +709,12 @@ export class ClaudeProvider implements AgentProvider {
         // twice — and a template overlay stamped in to SHADOW a shared skill
         // would find the original reinstated beside it.
         ...(IS_HOSTED ? { plugins: [{ type: 'local' as const, path: SKILLS_PLUGIN_DIR }] } : {}),
-        // Only sent when enabled, so an install that never turns it on passes
-        // exactly the options it always did. `fastMode` is a Settings member
-        // rather than a query option, which is why it rides `settings`.
-        ...(this.fastMode ? { settings: { fastMode: true } } : {}),
+        // `fastMode` is a Settings member rather than a query option.
+        // The per-install dial therefore rides the same object as the invariant.
+        settings: {
+          ...BOT_ISOLATION_SETTINGS,
+          ...(this.fastMode ? { fastMode: true } : {}),
+        },
         mcpServers: this.mcpServers,
         hooks: {
           PreToolUse: [{ hooks: [preToolUseHook] }],
