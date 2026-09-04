@@ -10,7 +10,7 @@ import { log } from '../../log.js';
 import type { Session } from '../../types.js';
 import { findRunningTask, setDraftAnswer } from './db/worker-tasks.js';
 import { finalizeWorkerTaskIfRunning } from './finalize.js';
-import { notifyRequester } from './notify.js';
+import { replyToCaller } from './notify.js';
 
 function readText(content: Record<string, unknown>): string {
   return typeof content.text === 'string' ? content.text.trim() : '';
@@ -37,7 +37,7 @@ export async function workerDone(content: Record<string, unknown>, session: Sess
   const text = readText(content);
   const task = await findRunningTask(session.id);
   if (!task) {
-    await notifyRequester(session, 'done: there is no running task on this session.');
+    await replyToCaller(session, 'done: there is no running task on this session.');
     return;
   }
   if (text) await setDraftAnswer(task.task_id, text);

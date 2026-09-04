@@ -7,12 +7,12 @@
  * fast path to the same call, not a second mechanism: both go through the
  * status transition in `claimTaskForFinalize`, and exactly one wins.
  */
-import { restoreHopLimitOnThread } from '../../channels/slack-a2a.js';
 import { log } from '../../log.js';
 import { deleteDestination } from '../agent-to-agent/db/agent-destinations.js';
 import { releaseGrant } from './db/worker-channel-grants.js';
 import { deleteQuestionsForTask } from './db/worker-questions.js';
-import { claimTaskForFinalize, findRunningTask } from './db/worker-tasks.js';
+import { claimTaskForFinalize, findRunningTask, releaseTaskClaim } from './db/worker-tasks.js';
+import { forgetLentThread } from './lent-threads.js';
 import { deliverToSession } from './notify.js';
 import type { WorkerTask } from './types.js';
 
@@ -42,15 +42,29 @@ export async function finalizeWorkerTaskIfRunning(helperSessionId: string, reaso
   const claimed = await claimTaskForFinalize(running.task_id, new Date().toISOString());
   if (!claimed) return false;
 
+  // The claim has to come first — it is what stops two callers reporting the
+  // same task twice. So a delivery that fails after it would turn "exactly
+  // one report" into none. Hand the claim back instead, and let the terminal
+  // event try again.
+  try {
+    await deliverToSession(
+      claimed.principal_agent_group_id,
+      claimed.principal_session_id,
+      reportText(claimed, reason),
+      `${claimed.repo_name}-worker`,
+    );
+  } catch (err) {
+    const handedBack = await releaseTaskClaim(claimed.task_id);
+    log.error('Worker report undelivered', { taskId: claimed.task_id, reason, willRetry: handedBack, err });
+    if (handedBack) return false;
+    throw err;
+  }
+
+  // Only now: the lent conversation and the open question outlive a failed
+  // delivery on purpose, so a retry still has them.
   await releaseLentConversation(claimed);
   await deleteQuestionsForTask(claimed.task_id);
 
-  await deliverToSession(
-    claimed.principal_agent_group_id,
-    claimed.principal_session_id,
-    reportText(claimed, reason),
-    `${claimed.repo_name}-worker`,
-  );
   log.info('Worker task finalized', { taskId: claimed.task_id, reason, hasDraft: Boolean(claimed.draft_answer) });
   return true;
 }
@@ -62,9 +76,7 @@ export async function finalizeWorkerTaskIfRunning(helperSessionId: string, reaso
 async function releaseLentConversation(task: WorkerTask): Promise<void> {
   const grant = await releaseGrant(task.task_id, new Date().toISOString());
   if (!grant) return;
-  if (grant.channel_type === 'slack' && grant.thread_id) {
-    restoreHopLimitOnThread(grant.platform_id, grant.thread_id);
-  }
+  if (grant.thread_id) forgetLentThread(grant.channel_type, grant.platform_id, grant.thread_id);
   try {
     await deleteDestination(grant.helper_agent_group_id, grant.local_destination_name);
   } catch (err) {

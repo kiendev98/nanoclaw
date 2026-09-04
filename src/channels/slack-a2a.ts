@@ -25,6 +25,7 @@
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { setBotInboundPolicy, type SlackBotInboundPolicy } from './slack-a2a-guard.js';
+import { isThreadExempt } from './thread-exemptions.js';
 
 export const DEFAULT_MAX_HOPS = 6;
 
@@ -89,33 +90,6 @@ function roomFromPlatformId(platformId: string): string {
  * `getConfig` is injectable for tests; production reads .env with a short TTL
  * cache.
  */
-/**
- * Threads exempt from the hop cap, keyed `<room>:<thread>`.
- *
- * The cap counts CONSECUTIVE bot turns and only a human resets it, so a
- * deliberate bot-to-bot loop — a review loop a worker holds with another
- * agent — stops mid-conversation with nothing but a log line. The exemption is
- * per thread rather than a higher global cap, so every other room keeps the
- * cap that is the only thing between two agents and an infinite loop.
- *
- * In memory on purpose. A host restart re-arms the cap on a thread that was
- * exempt, which fails toward the bound rather than away from it.
- */
-const exemptThreads = new Set<string>();
-
-function exemptionKey(platformId: string, threadId: string): string {
-  return `${roomFromPlatformId(platformId)}:${threadId}`;
-}
-
-/** Exempt one thread. The caller owns a grant that ends with its task. */
-export function exemptThreadFromHopLimit(platformId: string, threadId: string): void {
-  exemptThreads.add(exemptionKey(platformId, threadId));
-}
-
-export function restoreHopLimitOnThread(platformId: string, threadId: string): void {
-  exemptThreads.delete(exemptionKey(platformId, threadId));
-}
-
 export function createA2aRoomPolicy(getConfig: () => A2aConfig = readA2aConfig): SlackBotInboundPolicy {
   /** Consecutive accepted bot hops, keyed `<instanceKey>:<room>`. */
   const hops = new Map<string, number>();
@@ -129,7 +103,10 @@ export function createA2aRoomPolicy(getConfig: () => A2aConfig = readA2aConfig):
       }
       const key = `${ctx.instanceKey}:${room}`;
       const count = hops.get(key) ?? 0;
-      const exempt = ctx.threadId !== null && exemptThreads.has(exemptionKey(ctx.platformId, ctx.threadId));
+      // A thread some feature has claimed as a deliberate bot-to-bot loop is
+      // not counted against the cap. The claim is made elsewhere and asked for
+      // here, so this file names no feature.
+      const exempt = ctx.threadId !== null && isThreadExempt('slack', ctx.platformId, ctx.threadId);
       if (!exempt && count >= maxHops) {
         log.info('slack-a2a: hop limit reached — dropping bot messages until a human speaks', {
           room,

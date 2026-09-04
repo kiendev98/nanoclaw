@@ -581,7 +581,7 @@ export async function processQuery(
           if (routing.taskRun && !taskBlockNudged) await autoAppendTaskLog(event.text);
           // A helper session captures the same final text as its report draft.
           // Automatic, so B1's "the helper must not have to remember" holds.
-          if (worktreeDir()) await autoAppendWorkerReportDraft(event.text);
+          if (worktreeDir()) await recordWorkerReportDraft(event.text);
           if (resultBlocks === 0 && event.isError === true && !routing.taskRun) {
             // Non-retryable error turn (e.g. a 403 billing_error) with no
             // <message> envelope: deliver the notice instead of dropping it as
@@ -1144,7 +1144,7 @@ export async function autoAppendTaskLog(text: string): Promise<void> {
  * host reads the draft once, when the task ends, so a helper never has to
  * remember to report and a crashed one still does.
  */
-export async function autoAppendWorkerReportDraft(text: string): Promise<void> {
+export async function recordWorkerReportDraft(text: string): Promise<void> {
   const body = stripInternalTags(text).trim();
   if (!body) return;
   await writeMessageOut({

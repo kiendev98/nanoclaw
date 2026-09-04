@@ -41,7 +41,12 @@ export interface MountSpec {
    *   container's leased identity. Pinned to the deployment's materialsRoot; mode
    *   MUST be 'ro'; NEVER mountable into the 'agent' role — this makes the
    *   no-credentials-in-agents invariant an admission-checkable rule.
-   * - 'allowlisted-extra': arbitrary host paths vetted upstream by the mount allowlist.
+   * - 'allowlisted-extra': arbitrary host paths vetted upstream — by the mount
+   *   allowlist, or by another catalog the operator owns outside the project
+   *   root. Worker delegation's repository registry is the second such
+   *   catalog, and a session's git worktree arrives through this class.
+   *   Naming both is the point: an audit of "what can reach a container" that
+   *   reads only the mount allowlist gets an incomplete answer.
    */
   class: MountClass;
   hostPath: string;

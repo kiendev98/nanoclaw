@@ -1,6 +1,3 @@
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
 
 import { describe, expect, it } from 'bun:test';
 
@@ -90,42 +87,50 @@ describe('roots', () => {
 });
 
 describe('worktreeDir', () => {
-  const VAR = 'NANOCLAW_WORKTREE_DIR';
+  const VARS = ['NANOCLAW_WORKER_SESSION', 'NANOCLAW_WORKTREE_DIR'] as const;
 
-  function withVar<T>(value: string | undefined, run: () => T): T {
-    const previous = process.env[VAR];
-    if (value === undefined) delete process.env[VAR];
-    else process.env[VAR] = value;
+  function withVars<T>(overrides: Partial<Record<(typeof VARS)[number], string>>, run: () => T): T {
+    const previous = new Map(VARS.map((key) => [key, process.env[key]]));
+    for (const key of VARS) delete process.env[key];
+    Object.assign(process.env, overrides);
     try {
       return run();
     } finally {
-      if (previous === undefined) delete process.env[VAR];
-      else process.env[VAR] = previous;
+      for (const key of VARS) {
+        const value = previous.get(key);
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
   }
 
   // The absent case is every ordinary session, and it has to stay absent: the
   // caller then keeps AGENT_DIR, so nothing about a chat session changes.
-  it('is null when no working copy is named or mounted', async () => {
+  it('is null when the host has not said this is a worker session', async () => {
     const r = await import('./roots.js');
 
-    withVar(undefined, () => expect(r.worktreeDir()).toBeNull());
+    withVars({}, () => expect(r.worktreeDir()).toBeNull());
   });
 
-  it('is null when the named directory does not exist', async () => {
+  // The role is a fact the host states. A directory appearing at the container
+  // path for some unrelated reason must not turn a chat session into a worker's.
+  it('is null when only the working copy is named, without the role', async () => {
     const r = await import('./roots.js');
 
-    withVar('/nanoclaw-no-such-worktree', () => expect(r.worktreeDir()).toBeNull());
+    withVars({ NANOCLAW_WORKTREE_DIR: '/somewhere/repo' }, () => expect(r.worktreeDir()).toBeNull());
   });
 
-  it('is the named directory when it exists', async () => {
+  it('is the container path when the host says worker and names nothing', async () => {
     const r = await import('./roots.js');
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-worktree-'));
 
-    try {
-      withVar(dir, () => expect(r.worktreeDir()).toBe(dir));
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
+    withVars({ NANOCLAW_WORKER_SESSION: '1' }, () => expect(r.worktreeDir()).toBe('/workspace/repo'));
+  });
+
+  it('is the named directory when the host names one', async () => {
+    const r = await import('./roots.js');
+
+    withVars({ NANOCLAW_WORKER_SESSION: '1', NANOCLAW_WORKTREE_DIR: '/somewhere/repo/' }, () =>
+      expect(r.worktreeDir()).toBe('/somewhere/repo'),
+    );
   });
 });

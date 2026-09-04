@@ -8,10 +8,7 @@
 import { getSession } from '../../db/sessions.js';
 import { requestWake } from '../../request-wake.js';
 import { writeSessionMessage } from '../../session-manager.js';
-
-function generateId(prefix: string): string {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
+import { generateId } from './ids.js';
 
 /**
  * Deliver one line of text into a session as an ordinary inbound message.
@@ -39,6 +36,6 @@ export async function deliverToSession(
 }
 
 /** Answer the agent that made a request, in its own session. */
-export async function notifyRequester(session: { agent_group_id: string; id: string }, text: string): Promise<void> {
+export async function replyToCaller(session: { agent_group_id: string; id: string }, text: string): Promise<void> {
   await deliverToSession(session.agent_group_id, session.id, text, 'system');
 }

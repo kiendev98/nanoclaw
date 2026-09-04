@@ -20,7 +20,7 @@ vi.mock('./notify.js', () => ({
     delivered.push(text);
     return Promise.resolve();
   },
-  notifyRequester: (_session: Session, text: string) => {
+  replyToCaller: (_session: Session, text: string) => {
     refusals.push(text);
     return Promise.resolve();
   },

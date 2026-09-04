@@ -1,5 +1,6 @@
 /** `worker_tasks` — one delegated task, its draft answer, and its progress-note budget. */
 import { getDb } from '../../../db/connection.js';
+import { isUniqueViolation } from '../../../db/errors.js';
 import type { WorkerTask } from '../types.js';
 
 /** At most this many progress notes reach the principal per task (Q8). */
@@ -57,6 +58,31 @@ export async function claimTaskForFinalize(taskId: string, completedAt: string):
   );
   if (result.changes === 0) return undefined;
   return getTask(taskId);
+}
+
+/**
+ * Hand a claimed task back, because its report never got delivered.
+ *
+ * The claim is what stops two callers reporting the same task twice, so it has
+ * to be taken BEFORE the delivery attempt. Undoing it on failure is what keeps
+ * that from turning into zero reports: the terminal-event backstop finds the
+ * task running again and tries once more.
+ *
+ * Returns false when the row could not be handed back — a fresh task has since
+ * claimed the session's one running slot, so this report is genuinely lost and
+ * the caller must say so.
+ */
+export async function releaseTaskClaim(taskId: string): Promise<boolean> {
+  try {
+    const result = await getDb().run(
+      "UPDATE worker_tasks SET status = 'running', completed_at = NULL WHERE task_id = ? AND status = 'answered'",
+      taskId,
+    );
+    return result.changes > 0;
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+    return false;
+  }
 }
 
 /**

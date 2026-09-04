@@ -12,10 +12,12 @@ import { getAgentGroup } from '../../db/agent-groups.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
 import { requestApproval } from '../approvals/index.js';
-import { createTask } from './db/worker-tasks.js';
+import { isUniqueViolation } from '../../db/errors.js';
+import { createTask, findRunningTask } from './db/worker-tasks.js';
 import { ensureHelperAgentGroup, ensureHelperSession, providerOf } from './helper-session.js';
-import { deliverToSession, notifyRequester } from './notify.js';
+import { deliverToSession, replyToCaller } from './notify.js';
 import { WORKER_DELEGATE_ACTION } from './guard.js';
+import { generateId } from './ids.js';
 import { describeRefusal, isRepoRefusal, resolveRepo } from './repo-registry.js';
 import { WorktreeError } from './worktree.js';
 import type { WorkerTask } from './types.js';
@@ -35,10 +37,6 @@ function readRequest(content: Record<string, unknown>): DelegateRequest {
   };
 }
 
-function generateTaskId(): string {
-  return `wt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 /**
  * Guard precheck: everything a caller can fix itself is answered here, so a
  * mistyped repository name never cards a human.
@@ -46,24 +44,24 @@ function generateTaskId(): string {
 export async function validateDelegateTask(content: Record<string, unknown>, session: Session): Promise<boolean> {
   const request = readRequest(content);
   if (!request.repository) {
-    await notifyRequester(session, 'delegate_task failed: name the repository. Never infer it.');
+    await replyToCaller(session, 'delegate_task failed: name the repository. Never infer it.');
     return false;
   }
   if (!request.task) {
-    await notifyRequester(session, 'delegate_task failed: the task must stand alone, and it is empty.');
+    await replyToCaller(session, 'delegate_task failed: the task must stand alone, and it is empty.');
     return false;
   }
   if (!session.messaging_group_id) {
-    await notifyRequester(session, 'delegate_task failed: this session is not attached to a conversation.');
+    await replyToCaller(session, 'delegate_task failed: this session is not attached to a conversation.');
     return false;
   }
   const repo = resolveRepo(request.repository);
   if (isRepoRefusal(repo)) {
-    await notifyRequester(session, `delegate_task failed: ${describeRefusal(repo)}`);
+    await replyToCaller(session, `delegate_task failed: ${describeRefusal(repo)}`);
     return false;
   }
   if (!(await getAgentGroup(session.agent_group_id))) {
-    await notifyRequester(session, 'delegate_task failed: the requesting agent group no longer exists.');
+    await replyToCaller(session, 'delegate_task failed: the requesting agent group no longer exists.');
     return false;
   }
   return true;
@@ -79,7 +77,10 @@ export async function requestDelegateTaskHold(content: Record<string, unknown>, 
     session,
     agentName: sourceGroup.name,
     action: WORKER_DELEGATE_ACTION,
-    payload: { repository: request.repository, task: request.task },
+    // The whole request, not a summary of it. An approved replay re-enters the
+    // handler with THIS payload as its content, so a field dropped here is a
+    // field the approved call runs without.
+    payload: { repository: request.repository, task: request.task, threadId: request.threadId },
     title: `Delegate into ${request.repository}`,
     question: `Agent "${sourceGroup.name}" wants a worker to do this in the "${request.repository}" repository: ${request.task}. Approve?`,
   });
@@ -102,23 +103,20 @@ export async function delegateTask(content: Record<string, unknown>, session: Se
 
   let helperSessionId: string;
   try {
-    const resolved = await ensureHelperSession(
-      helper,
-      session.messaging_group_id,
+    const resolved = await ensureHelperSession(helper, {
+      messagingGroupId: session.messaging_group_id,
       threadId,
-      session.agent_group_id,
-      session.id,
-    );
+    });
     helperSessionId = resolved.workerSession.helper_session_id;
   } catch (err) {
     const text = err instanceof WorktreeError ? err.message : `Could not prepare a worker for "${repo.name}".`;
     log.error('Worker session preparation failed', { repoName: repo.name, err });
-    await notifyRequester(session, `delegate_task failed: ${text}`);
+    await replyToCaller(session, `delegate_task failed: ${text}`);
     return;
   }
 
   const task: WorkerTask = {
-    task_id: generateTaskId(),
+    task_id: generateId('wt'),
     helper_session_id: helperSessionId,
     helper_agent_group_id: helper.helper_agent_group_id,
     repo_name: repo.name,
@@ -132,7 +130,20 @@ export async function delegateTask(content: Record<string, unknown>, session: Se
     created_at: new Date().toISOString(),
     completed_at: null,
   };
-  await createTask(task);
+  // A helper session is reused for a second task in the same thread, and it
+  // works one task at a time. The unique index refuses the second, so a
+  // follow-up cannot leave the first running forever with nobody to report it.
+  try {
+    await createTask(task);
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+    const running = await findRunningTask(helperSessionId);
+    await replyToCaller(
+      session,
+      `delegate_task failed: the ${repo.name} worker is still on task ${running?.task_id ?? 'its current task'}. Wait for its report, or answer its question.`,
+    );
+    return;
+  }
 
   await deliverToSession(
     helper.helper_agent_group_id,
@@ -140,7 +151,7 @@ export async function delegateTask(content: Record<string, unknown>, session: Se
     [`New task (id ${task.task_id}) in the ${repo.name} repository:`, '', request.task].join('\n'),
     'principal',
   );
-  await notifyRequester(
+  await replyToCaller(
     session,
     `Delegated to the ${repo.name} worker (task ${task.task_id}). You will receive exactly one report when it finishes.`,
   );

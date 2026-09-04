@@ -10,7 +10,7 @@
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
 import { MAX_PROGRESS_NOTES, findRunningTask, spendProgressNoteAllowance } from './db/worker-tasks.js';
-import { deliverToSession, notifyRequester } from './notify.js';
+import { deliverToSession, replyToCaller } from './notify.js';
 
 export async function sendProgressNote(content: Record<string, unknown>, session: Session): Promise<void> {
   const text = typeof content.text === 'string' ? content.text.trim() : '';
@@ -18,13 +18,13 @@ export async function sendProgressNote(content: Record<string, unknown>, session
 
   const task = await findRunningTask(session.id);
   if (!task) {
-    await notifyRequester(session, 'send_progress_note failed: there is no running task on this session.');
+    await replyToCaller(session, 'send_progress_note failed: there is no running task on this session.');
     return;
   }
 
   if (!(await spendProgressNoteAllowance(task.task_id, new Date()))) {
     log.info('Worker progress note dropped', { taskId: task.task_id, cap: MAX_PROGRESS_NOTES });
-    await notifyRequester(
+    await replyToCaller(
       session,
       `send_progress_note: dropped. A task carries at most ${MAX_PROGRESS_NOTES} notes, ten seconds apart. Save it for your report.`,
     );

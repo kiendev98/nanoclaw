@@ -42,7 +42,7 @@ beforeAll(async () => {
   const dir = mkdtempSync(join(tmpdir(), 'slack-a2a-'));
   writeFileSync(
     join(dir, '.env'),
-    'SLACK_A2A_ROOMS=G0ALLOW,G0HOPS,G0ROOMA,G0ROOMB,G0INST,G0THROW\nSLACK_A2A_MAX_HOPS=2\n',
+    'SLACK_A2A_ROOMS=G0ALLOW,G0HOPS,G0ROOMA,G0ROOMB,G0INST,G0THROW,G0EXEMPT\nSLACK_A2A_MAX_HOPS=2\n',
   );
   process.chdir(dir);
   await import('./index.js'); // the real barrel — installs the policy via the skill's barrel line
@@ -149,6 +149,35 @@ describe('slack-a2a room policy (registered via the channel barrel)', () => {
     // …so bot messages flow again.
     await wrapped.onInbound(pid, null, botMsg('b4'));
     expect(calls).toHaveLength(4);
+  });
+
+  // A deliberate bot-to-bot loop — a worker driving a review with another
+  // agent — would otherwise stop mid-conversation, because only a human resets
+  // the counter and there is no human in the loop. The claim is per thread, so
+  // the rest of the room keeps the cap that bounds a runaway one.
+  it('lets a claimed thread run past the cap, and spends none of the room budget', async () => {
+    const { registerExemptThreadQuery, _clearExemptThreadQueriesForTesting } = await import('./thread-exemptions.js');
+    const { setup, calls } = makeSetup();
+    const wrapped = wrapSlackBotGuard(setup, 'slack');
+    const pid = 'slack:G0EXEMPT';
+    registerExemptThreadQuery((channelType, _platformId, threadId) => threadId === 'held' && channelType === 'slack');
+
+    try {
+      for (const bot of ['x1', 'x2', 'x3', 'x4']) {
+        await wrapped.onInbound(pid, 'held', botMsg(bot));
+      }
+      expect(calls).toHaveLength(4);
+
+      // The claimed thread spent nothing, so an unclaimed one still has its
+      // whole budget in the same room.
+      await wrapped.onInbound(pid, null, botMsg('y1'));
+      await wrapped.onInbound(pid, null, botMsg('y2'));
+      expect(calls).toHaveLength(6);
+      await wrapped.onInbound(pid, null, botMsg('y3'));
+      expect(calls).toHaveLength(6);
+    } finally {
+      _clearExemptThreadQueriesForTesting();
+    }
   });
 
   it('tracks the hop budget per room', async () => {

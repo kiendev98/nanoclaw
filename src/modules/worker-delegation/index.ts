@@ -15,7 +15,7 @@
  *   - `session-manager.ts::writeSessionRouting` projects a lent conversation.
  *   - `router.ts` routes a lent thread to its holder before the fan-out.
  */
-import { exemptThreadFromHopLimit } from '../../channels/slack-a2a.js';
+import { registerExemptThreadQuery } from '../../channels/thread-exemptions.js';
 import { registerSessionTerminalHook } from '../../container-runner.js';
 import { registerDeliveryAction, registerPostDeliveryHook, reenterGuardedDeliveryAction } from '../../delivery.js';
 import { log } from '../../log.js';
@@ -31,7 +31,8 @@ import {
   workerLendConversation,
 } from './guard.js';
 import { lendConversation, requestLendConversationHold, validateLendConversation } from './lend-conversation.js';
-import { notifyRequester } from './notify.js';
+import { isLentThread, rememberLentThread } from './lent-threads.js';
+import { replyToCaller } from './notify.js';
 import { sendProgressNote } from './progress-notes.js';
 import { askPrincipal, answerWorkerQuestion } from './questions.js';
 import { recordReportDraft, workerDone } from './report-draft.js';
@@ -40,7 +41,7 @@ registerDeliveryAction(WORKER_DELEGATE_ACTION, delegateTask, {
   guardAction: workerDelegate,
   precheck: validateDelegateTask,
   requestHold: requestDelegateTaskHold,
-  onDeny: (_content, session, reason) => notifyRequester(session, `delegate_task denied: ${reason}`),
+  onDeny: (_content, session, reason) => replyToCaller(session, `delegate_task denied: ${reason}`),
 });
 registerApprovalHandler(WORKER_DELEGATE_ACTION, reenterGuardedDeliveryAction(WORKER_DELEGATE_ACTION));
 
@@ -48,7 +49,7 @@ registerDeliveryAction(WORKER_LEND_CONVERSATION_ACTION, lendConversation, {
   guardAction: workerLendConversation,
   precheck: validateLendConversation,
   requestHold: requestLendConversationHold,
-  onDeny: (_content, session, reason) => notifyRequester(session, `lend_conversation denied: ${reason}`),
+  onDeny: (_content, session, reason) => replyToCaller(session, `lend_conversation denied: ${reason}`),
 });
 registerApprovalHandler(WORKER_LEND_CONVERSATION_ACTION, reenterGuardedDeliveryAction(WORKER_LEND_CONVERSATION_ACTION));
 
@@ -89,6 +90,9 @@ registerSessionTerminalHook(async (sessionId) => {
   await finalizeWorkerTaskIfRunning(sessionId, 'session-ended');
 });
 
+/** A thread a worker holds is a deliberate loop, not a runaway one. */
+registerExemptThreadQuery(isLentThread);
+
 /**
  * Bind a lent conversation to the thread its root post started.
  *
@@ -99,10 +103,8 @@ registerPostDeliveryHook(async (msg, _session, info) => {
   if (!info.platformMsgId) return;
   if (!(await bindGrantThread(msg.id, info.platformMsgId))) return;
   log.info('Lent conversation bound to its thread', { threadId: info.platformMsgId });
-  // A review loop is bot-to-bot, and Slack's admission policy stops after six
-  // consecutive bot turns unless a human speaks. Exempt this one thread rather
-  // than raising the cap for every room.
-  if (msg.channelType === 'slack' && msg.platformId) {
-    exemptThreadFromHopLimit(msg.platformId, info.platformMsgId);
-  }
+  // A review loop is bot-to-bot, and a channel's admission policy stops after
+  // a few consecutive bot turns unless a human speaks. Claim this one thread,
+  // so every other room keeps the cap.
+  rememberLentThread(msg.channelType, msg.platformId, info.platformMsgId);
 });

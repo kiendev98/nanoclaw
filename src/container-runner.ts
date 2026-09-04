@@ -83,6 +83,16 @@ const SHM_SIZE_MB = 1024;
 /** Grace before SIGKILL. One second, as `docker stop -t 1` has always been. */
 const STOP_GRACE_SECONDS = 1;
 
+/**
+ * Where a helper session's working copy is mounted.
+ *
+ * Named here because two things must agree on it: the mount, and the env flag
+ * that tells the runner it is a helper. The local driver maps the same path to
+ * its root variable, and the runner carries the same default — that split is
+ * the existing convention for every container path (see `roots.ts`).
+ */
+export const WORKER_WORKTREE_CONTAINER_PATH = '/workspace/repo';
+
 /** Active sessions tracked by session ID. */
 interface ActiveSessionRuntime {
   /**
@@ -874,7 +884,7 @@ export async function buildMounts(
   if (worktreePath) {
     mounts.push({
       hostPath: worktreePath,
-      containerPath: '/workspace/repo',
+      containerPath: WORKER_WORKTREE_CONTAINER_PATH,
       readonly: false,
       mountClass: 'allowlisted-extra',
       scope,
@@ -1034,6 +1044,13 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     TZ: containerConfig.timezone ?? TIMEZONE,
     ...mailboxEnvironment,
   };
+  // Being a helper is a fact about the session, so the host states it rather
+  // than letting the runner infer it from which directories happen to exist.
+  // Derived from the composed mount list rather than passed alongside it, so
+  // the role and the working copy cannot disagree.
+  if (mounts.some((mount) => mount.containerPath === WORKER_WORKTREE_CONTAINER_PATH)) {
+    env.NANOCLAW_WORKER_SESSION = '1';
+  }
   // The contributed lane (ContainerSpec.contributedEnv): registry-sourced env,
   // exempt from the credential-NAME check and still refused credential VALUES.
   // The model provider's contribution fills first, the gateway's second — a

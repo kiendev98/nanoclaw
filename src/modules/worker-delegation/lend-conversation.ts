@@ -20,8 +20,10 @@ import { createGrant, findLiveGrantForSession } from './db/worker-channel-grants
 import { findWorkerSession } from './db/worker-sessions.js';
 import { findRunningTask } from './db/worker-tasks.js';
 import { WORKER_LEND_CONVERSATION_ACTION } from './guard.js';
-import { notifyRequester } from './notify.js';
-import type { WorkerChannelGrant } from './types.js';
+import { generateId } from './ids.js';
+import { replyToCaller } from './notify.js';
+import type { MessagingGroup } from '../../types.js';
+import type { WorkerChannelGrant, WorkerSession, WorkerTask } from './types.js';
 
 interface LendRequest {
   repository: string;
@@ -39,10 +41,6 @@ function readRequest(content: Record<string, unknown>): LendRequest {
   };
 }
 
-function generateRootMessageId(): string {
-  return `wlend-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 /** A local name for the lent conversation that the helper does not already use. */
 async function freeDestinationName(helperAgentGroupId: string): Promise<string> {
   const preferred = normalizeName('conversation');
@@ -58,14 +56,14 @@ async function freeDestinationName(helperAgentGroupId: string): Promise<string> 
 export async function validateLendConversation(content: Record<string, unknown>, session: Session): Promise<boolean> {
   const request = readRequest(content);
   if (!request.repository || !request.destination || !request.text) {
-    await notifyRequester(
+    await replyToCaller(
       session,
       'lend_conversation failed: repository, destination and an opening message are all required.',
     );
     return false;
   }
   if (!session.messaging_group_id) {
-    await notifyRequester(session, 'lend_conversation failed: this session is not attached to a conversation.');
+    await replyToCaller(session, 'lend_conversation failed: this session is not attached to a conversation.');
     return false;
   }
   return true;
@@ -80,43 +78,62 @@ export async function requestLendConversationHold(content: Record<string, unknow
     session,
     agentName: sourceGroup.name,
     action: WORKER_LEND_CONVERSATION_ACTION,
-    payload: { repository: request.repository, destination: request.destination },
+    // The whole request. An approved replay re-enters the handler with THIS
+    // payload as its content, and a lend that lost its opening message would
+    // post an empty root and bind the grant to it.
+    payload: {
+      repository: request.repository,
+      destination: request.destination,
+      text: request.text,
+      threadId: request.threadId,
+    },
     title: `Lend "${request.destination}" to the ${request.repository} worker`,
     question: `Agent "${sourceGroup.name}" wants to let the "${request.repository}" worker hold one conversation in "${request.destination}". Approve?`,
   });
 }
 
-export async function lendConversation(content: Record<string, unknown>, session: Session): Promise<void> {
-  const request = readRequest(content);
-  if (!session.messaging_group_id) return; // precheck already answered
-
+/** The conversation being lent, resolved from a name the caller holds. */
+async function resolveLendTarget(session: Session, request: LendRequest): Promise<MessagingGroup | undefined> {
   const destination = await getDestinationByName(session.agent_group_id, request.destination);
-  const messagingGroup = destination ? await getMessagingGroup(destination.target_id) : undefined;
-  if (!destination || !messagingGroup) return; // the guard already denied this shape
+  if (!destination) return undefined;
+  return getMessagingGroup(destination.target_id);
+}
 
+/** The worker that will hold it, and the task whose lifetime bounds the grant. */
+async function resolveLendableWorker(
+  session: Session,
+  request: LendRequest,
+): Promise<{ workerSession: WorkerSession; task: WorkerTask } | string> {
   const workerSession = await findWorkerSession(
     request.repository,
-    session.messaging_group_id,
+    session.messaging_group_id ?? '',
     session.thread_id ?? request.threadId,
   );
   if (!workerSession) {
-    await notifyRequester(
-      session,
-      `lend_conversation failed: no ${request.repository} worker is running for this conversation. Delegate a task first.`,
-    );
-    return;
+    return `no ${request.repository} worker is running for this conversation. Delegate a task first.`;
   }
 
   const task = await findRunningTask(workerSession.helper_session_id);
-  if (!task) {
-    await notifyRequester(session, 'lend_conversation failed: that worker has no running task to hold it.');
-    return;
-  }
+  if (!task) return 'that worker has no running task to hold it.';
   if (await findLiveGrantForSession(workerSession.helper_session_id)) {
-    await notifyRequester(session, 'lend_conversation failed: that worker already holds a conversation.');
-    return;
+    return 'that worker already holds a conversation.';
   }
+  return { workerSession, task };
+}
 
+/**
+ * Give the worker the destination and the grant, then post the root message.
+ *
+ * The post goes out from the PRINCIPAL's session as a fresh top-level message,
+ * and its delivery is what creates the thread the grant binds to.
+ */
+async function openLentConversation(
+  session: Session,
+  messagingGroup: MessagingGroup,
+  worker: { workerSession: WorkerSession; task: WorkerTask },
+  text: string,
+): Promise<string> {
+  const { workerSession, task } = worker;
   const localName = await freeDestinationName(workerSession.helper_agent_group_id);
   const now = new Date().toISOString();
   await createDestination({
@@ -134,7 +151,7 @@ export async function lendConversation(content: Record<string, unknown>, session
     messaging_group_id: messagingGroup.id,
     channel_type: messagingGroup.channel_type,
     platform_id: messagingGroup.platform_id,
-    root_message_id: generateRootMessageId(),
+    root_message_id: generateId('wlend'),
     thread_id: '',
     local_destination_name: localName,
     granted_by_session_id: session.id,
@@ -143,27 +160,37 @@ export async function lendConversation(content: Record<string, unknown>, session
   };
   await createGrant(grant);
 
-  // The root post goes out from the PRINCIPAL's session, as a top-level
-  // message. Its delivery is what creates the thread the grant then binds to.
   await writeOutboundDirect(session.agent_group_id, session.id, {
     id: grant.root_message_id,
     kind: 'chat',
     platformId: messagingGroup.platform_id,
     channelType: messagingGroup.channel_type,
     threadId: null,
-    content: JSON.stringify({ text: request.text }),
+    content: JSON.stringify({ text }),
   });
 
-  // The helper resolves names from its own session's projected map, so the new
+  // The worker resolves names from its own session's projected map, so the new
   // destination has to reach the live session, not only the central DB.
   await writeDestinations(workerSession.helper_agent_group_id, workerSession.helper_session_id);
+  log.info('Worker conversation lent', { taskId: task.task_id, destination: localName });
+  return localName;
+}
 
-  log.info('Worker conversation lent', {
-    taskId: task.task_id,
-    repoName: request.repository,
-    destination: localName,
-  });
-  await notifyRequester(
+export async function lendConversation(content: Record<string, unknown>, session: Session): Promise<void> {
+  const request = readRequest(content);
+  if (!session.messaging_group_id) return; // precheck already answered
+
+  const messagingGroup = await resolveLendTarget(session, request);
+  if (!messagingGroup) return; // the guard already denied this shape
+
+  const worker = await resolveLendableWorker(session, request);
+  if (typeof worker === 'string') {
+    await replyToCaller(session, `lend_conversation failed: ${worker}`);
+    return;
+  }
+
+  const localName = await openLentConversation(session, messagingGroup, worker, request.text);
+  await replyToCaller(
     session,
     `Lent one conversation in "${request.destination}" to the ${request.repository} worker. It posts there as "${localName}", and the access ends with the task.`,
   );

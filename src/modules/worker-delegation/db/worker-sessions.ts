@@ -28,32 +28,11 @@ export async function createWorkerSession(row: WorkerSession): Promise<void> {
   await getDb().run(
     `INSERT INTO worker_sessions (
         helper_session_id, helper_agent_group_id, repo_name, messaging_group_id, thread_id,
-        principal_agent_group_id, principal_session_id, worktree_path, branch_name, created_at
+        worktree_path, branch_name, created_at
       ) VALUES (
         @helper_session_id, @helper_agent_group_id, @repo_name, @messaging_group_id, @thread_id,
-        @principal_agent_group_id, @principal_session_id, @worktree_path, @branch_name, @created_at
+        @worktree_path, @branch_name, @created_at
       )`,
     { ...row },
-  );
-}
-
-/**
- * Re-point a reused helper session at the principal session that asked this
- * time.
- *
- * The same thread can resolve to a different principal session after a
- * `session_mode` change or a session reset, and the report must reach whoever
- * is holding the conversation now.
- */
-export async function setWorkerSessionPrincipal(
-  helperSessionId: string,
-  principalAgentGroupId: string,
-  principalSessionId: string,
-): Promise<void> {
-  await getDb().run(
-    'UPDATE worker_sessions SET principal_agent_group_id = ?, principal_session_id = ? WHERE helper_session_id = ?',
-    principalAgentGroupId,
-    principalSessionId,
-    helperSessionId,
   );
 }

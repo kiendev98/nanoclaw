@@ -13,14 +13,16 @@ import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import { getSession } from '../../db/sessions.js';
 import { requestWake } from '../../request-wake.js';
+import type { InboundKind } from '../../mailbox/model.js';
 import { findLiveGrantForThread } from './db/worker-channel-grants.js';
+import { getTask } from './db/worker-tasks.js';
 
 export interface LentConversationMessage {
   messagingGroupId: string;
   threadId: string | null;
   channelType: string;
   platformId: string;
-  message: { id: string; kind: string; timestamp: string; content: string };
+  message: { id: string; kind: InboundKind; timestamp: string; content: string };
 }
 
 /**
@@ -42,21 +44,23 @@ export async function deliverToLentConversation(
   const grant = await findLiveGrantForThread(input.messagingGroupId, input.threadId);
   if (!grant) return false;
 
-  const { getWorkerSession } = await import('./db/worker-sessions.js');
-  const workerSession = await getWorkerSession(grant.helper_session_id);
-  if (!workerSession) {
-    log.warn('Lent conversation has no worker session — falling back to normal routing', { taskId: grant.task_id });
+  // The principal comes from the TASK the grant belongs to, which is the row
+  // that decides where every report and answer goes. A second copy kept on the
+  // session could disagree with it, and this is an access decision.
+  const task = await getTask(grant.task_id);
+  if (!task) {
+    log.warn('Lent conversation has no task — falling back to normal routing', { taskId: grant.task_id });
     return false;
   }
 
-  if (!(await isAllowed(workerSession.principal_agent_group_id))) {
+  if (!(await isAllowed(task.principal_agent_group_id))) {
     log.info('Lent-conversation message refused by the principal access gate', { taskId: grant.task_id });
     return true;
   }
 
   await writeSessionMessage(grant.helper_agent_group_id, grant.helper_session_id, {
     id: `lent-${input.message.id}`,
-    kind: input.message.kind as Parameters<typeof writeSessionMessage>[2]['kind'],
+    kind: input.message.kind,
     timestamp: input.message.timestamp,
     platformId: input.platformId,
     channelType: input.channelType,

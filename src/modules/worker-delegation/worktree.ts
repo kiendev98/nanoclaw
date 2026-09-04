@@ -82,11 +82,24 @@ export function ensureWorktree(repoPath: string, repoName: string, helperSession
   try {
     git(worktreePath, ['config', 'user.name', identity.name]);
     git(worktreePath, ['config', 'user.email', identity.email]);
-    // Locked so `git worktree prune` in the operator's own clone cannot
-    // discard a helper's uncommitted work.
+  } catch (err) {
+    // The worker falls back to whatever identity the clone carries, which is
+    // usually the operator's own. Worth knowing, not worth refusing the task.
+    log.warn('Worker commit identity not set', { repoName, helperSessionId, err });
+  }
+
+  try {
     git(repoPath, ['worktree', 'lock', worktreePath]);
   } catch (err) {
-    log.warn('Worker worktree post-setup failed', { repoName, helperSessionId, err });
+    // An unlocked worktree is one `git worktree prune` away from taking the
+    // worker's uncommitted work with it, and the operator runs that command in
+    // their own clone with no idea this directory is live.
+    log.error('Worker worktree could not be locked — prune in the source clone would discard it', {
+      repoName,
+      helperSessionId,
+      worktreePath,
+      err,
+    });
   }
 
   log.info('Worker worktree created', { repoName, helperSessionId, branchName });

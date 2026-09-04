@@ -4,9 +4,13 @@ import type { Migration } from './index.js';
  * Worker delegation — an assistant hands a task to a helper that works inside
  * another repository.
  *
- * Four tables, one key each, deliberately not folded into `agent_groups` or
+ * Five tables, one key each, deliberately not folded into `agent_groups` or
  * `sessions`. An earlier removed implementation bolted this feature's state
  * onto those two, and six dead columns are still the residue.
+ *
+ * Nothing here records a principal per SESSION. Reports and answers route by
+ * the principal on the TASK row, and a second copy that nothing reads is how
+ * those six dead columns began.
  *
  * - `worker_helpers` — one row per repository. The agent group is per repo, so
  *   `groups/` holds one folder per repo and memory is shared across its
@@ -42,8 +46,6 @@ export const migration025: Migration = {
         repo_name TEXT NOT NULL,
         messaging_group_id TEXT NOT NULL,
         thread_id TEXT NOT NULL,
-        principal_agent_group_id TEXT NOT NULL,
-        principal_session_id TEXT NOT NULL,
         worktree_path TEXT NOT NULL,
         branch_name TEXT NOT NULL,
         created_at TEXT NOT NULL,
@@ -67,6 +69,14 @@ export const migration025: Migration = {
         completed_at TEXT
       );
       CREATE INDEX idx_worker_tasks_session_status ON worker_tasks(helper_session_id, status);
+      -- One running task per helper session, enforced rather than checked.
+      -- A helper session is REUSED for a second task in the same thread, so
+      -- without this a second delegation would leave the first task running
+      -- forever: every later lookup resolves to the newer row, and the older
+      -- one is never finalized. The principal was promised one report and
+      -- would get none.
+      CREATE UNIQUE INDEX idx_worker_tasks_one_running
+        ON worker_tasks(helper_session_id) WHERE status = 'running';
 
       CREATE TABLE worker_questions (
         question_id TEXT PRIMARY KEY,

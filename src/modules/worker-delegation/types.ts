@@ -21,8 +21,6 @@ export interface WorkerSession {
   repo_name: string;
   messaging_group_id: string;
   thread_id: string;
-  principal_agent_group_id: string;
-  principal_session_id: string;
   worktree_path: string;
   branch_name: string;
   created_at: string;

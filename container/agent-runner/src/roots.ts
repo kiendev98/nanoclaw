@@ -41,7 +41,6 @@
  * environment before spawn; a setter would only invite a half-migrated process
  * holding two roots at once.
  */
-import fs from 'fs';
 import path from 'path';
 
 /** Read an override, treating whitespace-only as unset. */
@@ -120,12 +119,17 @@ export const IS_HOSTED: boolean = Boolean((process.env.NANOCLAW_AGENT_DIR ?? '')
 /**
  * The repository working copy a helper session stands in, or null.
  *
- * Two shapes, one answer. A container gets the mount at the fixed path and no
- * variable; a host process gets the variable and no mount. Both are absent for
- * an ordinary chat session, and the caller then keeps `AGENT_DIR` — which is
- * what makes this addition invisible to every session that is not a helper's.
+ * Two shapes, one answer. A container gets the mount at the fixed path; a host
+ * process gets a real directory named by the variable. Either way the HOST
+ * states the role by setting `NANOCLAW_WORKER_SESSION`, because being a helper
+ * is a fact about the session and not about which directories happen to exist —
+ * a future mount at `/workspace/repo` for an unrelated reason must not turn an
+ * ordinary session into a helper's.
+ *
+ * Resolved per call, the way `agentDir()` and `currentRoot` are: a test suite
+ * sets the variables after this module has already loaded.
  */
 export function worktreeDir(): string | null {
-  const candidate = root('NANOCLAW_WORKTREE_DIR', '/workspace/repo');
-  return fs.existsSync(candidate) ? candidate : null;
+  const isWorker = (process.env.NANOCLAW_WORKER_SESSION ?? '').trim();
+  return isWorker ? root('NANOCLAW_WORKTREE_DIR', '/workspace/repo') : null;
 }
