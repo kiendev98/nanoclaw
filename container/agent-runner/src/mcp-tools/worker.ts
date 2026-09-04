@@ -48,11 +48,22 @@ function currentThreadId(): string | null {
     return (
       getAgentMailbox().operations.getLatestInboundRoute(routing.channel_type, routing.platform_id)?.threadId ?? null
     );
-  } catch (err) {
+  } catch (cause) {
     // Falling back to null re-keys the worker onto the conversation instead of
-    // the thread, which silently reuses the wrong worker. Say so.
-    console.error(`[worker] inbound route lookup failed: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
+    // the thread, which silently reuses the wrong worker — and under `shared`
+    // mode two live conversations would collide on the unthreaded key. A
+    // refusal the caller can retry beats a worker holding someone else's task.
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    console.error(`[worker] inbound route lookup failed: ${detail}`);
+    throw new ThreadLookupError(detail);
+  }
+}
+
+/** The conversation could not be identified, so no worker may be keyed on it. */
+class ThreadLookupError extends Error {
+  constructor(detail: string) {
+    super(`could not identify this conversation (${detail}). Try again in a moment.`);
+    this.name = 'ThreadLookupError';
   }
 }
 
@@ -87,7 +98,14 @@ export const delegateTask: McpToolDefinition = {
     if (!repository) return err('repository is required. Ask the person which repository they mean.');
     if (!task) return err('task is required, and it must stand alone.');
 
-    await writeWorkerAction('worker_delegate', { repository, task, threadId: currentThreadId() });
+    let threadId: string | null;
+    try {
+      threadId = currentThreadId();
+    } catch (cause) {
+      return err(cause instanceof Error ? cause.message : String(cause));
+    }
+
+    await writeWorkerAction('worker_delegate', { repository, task, threadId });
     log(`delegate_task → ${repository}`);
     return ok(`Delegating to the ${repository} worker. One report will come back when it finishes.`);
   },
@@ -175,11 +193,19 @@ export const lendConversation: McpToolDefinition = {
     const destination = (args.destination as string) || '';
     const text = (args.text as string) || '';
     if (!repository || !destination || !text) return err('repository, destination and text are all required');
+
+    let threadId: string | null;
+    try {
+      threadId = currentThreadId();
+    } catch (cause) {
+      return err(cause instanceof Error ? cause.message : String(cause));
+    }
+
     await writeWorkerAction('worker_lend_conversation', {
       repository,
       destination,
       text,
-      threadId: currentThreadId(),
+      threadId,
     });
     return ok(`Lending one conversation in "${destination}" to the ${repository} worker.`);
   },

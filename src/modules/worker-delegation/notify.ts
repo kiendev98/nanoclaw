@@ -6,6 +6,7 @@
  * intent (B7) — there is no general-purpose send for a helper to reach for.
  */
 import { getSession } from '../../db/sessions.js';
+import { log } from '../../log.js';
 import { requestWake } from '../../request-wake.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import { generateId } from './ids.js';
@@ -22,6 +23,16 @@ export async function deliverToSession(
   text: string,
   sender: string,
 ): Promise<void> {
+  // The session is read BEFORE the write. A scheduled-task session can be
+  // deleted while the worker it started is still running, and writing to a
+  // session that no longer exists creates a mailbox nothing ever polls — a
+  // report that reads as delivered and is not.
+  const target = await getSession(sessionId);
+  if (!target) {
+    log.error('Worker message undeliverable — the target session is gone', { agentGroupId, sessionId, sender });
+    return;
+  }
+
   await writeSessionMessage(agentGroupId, sessionId, {
     id: generateId('worker'),
     kind: 'chat',
@@ -31,8 +42,7 @@ export async function deliverToSession(
     threadId: null,
     content: JSON.stringify({ text, sender, senderId: sender }),
   });
-  const fresh = await getSession(sessionId);
-  if (fresh) await requestWake(fresh, 'worker-delegation');
+  await requestWake(target, 'worker-delegation');
 }
 
 /** Answer the agent that made a request, in its own session. */

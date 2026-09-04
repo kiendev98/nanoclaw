@@ -10,7 +10,9 @@
  * (clearStaleProcessingAcks runs on agent-runner startup), so the inherited
  * claim's age is measured from the incarnation's start, giving it the full
  * tolerance window. Once that window elapses with no sign of life, a later
- * tick must kill (claim-stuck). Goes red if the incarnation gate in
+ * tick must restart it (claim-stuck) — a restart, not an ending, because the
+ * sweep requeues the triggering message for the respawned container. Goes red
+ * if the incarnation gate in
  * enforceRunningContainerSla stops reading the session_claims row.
  */
 import fs from 'fs';
@@ -29,11 +31,12 @@ vi.mock('./container-runner.js', () => ({
   isContainerRunning: vi.fn().mockReturnValue(false),
   wakeContainer: vi.fn().mockResolvedValue(true),
   killContainer: vi.fn(),
+  restartContainer: vi.fn(),
 }));
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from './db/index.js';
 import { createSession } from './db/sessions.js';
-import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
+import { isContainerRunning, restartContainer, wakeContainer } from './container-runner.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { log } from './log.js';
 import { getAgentMailbox } from './mailbox/index.js';
@@ -86,7 +89,7 @@ async function runSweepTick(): Promise<void> {
 
 beforeEach(async () => {
   vi.mocked(isContainerRunning).mockReset().mockReturnValue(false);
-  vi.mocked(killContainer).mockReset();
+  vi.mocked(restartContainer).mockReset();
   vi.mocked(wakeContainer)
     .mockReset()
     // Simulate a successful spawn honoring the runner's claim-first contract:
@@ -182,19 +185,19 @@ describe('host sweep incarnation-gated grace period', () => {
     }
   });
 
-  it('gives a fresh container its tolerance window against inherited stale claims, then kills', async () => {
+  it('gives a fresh container its tolerance window against inherited stale claims, then restarts it', async () => {
     // Tick 1: due message + no running container → wake. The 2h-old claim is
     // still in outbound.db, but it predates the fresh incarnation's claim
     // time — not evidence against this container.
     await runSweepTick();
     expect(wakeContainer).toHaveBeenCalledTimes(1);
-    expect(killContainer).not.toHaveBeenCalled();
+    expect(restartContainer).not.toHaveBeenCalled();
 
     // Tick 2, moments later: the inherited claim's age is measured from the
     // incarnation start, so it is still inside the tolerance window — no kill.
     await runSweepTick();
     expect(wakeContainer).toHaveBeenCalledTimes(1); // no second wake
-    expect(killContainer).not.toHaveBeenCalled();
+    expect(restartContainer).not.toHaveBeenCalled();
 
     // The tolerance window elapses (backdate the incarnation's claim time)
     // with no sign of life — now the stale claim is this container's own
@@ -206,7 +209,7 @@ describe('host sweep incarnation-gated grace period', () => {
       SESS,
     );
     await runSweepTick();
-    expect(killContainer).toHaveBeenCalledTimes(1);
-    expect(killContainer).toHaveBeenCalledWith(SESS, 'claim-stuck');
+    expect(restartContainer).toHaveBeenCalledTimes(1);
+    expect(restartContainer).toHaveBeenCalledWith(SESS, 'claim-stuck');
   });
 });

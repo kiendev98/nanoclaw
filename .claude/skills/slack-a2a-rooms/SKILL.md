@@ -56,16 +56,20 @@ per bot identity and per room; any human message resets it.
 
 ## Apply
 
-### 1. Verify the installed Slack channel ships the bot-inbound guard
+### 1. Verify the two seams the policy module imports
 
 The policy module copied next imports `setBotInboundPolicy` from the installed
-`src/channels/slack-a2a-guard.ts`. On a Slack payload that predates the guard,
-that import takes down the channel barrel — and with it **every** adapter — so
-verify the seam first. If the check fails, **stop**: re-run `/add-slack` from a
-channels branch that ships the guard, then re-apply this skill.
+`src/channels/slack-a2a-guard.ts`, and `isThreadExempt` from trunk's
+`src/channels/thread-exemptions.ts`. Either import missing takes down the
+channel barrel — and with it **every** adapter — so verify both seams first. If
+a check fails, **stop** and fix that seam, then re-apply this skill.
 
 ```nc:run effect:check
 grep -sq 'export function setBotInboundPolicy' src/channels/slack-a2a-guard.ts || { echo 'slack-a2a-rooms: src/channels/slack-a2a-guard.ts is missing or does not export setBotInboundPolicy. Installing anyway would break the channel barrel and take down every channel adapter. Update the installed Slack channel first (re-run /add-slack from a channels branch that ships the bot-inbound guard), then re-apply this skill.' >&2; exit 1; }
+```
+
+```nc:run effect:check
+grep -sq 'export function isThreadExempt' src/channels/thread-exemptions.ts || { echo 'slack-a2a-rooms: src/channels/thread-exemptions.ts is missing or does not export isThreadExempt. Installing anyway would break the channel barrel and take down every channel adapter. This registry is part of trunk, so update nanoclaw (/update-nanoclaw) to a version that ships it, then re-apply this skill.' >&2; exit 1; }
 ```
 
 ### 2. Copy the policy module, its guard test, and the room-opener script

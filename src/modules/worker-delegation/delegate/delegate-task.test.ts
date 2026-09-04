@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createAgentGroup } from '../../../db/agent-groups.js';
 import { closeDb, initTestDb } from '../../../db/connection.js';
 import { runMigrations } from '../../../db/migrations/index.js';
+import { registerWorkerMigration } from '../db/migrate.js';
 import type { Session } from '../../../types.js';
 
 const { refusals, holds } = vi.hoisted(() => ({
@@ -77,6 +78,7 @@ beforeEach(async () => {
   previousRoots = process.env[ROOTS_ENV_VAR];
   process.env[ROOTS_ENV_VAR] = tempRoot;
 
+  registerWorkerMigration();
   await runMigrations(await initTestDb());
   await createAgentGroup({
     id: 'ag-principal',

@@ -8,6 +8,7 @@
  * corrected. The platform names the thread only once that post is delivered, so
  * the grant is written unbound and stamped by the post-delivery hook.
  */
+import { isUniqueViolation } from '../../../db/errors.js';
 import { getMessagingGroup } from '../../../db/messaging-groups.js';
 import { log } from '../../../log.js';
 import { writeOutboundDirect, writeSessionRouting } from '../../../session-manager.js';
@@ -16,7 +17,7 @@ import { requestApproval } from '../../approvals/index.js';
 import { createDestination, getDestinationByName, normalizeName } from '../../agent-to-agent/db/agent-destinations.js';
 import { writeDestinations } from '../../agent-to-agent/write-destinations.js';
 import { getAgentGroup } from '../../../db/agent-groups.js';
-import { createGrant, findLiveGrantForSession } from '../db/worker-channel-grants.js';
+import { createGrant, findLiveGrantForSession, releaseGrant } from '../db/worker-channel-grants.js';
 import { getHelperForPrincipal } from '../db/worker-helpers.js';
 import { findWorkerSession } from '../db/worker-sessions.js';
 import { findRunningTask } from '../db/worker-tasks.js';
@@ -138,17 +139,10 @@ async function openLentConversation(
   messagingGroup: MessagingGroup,
   worker: { workerSession: WorkerSession; task: WorkerTask },
   text: string,
-): Promise<string> {
+): Promise<string | null> {
   const { workerSession, task } = worker;
   const localName = await freeDestinationName(workerSession.helper_agent_group_id);
   const now = new Date().toISOString();
-  await createDestination({
-    agent_group_id: workerSession.helper_agent_group_id,
-    local_name: localName,
-    target_type: 'channel',
-    target_id: messagingGroup.id,
-    created_at: now,
-  });
 
   const grant: WorkerChannelGrant = {
     task_id: task.task_id,
@@ -164,7 +158,31 @@ async function openLentConversation(
     granted_at: now,
     released_at: null,
   };
-  await createGrant(grant);
+  // The grant goes first, because its `task_id` primary key is what makes "one
+  // conversation per task" (D3) true under concurrency. The read-then-check
+  // above cannot: two callers can both pass it before either commits.
+  try {
+    await createGrant(grant);
+  } catch (error) {
+    if (!isUniqueViolation(error)) throw error;
+    log.warn('Concurrent lend lost the grant race', { taskId: task.task_id });
+    return null;
+  }
+
+  // Only now does the worker get any reach. A destination written before the
+  // grant would outlive a lost race with nothing tracking it.
+  try {
+    await createDestination({
+      agent_group_id: workerSession.helper_agent_group_id,
+      local_name: localName,
+      target_type: 'channel',
+      target_id: messagingGroup.id,
+      created_at: now,
+    });
+  } catch (error) {
+    await releaseGrant(task.task_id, new Date().toISOString());
+    throw error;
+  }
 
   await writeOutboundDirect(session.agent_group_id, session.id, {
     id: grant.root_message_id,
@@ -200,6 +218,10 @@ export async function lendConversation(content: Record<string, unknown>, session
   }
 
   const localName = await openLentConversation(session, messagingGroup, worker, request.text);
+  if (!localName) {
+    await replyToCaller(session, 'lend_conversation failed: that worker already holds a conversation.');
+    return;
+  }
   await replyToCaller(
     session,
     `Lent one conversation in "${request.destination}" to the ${request.repository} worker. It posts there as "${localName}", and the access ends with the task.`,

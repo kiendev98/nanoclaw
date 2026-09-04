@@ -89,9 +89,16 @@ export async function answerWorkerQuestion(content: Record<string, unknown>, ses
     await replyToCaller(session, `answer_worker_question failed: question ${questionId} is not open.`);
     return;
   }
-  if (question.principal_agent_group_id !== session.agent_group_id) {
+  // The SESSION, not just the agent group. One agent group wired into two
+  // conversations runs two sessions, and only the one that was asked ever saw
+  // the question — the other answering it would consume a question blind.
+  if (question.principal_agent_group_id !== session.agent_group_id || question.principal_session_id !== session.id) {
     await replyToCaller(session, `answer_worker_question failed: question ${questionId} was not asked of you.`);
-    log.warn('Worker question answered by the wrong principal', { questionId, by: session.agent_group_id });
+    log.warn('Worker question answered by the wrong principal', {
+      questionId,
+      byAgentGroup: session.agent_group_id,
+      bySession: session.id,
+    });
     return;
   }
   if (!(await consumeQuestion(questionId))) {

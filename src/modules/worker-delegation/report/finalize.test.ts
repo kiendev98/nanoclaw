@@ -10,10 +10,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { closeDb, initTestDb } from '../../../db/connection.js';
 import { runMigrations } from '../../../db/migrations/index.js';
+import { registerWorkerMigration } from '../db/migrate.js';
 
-const { delivered, failNextDelivery } = vi.hoisted(() => ({
+const { delivered, failNextDelivery, routed } = vi.hoisted(() => ({
   delivered: [] as Array<{ agentGroupId: string; sessionId: string; text: string; sender: string }>,
   failNextDelivery: { value: false },
+  routed: [] as Array<{ group: string; session: string }>,
+}));
+
+vi.mock('../../../session-manager.js', () => ({
+  writeSessionRouting: (group: string, session: string) => {
+    routed.push({ group, session });
+    return Promise.resolve();
+  },
 }));
 
 vi.mock('../notify.js', () => ({
@@ -29,6 +38,7 @@ vi.mock('../notify.js', () => ({
 }));
 
 const { createTask, getTask, setDraftAnswer } = await import('../db/worker-tasks.js');
+const { createGrant, findLiveGrantForTask } = await import('../db/worker-channel-grants.js');
 const { finalizeWorkerTaskIfRunning } = await import('./finalize.js');
 import type { WorkerTask } from '../types.js';
 
@@ -53,7 +63,9 @@ function aRunningTask(overrides: Partial<WorkerTask> = {}): WorkerTask {
 
 beforeEach(async () => {
   delivered.length = 0;
+  routed.length = 0;
   failNextDelivery.value = false;
+  registerWorkerMigration();
   await runMigrations(await initTestDb());
 });
 
@@ -81,6 +93,61 @@ describe('finalizeWorkerTaskIfRunning', () => {
 
     expect(await finalizeWorkerTaskIfRunning('sess-helper', 'session-ended')).toBe(true);
     expect(delivered[0]!.text).toContain('did not complete');
+  });
+
+  // The container overwrites the draft after EVERY turn, so a run that died on
+  // its first turn still holds text — usually something like "Looking into it".
+  // Delivered bare, that reads as the finished answer.
+  it('marks a draft from an interrupted run as incomplete', async () => {
+    await createTask(aRunningTask());
+    await setDraftAnswer('wt-1', 'Looking into it');
+
+    expect(await finalizeWorkerTaskIfRunning('sess-helper', 'session-ended')).toBe(true);
+    expect(delivered[0]!.text).toContain('did not complete');
+    expect(delivered[0]!.text).toContain('Looking into it');
+  });
+
+  it('marks a draft from a completed run as the answer, with no such caveat', async () => {
+    await createTask(aRunningTask());
+    await setDraftAnswer('wt-1', 'opened PR #482');
+
+    expect(await finalizeWorkerTaskIfRunning('sess-helper', 'done')).toBe(true);
+    expect(delivered[0]!.text).toContain('opened PR #482');
+    expect(delivered[0]!.text).not.toContain('did not complete');
+  });
+
+  // D9: the lent access ends with the task, leaving nothing behind. Routing is
+  // part of that — a worker session is reused for a follow-up in the same
+  // thread, so a container that is not respawned between tasks would keep
+  // addressing a conversation it no longer holds.
+  it('reverts the worker session routing when it releases a lent conversation', async () => {
+    await createTask(aRunningTask());
+    await createGrant({
+      task_id: 'wt-1',
+      helper_agent_group_id: 'ag-helper',
+      helper_session_id: 'sess-helper',
+      messaging_group_id: 'mg-lent',
+      channel_type: 'slack',
+      platform_id: 'slack:C123',
+      root_message_id: 'wlend-1',
+      thread_id: '1788.42',
+      local_destination_name: 'conversation',
+      granted_by_session_id: 'sess-principal',
+      granted_at: new Date().toISOString(),
+      released_at: null,
+    });
+
+    expect(await finalizeWorkerTaskIfRunning('sess-helper', 'done')).toBe(true);
+
+    expect(await findLiveGrantForTask('wt-1')).toBeUndefined();
+    expect(routed).toContainEqual({ group: 'ag-helper', session: 'sess-helper' });
+  });
+
+  it('refreshes no routing when the task held no conversation', async () => {
+    await createTask(aRunningTask());
+
+    expect(await finalizeWorkerTaskIfRunning('sess-helper', 'done')).toBe(true);
+    expect(routed).toHaveLength(0);
   });
 
   it('delivers exactly once when the tool and the terminal event both fire', async () => {

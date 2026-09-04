@@ -9,6 +9,7 @@ import { createAgentGroup } from '../../../db/agent-groups.js';
 import { closeDb, initTestDb } from '../../../db/connection.js';
 import { createMessagingGroup } from '../../../db/messaging-groups.js';
 import { runMigrations } from '../../../db/migrations/index.js';
+import { registerWorkerMigration } from '../db/migrate.js';
 import { createDestination, getDestinations } from '../../agent-to-agent/db/agent-destinations.js';
 import type { Session } from '../../../types.js';
 
@@ -100,6 +101,7 @@ beforeEach(async () => {
   refusals.length = 0;
   outbound.length = 0;
   routed.length = 0;
+  registerWorkerMigration();
   await runMigrations(await initTestDb());
 
   for (const id of ['ag-principal', 'ag-worker']) {

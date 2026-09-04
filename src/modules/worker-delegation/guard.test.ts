@@ -12,6 +12,7 @@ import { createAgentGroup } from '../../db/agent-groups.js';
 import { ensureContainerConfig, updateContainerConfigScalars } from '../../db/container-configs.js';
 import { createMessagingGroup, setMessagingGroupDetachedAt } from '../../db/messaging-groups.js';
 import { runMigrations } from '../../db/migrations/index.js';
+import { registerWorkerMigration } from './db/migrate.js';
 import { guard } from '../../guard/index.js';
 import { createDestination } from '../agent-to-agent/db/agent-destinations.js';
 import { createHelper } from './db/worker-helpers.js';
@@ -53,6 +54,7 @@ function asAgent(agentGroupId: string, payload: Record<string, unknown> = {}) {
 }
 
 beforeEach(async () => {
+  registerWorkerMigration();
   await runMigrations(await initTestDb());
   await makeAgentGroup(PRINCIPAL, 'global');
   await makeAgentGroup(HELPER, 'group');

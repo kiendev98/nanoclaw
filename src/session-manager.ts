@@ -11,7 +11,7 @@ import { isSafeAttachmentName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
 import { ensureContainedInboxDir, isPathInside } from './inbox-safety.js';
-import { getDb, hasTable } from './db/connection.js';
+import { getDbIfInitialized, hasTable } from './db/connection.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import { isUniqueViolation } from './db/errors.js';
 import {
@@ -280,7 +280,8 @@ export async function writeSessionRouting(agentGroupId: string, sessionId: strin
  * is table-guarded exactly like the agent-to-agent destination projection.
  */
 async function liveLentConversation(sessionId: string) {
-  if (!(await hasTable(getDb(), 'worker_channel_grants'))) return undefined;
+  const db = getDbIfInitialized();
+  if (!db || !(await hasTable(db, 'worker_channel_grants'))) return undefined;
   const { findLiveGrantForSession } = await import('./modules/worker-delegation/db/worker-channel-grants.js');
   return findLiveGrantForSession(sessionId);
 }

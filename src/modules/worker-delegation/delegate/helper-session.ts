@@ -15,7 +15,7 @@
  */
 import crypto from 'crypto';
 
-import { createAgentGroup, getAgentGroupByFolder } from '../../../db/agent-groups.js';
+import { createAgentGroup, deleteAgentGroup, getAgentGroupByFolder } from '../../../db/agent-groups.js';
 import { getContainerConfig } from '../../../db/container-configs.js';
 import { isUniqueViolation } from '../../../db/errors.js';
 import { groupFolderExistsOnDisk } from '../../../group-folder.js';
@@ -83,13 +83,31 @@ export async function ensureHelperAgentGroup(
     created_at: group.created_at,
   };
 
-  await createAgentGroup(group);
+  // Two racers can pick the same free folder name, because reading it and
+  // taking it are separate steps. Losing that race means the winner is already
+  // creating this same helper.
+  try {
+    await createAgentGroup(group);
+  } catch (error) {
+    if (!isUniqueViolation(error)) throw error;
+    const winner = await getHelperForPrincipal(principalAgentGroupId, repo.name);
+    if (!winner) throw error;
+    return winner;
+  }
+
   try {
     await createHelper(helper);
   } catch (error) {
     if (!isUniqueViolation(error)) throw error;
     const winner = await getHelperForPrincipal(principalAgentGroupId, repo.name);
     if (!winner) throw error;
+    // The group above is now unreferenced, and nothing else will ever collect
+    // it. Its filesystem does not exist yet — that comes after the win.
+    try {
+      await deleteAgentGroup(group.id);
+    } catch (err) {
+      log.warn('Could not remove the agent group of a lost worker race', { agentGroupId: group.id, err });
+    }
     return winner;
   }
 

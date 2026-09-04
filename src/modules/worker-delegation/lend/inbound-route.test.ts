@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { closeDb, initTestDb } from '../../../db/connection.js';
 import { runMigrations } from '../../../db/migrations/index.js';
+import { registerWorkerMigration } from '../db/migrate.js';
 
 const { written, wakes } = vi.hoisted(() => ({
   written: [] as Array<{ agentGroupId: string; sessionId: string; threadId: string | null }>,
@@ -86,6 +87,7 @@ const allowAll = () => Promise.resolve(true);
 beforeEach(async () => {
   written.length = 0;
   wakes.length = 0;
+  registerWorkerMigration();
   await runMigrations(await initTestDb());
 });
 

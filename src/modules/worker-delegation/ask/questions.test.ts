@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { closeDb, initTestDb } from '../../../db/connection.js';
 import { runMigrations } from '../../../db/migrations/index.js';
+import { registerWorkerMigration } from '../db/migrate.js';
 import type { Session } from '../../../types.js';
 
 const { delivered, refusals } = vi.hoisted(() => ({
@@ -61,6 +62,7 @@ async function askOne(question = 'should --dry-run skip the seed step?'): Promis
 beforeEach(async () => {
   delivered.length = 0;
   refusals.length = 0;
+  registerWorkerMigration();
   await runMigrations(await initTestDb());
   await createTask(task);
 });
@@ -107,6 +109,21 @@ describe('answerWorkerQuestion', () => {
     await answerWorkerQuestion({ questionId, answer: 'yes' }, {
       id: 'sess-stranger',
       agent_group_id: 'ag-stranger',
+    } as Session);
+
+    expect(delivered.some((d) => d.sessionId === 'sess-helper')).toBe(false);
+    expect(refusals.at(-1)).toContain('not asked of you');
+    expect(await findOpenQuestion('sess-helper')).toBeDefined();
+  });
+
+  // One agent group wired into two chats runs two sessions. Only the session
+  // that was asked ever saw the question, so the other one answering it would
+  // consume a question blind — and the helper would act on it.
+  it('refuses an answer from another session of the right agent group (C5)', async () => {
+    const questionId = await askOne();
+    await answerWorkerQuestion({ questionId, answer: 'yes' }, {
+      id: 'sess-principal-other-thread',
+      agent_group_id: 'ag-principal',
     } as Session);
 
     expect(delivered.some((d) => d.sessionId === 'sess-helper')).toBe(false);

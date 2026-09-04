@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { closeDb, initTestDb } from '../../../db/connection.js';
 import { runMigrations } from '../../../db/migrations/index.js';
+import { registerWorkerMigration } from '../db/migrate.js';
 
 const { sessions, worktrees } = vi.hoisted(() => ({
   sessions: new Map<string, string>(),
@@ -58,6 +59,7 @@ function forThread(threadId: string | null) {
 beforeEach(async () => {
   sessions.clear();
   worktrees.length = 0;
+  registerWorkerMigration();
   await runMigrations(await initTestDb());
   await createHelper(helper);
 });

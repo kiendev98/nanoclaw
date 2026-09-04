@@ -36,7 +36,7 @@ import { getSession, isTaskThread, updateSession } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { log } from './log.js';
 import { heartbeatPath, withExistingMailboxSession } from './session-manager.js';
-import { getContainerStartedAtMs, isContainerRunning, killContainer } from './container-runner.js';
+import { getContainerStartedAtMs, isContainerRunning, restartContainer } from './container-runner.js';
 import { requestWake } from './request-wake.js';
 import type { Session } from './types.js';
 import type { ContainerState, InboundMailbox, OutboundMailbox } from './mailbox/index.js';
@@ -264,7 +264,7 @@ async function enforceRunningContainerSla(
       heartbeatAgeMs: decision.heartbeatAgeMs,
       ceilingMs: decision.ceilingMs,
     });
-    killContainer(session.id, 'absolute-ceiling');
+    restartContainer(session.id, 'absolute-ceiling');
     resetStuckProcessingRows(inDb, outDb, session, 'absolute-ceiling');
     return;
   }
@@ -275,7 +275,7 @@ async function enforceRunningContainerSla(
     claimAgeMs: decision.claimAgeMs,
     toleranceMs: decision.toleranceMs,
   });
-  killContainer(session.id, 'claim-stuck');
+  restartContainer(session.id, 'claim-stuck');
   resetStuckProcessingRows(inDb, outDb, session, 'claim-stuck');
 }
 

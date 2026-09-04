@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { closeDb, initTestDb } from '../../../db/connection.js';
 import { runMigrations } from '../../../db/migrations/index.js';
+import { registerWorkerMigration } from '../db/migrate.js';
 import type { Session } from '../../../types.js';
 
 const { delivered, refusals } = vi.hoisted(() => ({
@@ -57,6 +58,7 @@ function spacedOut(index: number): Date {
 beforeEach(async () => {
   delivered.length = 0;
   refusals.length = 0;
+  registerWorkerMigration();
   await runMigrations(await initTestDb());
   await createTask(task);
 });

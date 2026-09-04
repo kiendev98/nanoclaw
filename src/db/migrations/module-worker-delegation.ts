@@ -1,4 +1,4 @@
-import type { Migration } from './index.js';
+import type { ModuleMigration } from './index.js';
 
 /**
  * Worker delegation — an assistant hands a task to a helper that works inside
@@ -33,9 +33,9 @@ import type { Migration } from './index.js';
  * - `worker_channel_grants` — one lent conversation. `thread_id` is `''` until
  *   the root post is delivered and the platform names the thread it started.
  */
-export const migration025: Migration = {
+export const moduleWorkerDelegation: ModuleMigration = {
   version: 25,
-  name: 'worker-delegation',
+  name: 'module:worker-delegation:tables',
   async up(db) {
     await db.exec(`
       CREATE TABLE worker_helpers (
@@ -76,7 +76,6 @@ export const migration025: Migration = {
         created_at TEXT NOT NULL,
         completed_at TEXT
       );
-      CREATE INDEX idx_worker_tasks_session_status ON worker_tasks(helper_session_id, status);
       -- One running task per helper session, enforced rather than checked.
       -- A helper session is REUSED for a second task in the same thread, so
       -- without this a second delegation would leave the first task running

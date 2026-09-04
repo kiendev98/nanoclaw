@@ -31,6 +31,7 @@
  */
 import { registerExemptThreadQuery } from '../../channels/thread-exemptions.js';
 import { registerSessionTerminalHook } from '../../container-runner.js';
+import { registerWorkerMigration } from './db/migrate.js';
 import { registerDeliveryAction, registerPostDeliveryHook, reenterGuardedDeliveryAction } from '../../delivery.js';
 import { log } from '../../log.js';
 import { writeSessionRouting } from '../../session-manager.js';
@@ -51,6 +52,8 @@ import { replyToCaller } from './notify.js';
 import { sendProgressNote } from './report/progress-notes.js';
 import { askPrincipal, answerWorkerQuestion } from './ask/questions.js';
 import { recordReportDraft, workerDone } from './report/report-draft.js';
+
+registerWorkerMigration();
 
 registerDeliveryAction(WORKER_DELEGATE_ACTION, delegateTask, {
   guardAction: workerDelegate,

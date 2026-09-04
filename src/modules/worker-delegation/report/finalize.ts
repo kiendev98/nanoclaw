@@ -8,6 +8,7 @@
  * status transition in `claimTaskForFinalize`, and exactly one wins.
  */
 import { log } from '../../../log.js';
+import { writeSessionRouting } from '../../../session-manager.js';
 import { deleteDestination } from '../../agent-to-agent/db/agent-destinations.js';
 import { releaseGrant } from '../db/worker-channel-grants.js';
 import { deleteQuestionsForTask } from '../db/worker-questions.js';
@@ -19,14 +20,24 @@ import type { WorkerTask } from '../types.js';
 /** Why the task ended. Only the wording differs; the delivery does not. */
 export type FinalizeReason = 'done' | 'session-ended';
 
+/**
+ * The draft is the worker's last statement, not necessarily its answer.
+ *
+ * The container overwrites the draft after every turn, so a run that ended on
+ * its own terms and a run that died mid-task both arrive holding text. Only
+ * `done` means the worker chose to stop. Anything else must say so, or an
+ * interrupted "Looking into it" reads as the finished result.
+ */
 function reportText(task: WorkerTask, reason: FinalizeReason): string {
   const header = `Report from the ${task.repo_name} worker (task ${task.task_id}):`;
-  if (task.draft_answer) return `${header}\n\n${task.draft_answer}`;
-  const cause =
-    reason === 'done'
-      ? 'It reported itself done without leaving a statement.'
-      : 'Its run ended before it stated a result.';
-  return `${header}\n\nThe worker did not complete. ${cause}`;
+  if (reason === 'done') {
+    if (task.draft_answer) return `${header}\n\n${task.draft_answer}`;
+    return `${header}\n\nThe worker did not complete. It reported itself done without leaving a statement.`;
+  }
+  if (task.draft_answer) {
+    return `${header}\n\nThe worker did not complete — its run ended before it reported a result. Its last statement was:\n\n${task.draft_answer}`;
+  }
+  return `${header}\n\nThe worker did not complete. Its run ended before it stated a result.`;
 }
 
 /**
@@ -81,5 +92,15 @@ async function releaseLentConversation(task: WorkerTask): Promise<void> {
     await deleteDestination(grant.helper_agent_group_id, grant.local_destination_name);
   } catch (err) {
     log.warn('Could not remove a lent destination', { taskId: task.task_id, err });
+  }
+
+  // The grant and the destination are gone, so re-projecting now writes the
+  // routing without them. A worker session is reused for a follow-up task in
+  // the same thread, so without this the reused container keeps addressing a
+  // conversation it no longer holds.
+  try {
+    await writeSessionRouting(grant.helper_agent_group_id, grant.helper_session_id);
+  } catch (err) {
+    log.warn('Could not refresh routing after releasing a lent conversation', { taskId: task.task_id, err });
   }
 }

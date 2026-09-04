@@ -225,8 +225,22 @@ function safeParseContent(raw: string): { text?: string; sender?: string; sender
  * @returns True when the worker took the message, so the caller stops routing.
  */
 async function deliverToWorkerLentThread(event: InboundEvent, mg: MessagingGroup): Promise<boolean> {
+  // D11: a channel the owner denied stays denied. This runs ahead of the
+  // no-wiring drop that checks `denied_at`, so it has to check it too — a
+  // thread lent before the denial must not become a way back in.
+  if (mg.denied_at) return false;
   if (!(await hasTable(getDb(), 'worker_channel_grants'))) return false;
-  const { deliverToLentConversation } = await import('./modules/worker-delegation/lend/inbound-route.js');
+
+  // The tables outlive the module: removing the module from an install that
+  // already ran its migration leaves them behind, so the guard above still
+  // passes. Fail closed rather than taking every inbound message down with it.
+  let deliverToLentConversation;
+  try {
+    ({ deliverToLentConversation } = await import('./modules/worker-delegation/lend/inbound-route.js'));
+  } catch (err) {
+    log.error('Worker-delegation tables exist but the module does not', { err });
+    return false;
+  }
   return deliverToLentConversation(
     {
       messagingGroupId: mg.id,
