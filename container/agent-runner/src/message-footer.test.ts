@@ -179,13 +179,9 @@ describe('withFooter', () => {
 /**
  * The reason the blob is persisted at all.
  *
- * Sessions are swept whenever they go idle. The numbers arrive far more rarely
- * than they are read. `contextWindow` arrives once per turn on the result. A
- * utilization arrives only when it CHANGES, which can be many turns apart.
- *
- * Held in memory alone, every wake starts blank. The footer then decays to a
- * bare model name, until the SDK happens to mention them again. A reader
- * reports that as "the data is wrong".
+ * The numbers arrive far more rarely than they are read, and sessions are swept
+ * when idle. Held in memory alone, every wake would start blank. See
+ * `docs/message-footer.md`.
  */
 describe('surviving a session sweep', () => {
   beforeEach(() => {

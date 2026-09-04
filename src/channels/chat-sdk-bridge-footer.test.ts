@@ -1,14 +1,10 @@
 /**
  * The telemetry footer's outbound rendering.
  *
- * The footer arrives as its OWN content field rather than pre-appended to the
- * text, so a channel that can style it does. Slack turns a muted text element
- * into a small grey `context` block, which is the reason for separating it.
- * Everything else appends.
- *
- * The failure this guards against is a silent drop. The card path stops
- * matching when files are present or the body is too long. If nothing then
- * appends the footer, the line disappears with no error anywhere.
+ * The footer arrives as its OWN content field, so a channel that can style it
+ * does. Slack renders a small grey `context` block, and everything else
+ * appends. The failure guarded against is a silent drop when the card path
+ * stops matching.
  */
 import { describe, expect, it, vi } from 'vitest';
 

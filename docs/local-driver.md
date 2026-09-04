@@ -58,3 +58,93 @@ directory of symlinks is both correct and cheap.
 
 `HOME` is inherited, and that is the point. `~/.claude` is the user's real
 harness, so commands, agents, skills and rules load with no wiring.
+
+## Environment the agent must not inherit
+
+Two lists are scrubbed from every spawn.
+
+`AUTH_OVERRIDE_ENV_VARS` holds the variables that override the credential the
+local `claude` would otherwise resolve for itself. It is claude-swap's list, and
+deliberately the same one. An account switcher works by keeping these out of the
+environment, so the config dir decides the account.
+
+A Docker-oriented setup run writes `CLAUDE_CODE_OAUTH_TOKEN` into `.env` as a
+matter of course. A stale one silently outranks the switcher, and pins the agent
+to one account. That is the failure this driver exists to avoid.
+
+`CLAUDE_SESSION_ENV_VARS` holds Claude Code's own session environment. A
+container never saw these. A host process inherits whatever launched it, and
+during development the launcher is often a terminal inside Claude Code. That
+terminal exports a session identity, a live control socket, and an effort
+override.
+
+The runner passes `{...process.env}` to the SDK, so all of it reaches the nested
+`claude`. It then believes it is a CHILD of the launching session rather than
+its own agent. One session started this way reported a 165,000-token context
+window on a model whose id ends in `[1m]`. That is smaller than the standard
+200k. It also carried a messaging socket pointing back at the launching session.
+
+`CLAUDE_CONFIG_DIR` is deliberately in neither list. It is how claude-swap
+selects an account. Scrubbing it would pin the agent to the default profile,
+which is the same failure from the other direction.
+
+## The working directory
+
+cwd is NOT necessarily the group folder. Claude Code walks up from cwd to
+discover a project's `CLAUDE.md`, `.claude/skills/` and `.claude/settings.json`.
+The walk is verified, and it does not stop at a git repository root. So cwd
+alone decides which repository's context an agent loads.
+
+`NANOCLAW_AGENT_DIR` stays the agent's own state directory, holding memory and
+footer telemetry. The two were once one value. That conflation is why an agent
+could only ever work in one repository, because moving it into a repo would have
+moved its memory in there too.
+
+It falls back to the group folder, so an install that sets no override keeps its
+previous behaviour.
+
+## Host-owned environment
+
+`HOST_OWNED_ENV` lists what a composed spec may never override.
+
+`HOME` is the one that matters. Composition sets `HOME=/home/node` whenever the
+spec carries a `runAs`, because inside the image that uid has no passwd entry
+and HOME would resolve to `/`. Copied onto a host process it is simply wrong.
+The directory does not exist, and the first thing that tries to create it dies
+with `ENOTSUP` on macOS.
+
+The quieter failure is worse. `HOME` is how the SDK finds `~/.claude`, and how
+Claude Code derives its keychain entry. A spec-supplied HOME detaches the agent
+from the user's harness, and from the credentials this driver exists to reuse.
+
+The rest are listed for the same reason. They describe the container's
+filesystem and identity, not this machine's.
+
+## Mount translation
+
+Every mount this driver understands is addressed by its containerPath, because
+that is the contract the runner reads. A mount it does not recognise is not an
+error. `/app/src` is the code being executed. `/app/skills` is dropped on
+purpose, because shared skills reach a host agent as a plugin staged into the
+session workspace, which needs no root of its own.
+
+That second clause once claimed `/app/skills` was reached through the project
+settings directory. Nothing implemented that mechanism, so every shared skill
+stayed missing without one line of evidence. Unknown paths are dropped silently.
+
+## Missing runner dependencies
+
+`container/agent-runner` is a separate package, and NOT a pnpm workspace member.
+`pnpm install` at the root never touches it. The image installs it with `bun
+install --frozen-lockfile`. Under this driver the host runs the runner, and
+nothing installs it.
+
+Without a warning the failure is invisible in the worst way. Every spawn dies
+instantly on `Cannot find module '@anthropic-ai/claude-agent-sdk'`. The
+undelivered message stays due, and the host respawns every 2 seconds forever.
+Install and service health both look fine. Only the log shows it, as an endless
+wall of identical stack traces. Observed in the wild at 64 respawns before
+anyone read the log.
+
+The warning is latched rather than thrown. The driver's contract is to spawn and
+report exits. A throw would change how one bad install surfaces everywhere else.

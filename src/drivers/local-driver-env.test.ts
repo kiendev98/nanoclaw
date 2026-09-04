@@ -1,14 +1,9 @@
 /**
  * What the agent must never inherit from whatever launched the host.
  *
- * A container never saw any of this. A host process inherits its launcher's
- * environment. During development the launcher is often a terminal inside
- * Claude Code. That terminal exports a session identity, a live control socket
- * back to that session, and an effort override. The runner hands
- * `{...process.env}` to the SDK, so all of it reaches the nested `claude`.
- *
- * Both failures are silent. The agent starts, answers, and is simply wrong
- * about which account it is or whose session it belongs to.
+ * A container never saw any of this. Both failures are silent: the agent
+ * starts, answers, and is wrong about which account it is or whose session it
+ * belongs to. See `docs/local-driver.md`.
  */
 import { describe, expect, it } from 'vitest';
 
@@ -73,15 +68,9 @@ describe('stripInheritedClaudeEnv', () => {
 /**
  * Which directory the agent stands in.
  *
- * Claude Code resolves project memory and project skills by walking UP from
- * cwd. The walk is proven, and it does NOT stop at a git repository root. So
  * cwd alone decides which repository's `CLAUDE.md` and `.claude/skills/` an
- * agent loads.
- *
- * `NANOCLAW_AGENT_DIR` used to serve as both cwd and the agent's state
- * directory. That conflation is why one agent could only ever work in one
- * repository. Moving it into a repo would have moved its memory and telemetry
- * in there too.
+ * agent loads. It used to double as the state directory, which is why an agent
+ * could only work in one repository. See `docs/local-driver.md`.
  */
 describe('resolveSpawnCwd', () => {
   it('defaults to the group folder, so an existing install is unaffected', () => {

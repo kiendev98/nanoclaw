@@ -126,14 +126,9 @@ export function recordContextTokens(totalTokens: number | undefined): void {
 /**
  * Record every window from the structured `/usage` payload.
  *
- * A second source for the same two fields, and in practice the only one that
- * has ever produced a value here. `rate_limit_event` fires only when a
- * utilization CHANGES. Across four sessions on this account it never fired at
- * all, which left `windows` empty every time.
- *
- * The two sources disagree on units. `rate_limit_event.utilization` is a
- * fraction, this one is a PERCENTAGE (0–100), so it is divided here to keep
- * one convention in the store. Getting that wrong renders `5h: 3100%`.
+ * In practice the only source that has ever produced a value here. The two
+ * sources disagree on units: this one is a PERCENTAGE, so it is divided to
+ * keep one convention. Getting that wrong renders `5h: 3100%`.
  */
 export function recordRateLimits(rateLimits: Record<string, { utilization?: number | null } | null> | undefined): void {
   if (!rateLimits || typeof rateLimits !== 'object') return;
@@ -160,16 +155,8 @@ export function recordUtilization(rateLimitType: string | undefined, utilization
 /**
  * The active subscription's organisation name.
  *
- * `CLAUDE_CONFIG_DIR` is read per call rather than captured at import,
- * because claude-swap sets it per process and this module may load before it
- * does. The resolved value is cached after the first successful read: the
- * organisation cannot change under a running session without the process
- * being replaced.
- *
- * When the variable is unset, the config file is `~/.claude.json` — a SIBLING
- * of `~/.claude`, not a file inside it. When it is set, the file lives inside
- * the named directory. Getting that wrong reads nothing and silently drops
- * the field.
+ * `CLAUDE_CONFIG_DIR` is read per call, then cached. Note that the config file
+ * is `~/.claude.json`, a SIBLING of `~/.claude`. See `docs/message-footer.md`.
  */
 export function accountName(): string | null {
   if (accountFromSdk) return accountFromSdk;
@@ -195,19 +182,9 @@ export function accountName(): string | null {
 }
 
 /**
- * Two stores, because the two facts have different lifetimes and only one of
- * them belongs to a session.
- *
- *   contextTokens  — this conversation's occupancy. Session-scoped. Sharing it
- *                    would show one thread's context inside another.
- *   windows        — utilization of the ACCOUNT's rate-limit windows.
- *
- * `windows` was session-scoped in the first cut. That is why a new thread's
- * first message rendered nothing for 5h/7d. A fresh session starts with an
- * empty blob, and a `rate_limit_event` only fires when a value changes.
- *
- * It now lives in one file in the group folder, shared by every session of the
- * agent group. A new thread therefore inherits it immediately.
+ * Two stores, because the two facts have different lifetimes.
+ * `contextTokens` is session-scoped. `windows` is account-wide and lives in the
+ * group folder. See `docs/message-footer.md`.
  */
 const GROUP_FILE = '.footer-telemetry.json';
 
@@ -283,13 +260,9 @@ function persistSession(): void {
 /**
  * Write the group-shared facts.
  *
- * Written through a randomly-named temp file and a rename. Sessions of one
- * agent group run concurrently, and each holds the whole blob. A partial write
- * seen by a sibling would drop a window it never observed itself.
- *
- * `wx` refuses an existing path, so a collision fails. It does not follow a
- * symlink the agent could have planted, and the group folder is writable by
- * the agent.
+ * Written through a temp file and a rename, because sessions of one group run
+ * concurrently. `wx` refuses an existing path, so a planted symlink is never
+ * followed. See `docs/message-footer.md`.
  */
 function persistGroup(): void {
   const target = groupFilePath();

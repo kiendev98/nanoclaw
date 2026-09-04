@@ -41,3 +41,36 @@ after the fact is a race against the outbound poller.
 
 The usual turn sends exactly one message. There, per-message and per-turn are
 the same thing.
+
+## Where the organisation name comes from
+
+`CLAUDE_CONFIG_DIR` is read per call rather than captured at import, because
+claude-swap sets it per process and this module may load before it does. The
+resolved value is cached after the first successful read, because the
+organisation cannot change under a running session without the process being
+replaced.
+
+When the variable is unset, the config file is `~/.claude.json`, a SIBLING of
+`~/.claude` rather than a file inside it. When it is set, the file lives inside
+the named directory. Getting that wrong reads nothing and silently drops the
+field.
+
+## Why the group blob is written through a rename
+
+Sessions of one agent group run concurrently, and each holds the whole blob. A
+partial write seen by a sibling would drop a window it never observed itself. So
+the write goes through a randomly-named temp file and a rename.
+
+`wx` refuses an existing path, so a collision fails rather than following a
+symlink the agent could have planted. The group folder is writable by the agent.
+
+## Why two stores
+
+`contextTokens` is this conversation's occupancy, and it is session-scoped.
+Sharing it would show one thread's context inside another.
+
+`windows` is the utilization of the ACCOUNT's rate-limit windows. It was
+session-scoped in the first cut, and that is why a new thread's first message
+rendered nothing for 5h/7d. A fresh session starts with an empty blob, and a
+`rate_limit_event` only fires when a value changes. It now lives in one file in
+the group folder, shared by every session of the agent group.

@@ -37,14 +37,8 @@ import {
  * Environment variables that override the credential the local `claude` would
  * otherwise resolve for itself. Scrubbed from every spawn.
  *
- * This list is claude-swap's `AUTH_OVERRIDE_ENV_VARS`, and deliberately so. An
- * account switcher works by keeping these out of the environment. The config
- * dir then decides the account.
- *
- * A Docker-oriented setup run writes `CLAUDE_CODE_OAUTH_TOKEN` into `.env` as a
- * matter of course. A stale one silently outranks the switcher. It pins the
- * agent to one account, which is the failure this driver exists to avoid.
- * Scrubbing is not optional.
+ * A stale one silently outranks the account switcher. See
+ * `docs/local-driver.md`.
  */
 const AUTH_OVERRIDE_ENV_VARS = [
   'ANTHROPIC_API_KEY',
@@ -57,23 +51,8 @@ const AUTH_OVERRIDE_ENV_VARS = [
 /**
  * Claude Code's own session environment, scrubbed before the agent starts.
  *
- * A container never saw these. A host process inherits whatever launched it.
- * During development the likely launcher is a terminal inside Claude Code. That
- * terminal exports a session identity, a live control socket, and an effort
- * override.
- *
- * The runner passes `{...process.env}` to the SDK. Every one of them reaches the
- * nested `claude`. It then believes it is a CHILD of the launching session
- * rather than its own agent.
- *
- * That is not cosmetic. One session started this way reported a 165,000-token
- * context window on a model whose id ends in `[1m]`. That is smaller than the
- * standard 200k. It also carried a messaging socket pointing back at the
- * launching session.
- *
- * `CLAUDE_CONFIG_DIR` is deliberately NOT here. It is how claude-swap selects an
- * account. Scrubbing it would pin the agent to the default profile, which is the
- * failure `AUTH_OVERRIDE_ENV_VARS` prevents from the other direction.
+ * Left in, the agent believes it is a CHILD of the launching session.
+ * `CLAUDE_CONFIG_DIR` is deliberately NOT here. See `docs/local-driver.md`.
  */
 const CLAUDE_SESSION_ENV_VARS = [
   'CLAUDECODE',
@@ -100,17 +79,9 @@ const CLAUDE_SESSION_ENV_VARS = [
 /**
  * The agent's working directory.
  *
- * NOT necessarily the group folder. Claude Code walks up from cwd to discover a
- * project's `CLAUDE.md`, `.claude/skills/` and `.claude/settings.json`. The walk
- * is verified, and it does not stop at a git repository root. So cwd is the only
- * lever that puts an agent inside a repository with that repository's context.
- *
- * `NANOCLAW_AGENT_DIR` stays the agent's own state directory (memory, footer
- * telemetry) in every case. The two were one value, which is precisely what
- * bound an agent to a single repository.
- *
- * Falls back to the group folder, so an install that sets no override keeps
- * its exact previous behaviour.
+ * NOT necessarily the group folder. cwd alone decides which repository's context
+ * an agent loads. `NANOCLAW_AGENT_DIR` stays its state directory. Falls back to
+ * the group folder. See `docs/local-driver.md`.
  */
 export function resolveSpawnCwd(specCwd: string | undefined, rootEnv: NodeJS.ProcessEnv): string | undefined {
   return (specCwd ?? '').trim() || rootEnv.NANOCLAW_AGENT_DIR;
@@ -125,21 +96,9 @@ export function stripInheritedClaudeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessE
 /**
  * Environment the host owns, which a composed spec may never override.
  *
- * `HOME` is the one that matters, and the reason this list exists. Composition
- * sets `HOME=/home/node` whenever the spec carries a `runAs`
- * (`container-runner.ts`). Inside the image that uid has no passwd entry, so
- * HOME would otherwise resolve to `/`.
- *
- * Copied onto a host process it is simply wrong. The directory does not exist.
- * The first thing that tries to create it dies with `ENOTSUP` on macOS.
- *
- * The quieter failure is worth naming. `HOME` is how the SDK finds `~/.claude`,
- * and how Claude Code derives its keychain entry. A spec-supplied HOME does not
- * only break a mkdir. It detaches the agent from the user's harness, and from
- * the credentials this driver exists to reuse.
- *
- * The rest are listed for the same reason. They describe the container's
- * filesystem and identity, not this machine's.
+ * `HOME` is the one that matters. A spec-supplied HOME breaks a mkdir, and
+ * detaches the agent from the user's harness and credentials. See
+ * `docs/local-driver.md`.
  */
 const HOST_OWNED_ENV = ['HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR'] as const;
 
@@ -278,19 +237,9 @@ export class LocalSessionDriver implements SessionDriver {
   /**
    * Translate the composed mounts into the runner's root variables.
    *
-   * Every mount this driver understands is addressed by its containerPath,
-   * because that is the contract the runner reads. A mount it does not
-   * recognise is not an error.
-   *
-   * `/app/src` is the code being executed. `/app/skills` is dropped on purpose.
-   * The shared skills reach a host agent as a plugin staged into the session
-   * workspace, which needs no root of its own (`container-runner.ts`,
-   * `stageSkillsPlugin`).
-   *
-   * That second clause once claimed `/app/skills` was reached through the
-   * project settings directory. Nothing implemented that mechanism. Every
-   * shared skill therefore stayed missing, without one line of evidence.
-   * Unknown paths are dropped silently, and this comment is the record.
+   * Every mount is addressed by its containerPath, because that is the
+   * contract the runner reads. An unrecognised mount is not an error, and
+   * unknown paths are dropped silently. See `docs/local-driver.md`.
    */
   #deriveRootEnv(spec: SessionSpec, mounts: SessionSpec['containers'][number]['mounts']): Record<string, string> {
     const env: Record<string, string> = {};
@@ -347,23 +296,9 @@ export class LocalSessionDriver implements SessionDriver {
   /**
    * Say once, loudly, that the runner has no dependencies installed.
    *
-   * `container/agent-runner` is a separate package, and NOT a pnpm workspace
-   * member. `pnpm install` at the root never touches it. The image installs it
-   * with `bun install --frozen-lockfile` (`container/Dockerfile`). Under this
-   * driver the host runs the runner, and nothing installs it.
-   *
-   * Without this the failure is invisible in the worst way. Every spawn dies
-   * instantly on `Cannot find module '@anthropic-ai/claude-agent-sdk'`. The
-   * undelivered message stays due, and the host respawns every 2 seconds
-   * forever.
-   *
-   * Install and service health both look fine. Only the log shows it, as an
-   * endless wall of identical stack traces rather than one diagnosable event.
-   * Observed in the wild at 64 respawns before anyone read the log.
-   *
-   * Latched rather than thrown. The driver's contract is to spawn and report
-   * exits. A throw here would change how one bad install surfaces everywhere
-   * else. One actionable line beats a new failure mode.
+   * Nothing installs `container/agent-runner` under this driver. Without a
+   * warning, every spawn dies on a missing module and the host respawns every
+   * 2 seconds forever. Latched rather than thrown. See `docs/local-driver.md`.
    */
   #reportMissingRunnerDeps(name: string): void {
     if (this.#runnerDepsReported) return;

@@ -1,15 +1,10 @@
 /**
  * Find the `claude` binary on this host's PATH.
  *
- * The agent runner defaults to `/pnpm/claude`, where the agent image installs
- * it. Nothing is there on a host, so the host must say where the real one is.
- * That process also reads the OS keychain. The keychain is what lets a host run
- * authenticate as the user with no token. Failing to find it is therefore not a
- * missing convenience. It is the whole credential story gone.
- *
- * Returns undefined rather than throwing. The runner falls back to its container
- * default, and fails with the SDK's own message naming the path it looked for.
- * That is a better error than one invented here.
+ * The runner defaults to `/pnpm/claude`, which no host has. That binary also
+ * reads the OS keychain, so failing to find it costs the whole credential
+ * story. Returns undefined rather than throwing, so the runner fails with the
+ * SDK's own message. See `docs/local-driver.md`.
  */
 import fs from 'fs';
 import path from 'path';
