@@ -16,12 +16,9 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 
 import { getFooterTelemetry, setFooterTelemetry } from './db/session-state.js';
+import { AGENT_DIR } from './roots.js';
 
-/**
- * The container default. Overridden per process by NANOCLAW_AGENT_DIR,
- * which the local driver sets and the reader below consults first.
- */
-const AGENT_DIR = '/workspace/agent';
+
 
 /** Rate-limit windows worth showing, in render order, with their labels. */
 const WINDOW_LABELS: ReadonlyArray<readonly [string, string]> = [

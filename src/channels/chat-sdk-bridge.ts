@@ -428,6 +428,23 @@ function terminalApprovalMessage(spec: TerminalApprovalCard) {
  */
 const CARD_SECTION_LIMIT = 2800;
 
+/**
+ * The body and its footer as one card, or null when the card route does not
+ * apply. A card is what lets a channel style the footer as muted; a body over
+ * the section cap, or one carrying files, takes the markdown path instead.
+ */
+export function buildFooterCard(
+  text: string,
+  footerText: string,
+  hasFiles: boolean,
+): Parameters<Adapter['postMessage']>[1] | null {
+  if (!text || !footerText || hasFiles || text.length > CARD_SECTION_LIMIT) return null;
+  return {
+    card: Card({ title: '', children: [CardText(text), CardText(footerText, { style: 'muted' })] }),
+    fallbackText: `${text}\n\n${footerText}`,
+  };
+}
+
 export function splitForLimit(text: string, limit: number): string[] {
   if (text.length <= limit) return [text];
   const chunks: string[] = [];
@@ -936,16 +953,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       const rawText = (content.markdown as string) || (content.text as string);
       const text = rawText ? transformText(rawText) : rawText;
 
-      // Its own field so a channel can style it: muted renders as a Slack
-      // context block. Long bodies take the markdown path, because Slack caps
-      // a section at 3000 characters, and append it instead.
+      // Its own field so a channel can style it. See `buildFooterCard`.
       const footerText = typeof content.footer === 'string' ? content.footer.trim() : '';
       const hasFiles = Boolean(message.files && message.files.length > 0);
-      if (text && footerText && !hasFiles && text.length <= CARD_SECTION_LIMIT) {
-        const result = await adapter.postMessage(tid, {
-          card: Card({ title: '', children: [CardText(text), CardText(footerText, { style: 'muted' })] }),
-          fallbackText: `${text}\n\n${footerText}`,
-        });
+      const footerCard = buildFooterCard(text, footerText, hasFiles);
+      if (footerCard) {
+        const result = await adapter.postMessage(tid, footerCard);
         return result?.id;
       }
       const withFooterText = text && footerText ? `${text}\n\n${footerText}` : text;

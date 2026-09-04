@@ -16,6 +16,7 @@ import {
   recordUtilization,
 } from '../message-footer.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
+import { AGENT_DIR, IS_HOSTED, SKILLS_PLUGIN_DIR } from '../roots.js';
 import { shimCwd } from './cwd-shim.js';
 import { registerProvider } from './provider-registry.js';
 import type {
@@ -390,7 +391,7 @@ function archiveTranscriptFile(
           .slice(0, 50)
       : `conversation-${new Date().getHours().toString().padStart(2, '0')}${new Date().getMinutes().toString().padStart(2, '0')}`;
 
-    const conversationsDir = process.env.NANOCLAW_CONVERSATIONS_DIR || '/workspace/agent/conversations';
+    const conversationsDir = process.env.NANOCLAW_CONVERSATIONS_DIR || path.join(AGENT_DIR, 'conversations');
     fs.mkdirSync(conversationsDir, { recursive: true });
     // Local calendar date — the fallback `name` above already uses local
     // hours, and the agent navigates conversations/ by these date prefixes.
@@ -565,6 +566,7 @@ export class ClaudeProvider implements AgentProvider {
   private mcpServers: Record<string, McpServerConfig>;
   private env: Record<string, string | undefined>;
   private additionalDirectories?: string[];
+  private claudeExecutable?: string;
   private model?: string;
   private effort?: string;
   private fastMode?: boolean;
@@ -576,6 +578,7 @@ export class ClaudeProvider implements AgentProvider {
       Object.entries(options.mcpServers ?? {}).map(([name, server]) => [name, shimCwd(server)]),
     );
     this.additionalDirectories = options.additionalDirectories;
+    this.claudeExecutable = options.claudeExecutable;
     this.model = options.model;
     this.effort = options.effort;
     this.fastMode = options.fastMode;
@@ -644,7 +647,7 @@ export class ClaudeProvider implements AgentProvider {
         cwd: input.cwd,
         additionalDirectories: this.additionalDirectories,
         resume: input.continuation,
-        pathToClaudeCodeExecutable: '/pnpm/claude',
+        pathToClaudeCodeExecutable: this.claudeExecutable || '/pnpm/claude',
         systemPrompt: instructions
           ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions }
           : undefined,
@@ -657,6 +660,16 @@ export class ClaudeProvider implements AgentProvider {
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
         settingSources: ['project', 'user', 'local'],
+        // The shared skills, passed by path because no setting source above
+        // reaches a host-driver agent. `project` is the agent's cwd and `user`
+        // is the operator's own ~/.claude. The host stages the directory at
+        // spawn. See `docs/local-driver.md`.
+        //
+        // Outside a container only. Inside one the `.claude-shared` symlinks
+        // already deliver these skills, so the plugin would register each one
+        // twice — and a template overlay stamped in to SHADOW a shared skill
+        // would find the original reinstated beside it.
+        ...(IS_HOSTED ? { plugins: [{ type: 'local' as const, path: SKILLS_PLUGIN_DIR }] } : {}),
         // Only sent when enabled, so an install that never turns it on passes
         // exactly the options it always did. `fastMode` is a Settings member
         // rather than a query option, which is why it rides `settings`.

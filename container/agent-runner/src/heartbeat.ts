@@ -1,6 +1,9 @@
 import fs from 'fs';
+import path from 'path';
 
-const DEFAULT_HEARTBEAT_PATH = '/workspace/.heartbeat';
+import { WORKSPACE_DIR } from './roots.js';
+
+const DEFAULT_HEARTBEAT_PATH = path.join(WORKSPACE_DIR, '.heartbeat');
 
 /**
  * The heartbeat location is deployment-configurable via

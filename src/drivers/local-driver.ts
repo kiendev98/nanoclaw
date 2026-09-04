@@ -116,6 +116,8 @@ const POLL_INTERVAL_MS = 2_000;
 interface SessionRecord {
   name: string;
   pid: number;
+  /** The agent's working directory. Absent on a record an older build wrote. */
+  cwd?: string;
   key: SessionKey;
   labels: Record<string, string>;
   startedAt: string;
@@ -131,8 +133,14 @@ function isAlive(pid: number): boolean {
   }
 }
 
+/**
+ * The name a realized session carries, and the stem of its record file.
+ *
+ * `saber` rather than `nanoclaw`: this driver is the fork's, so a host running
+ * both keeps the two sets of records and processes apart on sight.
+ */
 function sessionName(key: SessionKey): string {
-  return `nanoclaw-local-${key.agentGroupId}-${key.sessionId}`;
+  return `saber-local-${key.agentGroupId}-${key.sessionId}`;
 }
 
 export interface LocalDriverOptions {
@@ -219,6 +227,7 @@ export class LocalSessionDriver implements SessionDriver {
     const record: SessionRecord = {
       name,
       pid: 0,
+      cwd: resolveSpawnCwd(container.cwd, rootEnv),
       key: spec.key,
       labels: { ...labelsForKey(spec.key, AGENT_ROLE, spec.labels), ...(container.labels ?? {}) },
       startedAt: '',
@@ -352,7 +361,7 @@ export class LocalSessionDriver implements SessionDriver {
     this.#reportMissingRunnerDeps(name);
 
     const child = spawn(this.#runtimeBin, ['run', this.#runnerEntry], {
-      cwd: resolveSpawnCwd(spec.containers.find((c) => c.role === 'agent')?.cwd, rootEnv),
+      cwd: this.#records.get(name)?.cwd,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: false,
@@ -588,7 +597,7 @@ class LocalSessionHandle implements SessionHandle {
     // caller's stdio. There is no container to enter, so an attach is the
     // command itself, run in the agent's working directory.
     const record = this.#driver._record(this.name);
-    const cwd = record ? path.dirname(path.join(record.name)) : process.cwd();
+    const cwd = record?.cwd || process.cwd();
     const args = ['-c', 'cd "$0" && exec "$@"', cwd, ...command];
     return { bin: '/bin/sh', argsTty: args, argsPlain: args };
   }

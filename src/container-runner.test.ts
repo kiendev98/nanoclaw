@@ -20,6 +20,7 @@ import {
   parseMemoryMb,
   parsePidsLimit,
   resolveProviderName,
+  stageSkillsPlugin,
   syncSkillSymlinks,
   toMountSpecs,
 } from './container-runner.js';
@@ -490,5 +491,44 @@ describe('syncSkillSymlinks', () => {
       expect.stringContaining('Shared skill not symlinked'),
       expect.objectContaining({ skill: 'welcome' }),
     );
+  });
+});
+
+describe('stageSkillsPlugin', () => {
+  function tmpSessionDir(): string {
+    return fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-plugin-'));
+  }
+
+  it('writes a plugin manifest the provider can load by path', () => {
+    const sessDir = tmpSessionDir();
+    stageSkillsPlugin(sessDir, { ...containerConfig, skills: ['welcome'] } as ContainerConfig);
+
+    const manifest = JSON.parse(fs.readFileSync(path.join(sessDir, 'plugin', '.claude-plugin', 'plugin.json'), 'utf-8'));
+    expect(manifest.name).toBe('nanoclaw-shared-skills');
+  });
+
+  it('links each skill to its real host path, not a container path', () => {
+    // The whole point of the plugin route: a host process cannot resolve
+    // `/app/skills`, which is what the symlink route plants.
+    const sessDir = tmpSessionDir();
+    stageSkillsPlugin(sessDir, { ...containerConfig, skills: ['welcome'] } as ContainerConfig);
+
+    const link = path.join(sessDir, 'plugin', 'skills', 'welcome');
+    expect(fs.readlinkSync(link)).toBe(path.join(process.cwd(), 'container', 'skills', 'welcome'));
+  });
+
+  it('drops a skill that left the selection', () => {
+    const sessDir = tmpSessionDir();
+    stageSkillsPlugin(sessDir, { ...containerConfig, skills: ['welcome', 'agent-browser'] } as ContainerConfig);
+    stageSkillsPlugin(sessDir, { ...containerConfig, skills: ['welcome'] } as ContainerConfig);
+
+    expect(fs.existsSync(path.join(sessDir, 'plugin', 'skills', 'agent-browser'))).toBe(false);
+  });
+
+  it('skips a selected skill that does not exist rather than throwing', () => {
+    const sessDir = tmpSessionDir();
+    stageSkillsPlugin(sessDir, { ...containerConfig, skills: ['no-such-skill'] } as ContainerConfig);
+
+    expect(fs.existsSync(path.join(sessDir, 'plugin', 'skills', 'no-such-skill'))).toBe(false);
   });
 });

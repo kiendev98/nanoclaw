@@ -5,9 +5,15 @@
  * starts, answers, and is wrong about which account it is or whose session it
  * belongs to. See `docs/local-driver.md`.
  */
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
 import { describe, expect, it } from 'vitest';
 
-import { resolveSpawnCwd, stripInheritedClaudeEnv } from './local-driver.js';
+import { LocalSessionDriver, resolveSpawnCwd, stripInheritedClaudeEnv } from './local-driver.js';
+import { FIXTURE_POLICY, fixtureSpec } from './spec-fixture.js';
+import type { MountPolicy, SessionSpec } from './types.js';
 
 describe('stripInheritedClaudeEnv', () => {
   it('removes the launching Claude Code session identity', () => {
@@ -91,5 +97,59 @@ describe('resolveSpawnCwd', () => {
     // directory, the nanoclaw checkout. That is how the 11,618-token
     // CLAUDE.md leak got into every session in the first place.
     expect(resolveSpawnCwd('   ', { NANOCLAW_AGENT_DIR: '/groups/g' })).toBe('/groups/g');
+  });
+});
+
+/**
+ * Where an operator's `ncl` attach lands.
+ *
+ * The bug this pins was silent: the cwd came from `path.dirname` of the
+ * session NAME, which carries no separator, so every attach landed in the
+ * host's own directory regardless of session.
+ */
+describe('execSpec', () => {
+  /** The fixture is rooted at `/install`; re-root it somewhere writable. */
+  function rehome(root: string): { policy: MountPolicy; spec: SessionSpec } {
+    const swap = (value: string): string => value.replace('/install', root);
+    const spec = fixtureSpec();
+    return {
+      policy: {
+        groupsRoot: swap(FIXTURE_POLICY.groupsRoot),
+        dataRoot: swap(FIXTURE_POLICY.dataRoot),
+        surfaceRoots: FIXTURE_POLICY.surfaceRoots.map(swap),
+        materialsRoot: swap(FIXTURE_POLICY.materialsRoot),
+      },
+      spec: {
+        ...spec,
+        containers: spec.containers.map((c) => ({
+          ...c,
+          // The shared fixture carries no group mount; real composition always
+          // does (`buildMounts`), and this driver refuses a spec without one.
+          mounts: [
+            ...c.mounts.map((m) => ({ ...m, hostPath: swap(m.hostPath) })),
+            {
+              class: 'group-state' as const,
+              hostPath: path.join(root, 'groups', 'agent-one'),
+              containerPath: '/workspace/agent',
+              mode: 'rw' as const,
+              groupScope: 'g1',
+            },
+          ],
+        })),
+      },
+    };
+  }
+
+  it("attaches in the agent's working directory, not the host's", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-exec-'));
+    const { policy, spec } = rehome(root);
+    const driver = new LocalSessionDriver({
+      policy,
+      runnerEntry: path.join(process.cwd(), 'container', 'agent-runner', 'src', 'index.ts'),
+    });
+
+    const handle = await driver.prepare(spec);
+
+    expect(handle.execSpec(['bash']).argsTty).toContain(path.join(root, 'groups', 'agent-one'));
   });
 });

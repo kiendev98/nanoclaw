@@ -14,6 +14,7 @@ import path from 'path';
 import { DEFAULT_MODEL, FAST_MODE, GROUPS_DIR, TIMEZONE } from './config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { resolveClaudeExecutable } from './drivers/claude-executable.js';
 import { isValidTimezone } from './timezone.js';
 import { log } from './log.js';
 import type { AgentGroup, ContainerConfigRow } from './types.js';
@@ -254,6 +255,14 @@ export interface ContainerConfig {
   timezone?: string;
   /** Session isolation tier for the group's containers; absent = the composer's default ('container'). */
   runtimeTier?: 'container' | 'vm';
+  /**
+   * Absolute path to this host's `claude` binary, for a runner executing OUTSIDE
+   * a container. Written at spawn because only the host can see its own PATH.
+   *
+   * A containerised runner ignores it. The image installs `claude` at
+   * `/pnpm/claude`, and a host path would name nothing inside the container.
+   */
+  hostClaudeExecutable?: string;
 }
 
 /**
@@ -392,7 +401,13 @@ export async function materializeContainerJson(agentGroupId: string): Promise<Co
   const row = await getContainerConfig(agentGroupId);
   if (!row) throw new Error(`Container config not found for agent group: ${agentGroupId}`);
 
-  const config = configFromDb(row, group);
+  // Resolved per spawn rather than once at load. PATH is a property of the host
+  // at this moment, and an install that gains `claude` must not need a restart
+  // to find it.
+  const config: ContainerConfig = {
+    ...configFromDb(row, group),
+    hostClaudeExecutable: resolveClaudeExecutable(process.env.PATH),
+  };
 
   const p = path.join(GROUPS_DIR, group.folder, 'container.json');
   const dir = path.dirname(p);
