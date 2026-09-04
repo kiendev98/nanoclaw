@@ -16,10 +16,9 @@
  */
 import { getSessionsByAgentGroup, isTaskThread } from '../../db/sessions.js';
 import { log } from '../../log.js';
-import { withExistingMailboxSession, writeSessionMessage } from '../../session-manager.js';
+import { withExistingMailboxSession } from '../../session-manager.js';
 import type { AgentGroup, MessagingGroup, Session } from '../../types.js';
-import { ECHO_CHANNEL_TIMELINE_SURFACE, ECHO_CHANNEL_TYPE, ECHO_TIMELINE_SURFACE } from './config.js';
-import { truncateEchoText } from './fan.js';
+import { preludeSurface, writePreludeRows } from './prelude.js';
 
 export const BACKFILL_LIMIT = 12;
 
@@ -118,30 +117,12 @@ export async function backfillNewSession(agentGroup: AgentGroup, session: Sessio
     const newest = rows.slice(-BACKFILL_LIMIT);
     if (newest.length === 0) return;
 
-    const isGroupSurface = mg.is_group === 1;
-    const label = isGroupSurface
-      ? 'this channel, just before this conversation'
-      : 'this DM, just before this conversation';
-    const surface = isGroupSurface ? ECHO_CHANNEL_TIMELINE_SURFACE : ECHO_TIMELINE_SURFACE;
-    for (const [i, row] of newest.entries()) {
-      // The most recent entry is what a short opener ("sure") is usually
-      // answering — deliver it whole; earlier entries get the normal cap.
-      const isLast = i === newest.length - 1;
-      await writeSessionMessage(agentGroup.id, session.id, {
-        id: `${session.id}:backfill:${i}`,
-        kind: 'chat',
-        timestamp: row.timestamp,
-        channelType: ECHO_CHANNEL_TYPE,
-        content: JSON.stringify({
-          text: isLast ? row.text.slice(0, 4000) : truncateEchoText(row.text),
-          sender: row.sender,
-          senderId: row.senderId,
-          ...(row.self ? { self: true } : {}),
-          echo: { surface, label },
-        }),
-        trigger: false,
-      });
-    }
+    await writePreludeRows(agentGroup.id, session.id, newest, {
+      surface: preludeSurface(mg),
+      label:
+        mg.is_group === 1 ? 'this channel, just before this conversation' : 'this DM, just before this conversation',
+      rowId: (_row, index) => `${session.id}:backfill:${index}`,
+    });
     log.debug('Backfilled new session with conversation timeline', {
       sessionId: session.id,
       rows: newest.length,

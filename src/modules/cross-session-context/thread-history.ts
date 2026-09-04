@@ -25,23 +25,17 @@
  */
 import { isTaskThread } from '../../db/sessions.js';
 import { log } from '../../log.js';
-import { withExistingMailboxSession, writeSessionMessage } from '../../session-manager.js';
+import { withExistingMailboxSession } from '../../session-manager.js';
+import type { MessagePresence } from '../../mailbox/types.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from '../../types.js';
 import type { ThreadHistoryMessage } from '../../channels/adapter.js';
-import { ECHO_CHANNEL_TIMELINE_SURFACE, ECHO_CHANNEL_TYPE, ECHO_TIMELINE_SURFACE } from './config.js';
-import { truncateEchoText } from './fan.js';
+import { preludeSurface, writePreludeRows } from './prelude.js';
 
 /** Matches BACKFILL_LIMIT, and the measured p90 of 12 preceding messages. */
 export const THREAD_HISTORY_LIMIT = 12;
 
 /** A platform read must never hold up delivery of the triggering message. */
 export const THREAD_HISTORY_FETCH_TIMEOUT_MS = 4000;
-
-/**
- * The entry a short mention ("do this") is usually answering. Delivered
- * whole, as backfill.ts does for the same reason.
- */
-const LAST_ENTRY_MAX_CHARS = 4000;
 
 /**
  * The one channel capability this module needs.
@@ -141,7 +135,9 @@ async function selectUnseen(
   const candidates = messages.filter((m) => m.id !== triggerMessageId);
   if (candidates.length === 0) return [];
 
-  const seen = await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => {
+  // Narrowed to the one capability used, so the type states the dependency
+  // even though the helper hands over a whole mailbox.
+  const seen = await withExistingMailboxSession(agentGroup.id, session.id, (mailbox: MessagePresence) => {
     const ids = new Set<string>();
     for (const message of candidates) {
       const stored =
@@ -157,26 +153,11 @@ async function selectUnseen(
 
 async function writeHistoryRows(input: SeedThreadHistoryInput, rows: ThreadHistoryMessage[]): Promise<void> {
   const { agentGroup, session, mg } = input;
-  const surface = mg.is_group === 1 ? ECHO_CHANNEL_TIMELINE_SURFACE : ECHO_TIMELINE_SURFACE;
-  const label = 'this thread, before the agent was brought in';
-
-  for (const [index, row] of rows.entries()) {
-    const isLast = index === rows.length - 1;
-    await writeSessionMessage(agentGroup.id, session.id, {
-      id: threadHistoryRowId(row.id, session.id),
-      kind: 'chat',
-      timestamp: row.timestamp,
-      channelType: ECHO_CHANNEL_TYPE,
-      content: JSON.stringify({
-        text: isLast ? row.text.slice(0, LAST_ENTRY_MAX_CHARS) : truncateEchoText(row.text),
-        sender: row.sender,
-        senderId: row.senderId,
-        ...(row.self ? { self: true } : {}),
-        echo: { surface, label },
-      }),
-      trigger: false,
-    });
-  }
+  await writePreludeRows(agentGroup.id, session.id, rows, {
+    surface: preludeSurface(mg),
+    label: 'this thread, before the agent was brought in',
+    rowId: (row) => threadHistoryRowId(row.id, session.id),
+  });
 }
 
 /**

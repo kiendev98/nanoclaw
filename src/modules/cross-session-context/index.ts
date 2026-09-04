@@ -42,6 +42,13 @@ export {
 } from './history.js';
 export { backfillNewSession, BACKFILL_LIMIT } from './backfill.js';
 export {
+  preludeSurface,
+  writePreludeRows,
+  LAST_ENTRY_MAX_CHARS,
+  type PreludeMeta,
+  type PreludeRow,
+} from './prelude.js';
+export {
   seedThreadHistory,
   threadHistoryRowId,
   THREAD_HISTORY_FETCH_TIMEOUT_MS,
