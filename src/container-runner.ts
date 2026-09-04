@@ -41,7 +41,7 @@ import {
   type SessionClaimRow,
 } from './db/coordination.js';
 import { getHostInstanceId } from './host-instance.js';
-import { getDb, hasTable } from './db/connection.js';
+import { getDb, getDbIfInitialized, hasTable } from './db/connection.js';
 import { getSession } from './db/sessions.js';
 import { getSessionDriver, isSessionEventsDriver } from './drivers/index.js';
 import type { SupervisedHandle, SupervisedSnapshot } from './drivers/session-events.js';
@@ -83,6 +83,16 @@ const SHM_SIZE_MB = 1024;
 /** Grace before SIGKILL. One second, as `docker stop -t 1` has always been. */
 const STOP_GRACE_SECONDS = 1;
 
+/**
+ * Where a helper session's working copy is mounted.
+ *
+ * Named here because two things must agree on it: the mount, and the env flag
+ * that tells the runner it is a helper. The local driver maps the same path to
+ * its root variable, and the runner carries the same default — that split is
+ * the existing convention for every container path (see `roots.ts`).
+ */
+export const WORKER_WORKTREE_CONTAINER_PATH = '/workspace/repo';
+
 /** Active sessions tracked by session ID. */
 interface ActiveSessionRuntime {
   /**
@@ -110,6 +120,8 @@ interface ActiveSessionRuntime {
   finishedPromise: Promise<void>;
   resolveFinished: () => void;
   stopReason?: string;
+  /** Set by `restartContainer` so the terminal hooks are not told the run ended. */
+  endKind?: SessionEndKind;
   /** Incarnation this process shadow-claimed in session_claims, if the write landed. */
   claimIncarnation?: number;
   /** A deferred fenced finalization is already queued for this runtime. */
@@ -400,6 +412,51 @@ async function spawnContainer(session: Session): Promise<void> {
 }
 
 /**
+ * Why a session's container stopped.
+ *
+ * `restarting` means the host intends to bring the same session back, so work
+ * bound to the session outlives this exit. `ended` means the run is over,
+ * however it ended.
+ *
+ * The host states this rather than letting a hook infer it. A hook that guessed
+ * from a stop reason string, or from a respawn callback being present, would
+ * silently start finalizing live work the first time a caller added a reason.
+ */
+export type SessionEndKind = 'ended' | 'restarting';
+
+/**
+ * Session-terminal hooks.
+ *
+ * Registered modules observe a session whose runtime has ended — the process
+ * exited, however it exited. This is the seam a module uses when the END of a
+ * run has to mean something, and it cannot be an action the agent takes: a
+ * crashed agent takes none.
+ *
+ * A hook that finalizes work must check `kind` first. A restart exits the
+ * container without ending the run.
+ *
+ * Hooks are decoration only. Each call is wrapped, so a failing hook can never
+ * affect finalization, the claim release, or a respawn.
+ */
+export type SessionTerminalHook = (sessionId: string, kind: SessionEndKind) => void | Promise<void>;
+
+const sessionTerminalHooks: SessionTerminalHook[] = [];
+
+export function registerSessionTerminalHook(hook: SessionTerminalHook): void {
+  sessionTerminalHooks.push(hook);
+}
+
+async function runSessionTerminalHooks(sessionId: string, kind: SessionEndKind): Promise<void> {
+  for (const hook of sessionTerminalHooks) {
+    try {
+      await hook(sessionId, kind);
+    } catch (err) {
+      log.error('Session-terminal hook failed', { sessionId, kind, err });
+    }
+  }
+}
+
+/**
  * Wire a session's lifecycle in the one order that is safe, as executable code
  * rather than as a comment a refactor can silently invert.
  *
@@ -581,9 +638,25 @@ async function finish(sessionId: string, runtime: ActiveSessionRuntime, failure?
       log.error('Container exit callback failed', { sessionId, containerName, err });
     }
   }
+
+  await runSessionTerminalHooks(sessionId, runtime.endKind ?? 'ended');
 }
 
-/** Kill a container for a session. */
+/**
+ * Stop a container the host intends to bring back.
+ *
+ * Identical to `killContainer` except in what the session-terminal hooks are
+ * told. Work bound to the session survives a restart, so a hook that finalizes
+ * such work must not fire here. Two named functions rather than a flag, because
+ * the caller always knows which of the two it means.
+ */
+export function restartContainer(sessionId: string, reason: string, onExit?: () => void): void {
+  const entry = activeContainers.get(sessionId);
+  if (entry) entry.endKind = 'restarting';
+  killContainer(sessionId, reason, onExit);
+}
+
+/** Kill a container for a session. Ends the run — see `restartContainer`. */
 export function killContainer(sessionId: string, reason: string, onExit?: () => void): void {
   const entry = activeContainers.get(sessionId);
   if (!entry) return;
@@ -734,7 +807,7 @@ export async function honorPendingStopIntents(
       // The kill never completed — the container outlived the host that
       // ordered it. Re-issue the kill with the respawn re-armed.
       log.info('Re-issuing interrupted restart', { sessionId: session.id });
-      killContainer(session.id, 'restart-intent-recovery', () => void respawn());
+      restartContainer(session.id, 'restart-intent-recovery', () => void respawn());
     } else {
       await respawn();
     }
@@ -770,6 +843,30 @@ async function resolveProviderContribution(
       })
     : {};
   return { provider, contribution };
+}
+
+/**
+ * The working copy this session stands in, when it is a helper session.
+ *
+ * Table-guarded like the agent-to-agent destination projection: without the
+ * worker-delegation tables there is nothing to read, and every session is an
+ * ordinary one.
+ */
+async function workerWorktreePath(sessionId: string): Promise<string | null> {
+  const db = getDbIfInitialized();
+  if (!db || !(await hasTable(db, 'worker_sessions'))) return null;
+
+  // The tables outlive the module: removing it from an install that already
+  // ran its migration leaves them, so the guard above still passes. This runs
+  // on every spawn for every agent group, so a throw here would stop every
+  // container from starting, not just worker ones.
+  try {
+    const { getWorkerSession } = await import('./modules/worker-delegation/db/worker-sessions.js');
+    return (await getWorkerSession(sessionId))?.worktree_path ?? null;
+  } catch (err) {
+    log.error('Worker-delegation tables exist but the module does not', { sessionId, err });
+    return null;
+  }
 }
 
 export async function buildMounts(
@@ -818,6 +915,24 @@ export async function buildMounts(
     mountClass: 'group-state',
     scope,
   });
+
+  // MODULE-HOOK:worker-worktree:start
+  // A helper session's working copy of the repository it was delegated into.
+  // Classed 'allowlisted-extra' rather than 'group-state' because it lives
+  // outside every group folder ON PURPOSE — the memory walk must not climb out
+  // of it into someone else's checkout — and that class is exactly "a host path
+  // vetted upstream", which the repository registry is.
+  const worktreePath = await workerWorktreePath(session.id);
+  if (worktreePath) {
+    mounts.push({
+      hostPath: worktreePath,
+      containerPath: WORKER_WORKTREE_CONTAINER_PATH,
+      readonly: false,
+      mountClass: 'allowlisted-extra',
+      scope,
+    });
+  }
+  // MODULE-HOOK:worker-worktree:end
 
   // container.json — nested RO mount on top of RW group dir so the agent can
   // read its config but cannot modify it. Composed per group, so 'group-state'
@@ -971,6 +1086,13 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     TZ: containerConfig.timezone ?? TIMEZONE,
     ...mailboxEnvironment,
   };
+  // Being a helper is a fact about the session, so the host states it rather
+  // than letting the runner infer it from which directories happen to exist.
+  // Derived from the composed mount list rather than passed alongside it, so
+  // the role and the working copy cannot disagree.
+  if (mounts.some((mount) => mount.containerPath === WORKER_WORKTREE_CONTAINER_PATH)) {
+    env.NANOCLAW_WORKER_SESSION = '1';
+  }
   // The contributed lane (ContainerSpec.contributedEnv): registry-sourced env,
   // exempt from the credential-NAME check and still refused credential VALUES.
   // The model provider's contribution fills first, the gateway's second — a

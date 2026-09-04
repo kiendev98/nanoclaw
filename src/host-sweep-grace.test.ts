@@ -10,7 +10,9 @@
  * (clearStaleProcessingAcks runs on agent-runner startup), so the inherited
  * claim's age is measured from the incarnation's start, giving it the full
  * tolerance window. Once that window elapses with no sign of life, a later
- * tick must kill (claim-stuck). Goes red if the incarnation gate in
+ * tick must restart it (claim-stuck) — a restart, not an ending, because the
+ * sweep requeues the triggering message for the respawned container. Goes red
+ * if the incarnation gate in
  * enforceRunningContainerSla stops reading the session_claims row.
  */
 import fs from 'fs';
@@ -29,15 +31,16 @@ vi.mock('./container-runner.js', () => ({
   isContainerRunning: vi.fn().mockReturnValue(false),
   wakeContainer: vi.fn().mockResolvedValue(true),
   killContainer: vi.fn(),
+  restartContainer: vi.fn(),
 }));
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from './db/index.js';
 import { createSession } from './db/sessions.js';
-import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
+import { isContainerRunning, killContainer, restartContainer, wakeContainer } from './container-runner.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { log } from './log.js';
 import { getAgentMailbox } from './mailbox/index.js';
-import { outboundDbPath } from './mailbox/sqlite/paths.js';
+import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
 import { initSessionFolder, writeSessionMessage } from './session-manager.js';
 
 const TEST_DIR = '/tmp/nanoclaw-test-host-sweep-grace';
@@ -49,6 +52,13 @@ const SWEEP_INTERVAL_MS = 60_000;
 
 function now(): string {
   return new Date().toISOString();
+}
+
+/** Spend the message's retry budget, so the reset has nothing left to requeue. */
+function exhaustRetries(messageId: string): void {
+  const db = new Database(inboundDbPath(AG, SESS));
+  db.prepare('UPDATE messages_in SET tries = 5 WHERE id = ?').run(messageId);
+  db.close();
 }
 
 function seedStaleClaim(messageId: string, ageMs: number): void {
@@ -86,6 +96,7 @@ async function runSweepTick(): Promise<void> {
 
 beforeEach(async () => {
   vi.mocked(isContainerRunning).mockReset().mockReturnValue(false);
+  vi.mocked(restartContainer).mockReset();
   vi.mocked(killContainer).mockReset();
   vi.mocked(wakeContainer)
     .mockReset()
@@ -182,19 +193,19 @@ describe('host sweep incarnation-gated grace period', () => {
     }
   });
 
-  it('gives a fresh container its tolerance window against inherited stale claims, then kills', async () => {
+  it('gives a fresh container its tolerance window against inherited stale claims, then restarts it', async () => {
     // Tick 1: due message + no running container → wake. The 2h-old claim is
     // still in outbound.db, but it predates the fresh incarnation's claim
     // time — not evidence against this container.
     await runSweepTick();
     expect(wakeContainer).toHaveBeenCalledTimes(1);
-    expect(killContainer).not.toHaveBeenCalled();
+    expect(restartContainer).not.toHaveBeenCalled();
 
     // Tick 2, moments later: the inherited claim's age is measured from the
     // incarnation start, so it is still inside the tolerance window — no kill.
     await runSweepTick();
     expect(wakeContainer).toHaveBeenCalledTimes(1); // no second wake
-    expect(killContainer).not.toHaveBeenCalled();
+    expect(restartContainer).not.toHaveBeenCalled();
 
     // The tolerance window elapses (backdate the incarnation's claim time)
     // with no sign of life — now the stale claim is this container's own
@@ -206,7 +217,28 @@ describe('host sweep incarnation-gated grace period', () => {
       SESS,
     );
     await runSweepTick();
-    expect(killContainer).toHaveBeenCalledTimes(1);
+    expect(restartContainer).toHaveBeenCalledTimes(1);
+    expect(restartContainer).toHaveBeenCalledWith(SESS, 'claim-stuck');
+    expect(killContainer).not.toHaveBeenCalled();
+  });
+
+  // A restart says the work continues. Once every message has spent its
+  // retries there is nothing left to requeue and no wake is coming, so this
+  // stop is an ending — and a module holding state for the session has to be
+  // told that, or it waits for a run that never resumes.
+  it('ends rather than restarts when the message has spent its retries', async () => {
+    exhaustRetries('m-1');
+
+    await runSweepTick();
+    const { getDb } = await import('./db/index.js');
+    await getDb().run(
+      'UPDATE session_claims SET claimed_at = ? WHERE session_id = ?',
+      new Date(Date.now() - 2 * 60 * 1000).toISOString(),
+      SESS,
+    );
+    await runSweepTick();
+
     expect(killContainer).toHaveBeenCalledWith(SESS, 'claim-stuck');
+    expect(restartContainer).not.toHaveBeenCalled();
   });
 });

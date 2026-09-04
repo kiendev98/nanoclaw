@@ -51,6 +51,15 @@ export const DATA_DIR = path.join(WORKSPACE_DIR, 'data');
 export const STORE_DIR = path.join(WORKSPACE_DIR, 'store');
 
 /**
+ * Git worktrees for delegated work, one per helper session.
+ *
+ * Outside every repository for the reason the module comment gives. A helper
+ * stands in its worktree, so the memory walk must not climb into a checkout
+ * whose CLAUDE.md belongs to someone else.
+ */
+export const WORKTREES_DIR = path.join(WORKSPACE_DIR, 'worktrees');
+
+/**
  * Stop rather than start on an empty workspace beside a populated checkout.
  *
  * State used to live in the checkout. Starting with the new root would create

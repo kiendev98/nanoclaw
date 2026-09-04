@@ -7,7 +7,7 @@ import {
   type AdditionalMountConfig,
   type McpServerConfig,
 } from '../../container-config.js';
-import { buildAgentGroupImage, killContainer } from '../../container-runner.js';
+import { buildAgentGroupImage, restartContainer } from '../../container-runner.js';
 import { requestWake } from '../../request-wake.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
@@ -336,7 +336,7 @@ registerResource({
               onWake: true,
             });
           }
-          killContainer(
+          restartContainer(
             ctx.sessionId,
             'restarted via ncl',
             message

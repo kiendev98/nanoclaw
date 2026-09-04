@@ -278,7 +278,7 @@ async function drainSession(session: Session): Promise<void> {
           );
           for (const hook of postDeliveryHooks) {
             try {
-              await hook(msg, session, { firstDelivery });
+              await hook(msg, session, { firstDelivery, platformMsgId: platformMsgId ?? null });
             } catch (err) {
               log.warn('Post-delivery hook failed', { messageId: msg.id, sessionId: session.id, err });
             }
@@ -533,6 +533,13 @@ export interface PostDeliveryInfo {
    * fires for); the hook only ever observes user-facing rows.
    */
   firstDelivery: boolean;
+  /**
+   * The id the platform gave this message, when it gave one.
+   *
+   * A hook that must address the conversation this message starts needs the
+   * platform's own name for it, and only delivery holds that value.
+   */
+  platformMsgId: string | null;
 }
 
 export type PostDeliveryHook = (msg: OutboundMessage, session: Session, info: PostDeliveryInfo) => void | Promise<void>;

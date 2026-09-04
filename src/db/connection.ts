@@ -16,6 +16,17 @@ export function getDb(): DbDriver {
   return _db;
 }
 
+/**
+ * The central DB when one is open, or null.
+ *
+ * For the few paths that legitimately run before init — mount composition, for
+ * one, which a test exercises with no database at all. Everywhere else, a
+ * missing DB is a programming error and `getDb` should throw.
+ */
+export function getDbIfInitialized(): DbDriver | null {
+  return _db;
+}
+
 function defaultConfig(): DbConfig {
   return { path: CENTRAL_DB_PATH };
 }

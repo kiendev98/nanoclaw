@@ -33,6 +33,15 @@ function seedDestination(name = 'family', channelType = 'telegram', platformId =
     .run(name, name, channelType, platformId);
 }
 
+function seedInbound(channelType: string, platformId: string, threadId: string | null, id = 'in-1'): void {
+  getInboundDb()
+    .prepare(
+      `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, thread_id, content)
+       VALUES (?, 'chat', datetime('now'), 'completed', ?, ?, ?, '{"text":"hi"}')`,
+    )
+    .run(id, platformId, channelType, threadId);
+}
+
 const taskRouting: RoutingContext = {
   platformId: 'ag-1',
   channelType: 'agent',
@@ -181,6 +190,51 @@ describe('final-output blocks in a task run', () => {
     }[];
     expect(rows).toHaveLength(1);
     expect(JSON.parse(rows[0].content).text).toContain('[undelivered → family] digest');
+  });
+});
+
+/**
+ * `send_message` and a `<message to="...">` block are two doors to one channel.
+ * A thread rule that holds on one and not the other is a hole: a worker lent
+ * one conversation has no inbound row until the counterparty speaks, so the
+ * block door would post its first message outside the thread it was lent.
+ */
+describe('thread resolution in a <message> block', () => {
+  const chatRouting: RoutingContext = { ...taskRouting, taskRun: false };
+
+  it('uses the session thread when the destination is the session own channel', async () => {
+    seedDestination('current-chat', 'discord', 'channel:1');
+    seedSessionRouting('discord', 'channel:1', 'thread-7');
+
+    await dispatchResultText('<message to="current-chat">hi</message>', chatRouting);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].thread_id).toBe('thread-7');
+  });
+
+  it('uses the latest inbound thread for a destination on another channel', async () => {
+    seedDestination('other-chat', 'slack', 'C-9');
+    seedInbound('slack', 'C-9', 'inbound-thread');
+    seedSessionRouting('discord', 'channel:1', 'thread-7');
+
+    await dispatchResultText('<message to="other-chat">hi</message>', chatRouting);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].thread_id).toBe('inbound-thread');
+  });
+
+  it('uses the latest inbound thread when the session carries none', async () => {
+    seedDestination('current-chat', 'discord', 'channel:1');
+    seedInbound('discord', 'channel:1', 'inbound-thread');
+    seedSessionRouting('discord', 'channel:1', null);
+
+    await dispatchResultText('<message to="current-chat">hi</message>', chatRouting);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].thread_id).toBe('inbound-thread');
   });
 });
 

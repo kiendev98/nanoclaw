@@ -21,6 +21,7 @@ import { getChannelAdapter, getChannelDefaults } from './channels/channel-regist
 import { resolveThreadPolicy, resolveUnknownSenderPolicy } from './channels/channel-defaults.js';
 import { gateCommand } from './command-gate.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { getDb, hasTable } from './db/connection.js';
 import { recordDroppedMessage } from './db/dropped-messages.js';
 import {
   createMessagingGroupIfAbsent,
@@ -237,6 +238,56 @@ function safeParseContent(raw: string): { text?: string; sender?: string; sender
  * Route an inbound message from a channel adapter to the correct session.
  * Creates messaging group + session if they don't exist yet.
  */
+/**
+ * Route a message in a thread a worker holds, ahead of every other decision.
+ *
+ * A held thread engages without anyone naming the worker (D5), and nothing else
+ * engages in it (D8). This runs before the no-wiring drop, because a lent
+ * channel usually carries no wiring of its own — only a destination row the
+ * principal holds. Behind that drop, every reply in a lent thread was lost.
+ *
+ * @param mg The messaging group the thread belongs to.
+ * @returns True when the worker took the message, so the caller stops routing.
+ */
+async function deliverToWorkerLentThread(event: InboundEvent, mg: MessagingGroup): Promise<boolean> {
+  // D11: a channel the owner denied stays denied. This runs ahead of the
+  // no-wiring drop that checks `denied_at`, so it has to check it too — a
+  // thread lent before the denial must not become a way back in.
+  if (mg.denied_at) return false;
+  if (!(await hasTable(getDb(), 'worker_channel_grants'))) return false;
+
+  // The tables outlive the module: removing the module from an install that
+  // already ran its migration leaves them behind, so the guard above still
+  // passes. Fail closed rather than taking every inbound message down with it.
+  let deliverToLentConversation;
+  try {
+    ({ deliverToLentConversation } = await import('./modules/worker-delegation/lend/inbound-route.js'));
+  } catch (err) {
+    log.error('Worker-delegation tables exist but the module does not', { err });
+    return false;
+  }
+  return deliverToLentConversation(
+    {
+      messagingGroupId: mg.id,
+      threadId: event.threadId,
+      channelType: event.channelType,
+      platformId: event.platformId,
+      message: event.message,
+    },
+    // The same access check the fan-out applies, against the worker's principal.
+    // A worker admits exactly who its principal admits (D10).
+    //
+    // The sender resolves here rather than in the caller, because this runs
+    // ahead of step 2. It runs only once a grant is found, so an ordinary
+    // message never pays for it.
+    async (principalAgentGroupId) => {
+      if (!accessGate) return true;
+      const userId = senderResolver ? await senderResolver(event) : null;
+      return (await accessGate(event, userId, mg, principalAgentGroupId)).allowed;
+    },
+  );
+}
+
 export async function routeInbound(event: InboundEvent): Promise<void> {
   // Pre-route interceptors — let modules consume messages before any routing
   // (e.g. free-text DM replies during multi-step approval flows). They run in
@@ -318,6 +369,10 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     mg = found.mg;
     agentCount = found.agentCount;
   }
+
+  // MODULE-HOOK:worker-lent-conversation:start
+  if (await deliverToWorkerLentThread(event, mg)) return;
+  // MODULE-HOOK:worker-lent-conversation:end
 
   // 1b. No wirings — either silent drop (plain chatter / denied channel) or
   //     escalate to owner for channel-registration approval.

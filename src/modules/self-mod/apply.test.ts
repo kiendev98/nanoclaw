@@ -6,6 +6,7 @@ import type { Session } from '../../types.js';
 vi.mock('../../container-runner.js', () => ({
   buildAgentGroupImage: vi.fn(),
   killContainer: vi.fn(),
+  restartContainer: vi.fn(),
   wakeContainer: vi.fn(),
 }));
 vi.mock('../../session-manager.js', () => ({ writeSessionMessage: vi.fn() }));

@@ -46,6 +46,25 @@ export async function gateCommand(content: string, userId: string | null, agentG
   return { action: 'pass' };
 }
 
+/**
+ * True when this text dispatches a command the container acts on.
+ *
+ * The two sets above hold every command the gate classifies, and their union is
+ * identical to the two sets the agent-runner formatter carries. The runner also
+ * reads any text that starts with `/clear` as a clear, so a prefix match on that
+ * one catches `/clearall` too.
+ *
+ * A door that returns before `gateCommand` runs must still refuse what the gate
+ * would have refused, and it calls this to do so.
+ */
+export function isGatedCommand(text: string): boolean {
+  const trimmed = text.trim().toLowerCase();
+  if (!trimmed.startsWith('/')) return false;
+  if (trimmed.startsWith('/clear')) return true;
+  const command = trimmed.split(/\s/)[0];
+  return FILTERED_COMMANDS.has(command) || ADMIN_COMMANDS.has(command);
+}
+
 async function isAdmin(userId: string | null, agentGroupId: string): Promise<boolean> {
   if (!userId) return false;
   return hasAdminPrivilege(userId, agentGroupId);

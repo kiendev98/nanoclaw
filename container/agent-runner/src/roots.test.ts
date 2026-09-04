@@ -1,3 +1,4 @@
+
 import { describe, expect, it } from 'bun:test';
 
 const ROOT_VARS = [
@@ -82,5 +83,54 @@ describe('roots', () => {
     const r = await loadRoots({ NANOCLAW_AGENT_DIR: '/state/groups/dm///' }, 'trailing');
 
     expect(r.AGENT_DIR).toBe('/state/groups/dm');
+  });
+});
+
+describe('worktreeDir', () => {
+  const VARS = ['NANOCLAW_WORKER_SESSION', 'NANOCLAW_WORKTREE_DIR'] as const;
+
+  function withVars<T>(overrides: Partial<Record<(typeof VARS)[number], string>>, run: () => T): T {
+    const previous = new Map(VARS.map((key) => [key, process.env[key]]));
+    for (const key of VARS) delete process.env[key];
+    Object.assign(process.env, overrides);
+    try {
+      return run();
+    } finally {
+      for (const key of VARS) {
+        const value = previous.get(key);
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }
+
+  // The absent case is every ordinary session, and it has to stay absent: the
+  // caller then keeps AGENT_DIR, so nothing about a chat session changes.
+  it('is null when the host has not said this is a worker session', async () => {
+    const r = await import('./roots.js');
+
+    withVars({}, () => expect(r.worktreeDir()).toBeNull());
+  });
+
+  // The role is a fact the host states. A directory appearing at the container
+  // path for some unrelated reason must not turn a chat session into a worker's.
+  it('is null when only the working copy is named, without the role', async () => {
+    const r = await import('./roots.js');
+
+    withVars({ NANOCLAW_WORKTREE_DIR: '/somewhere/repo' }, () => expect(r.worktreeDir()).toBeNull());
+  });
+
+  it('is the container path when the host says worker and names nothing', async () => {
+    const r = await import('./roots.js');
+
+    withVars({ NANOCLAW_WORKER_SESSION: '1' }, () => expect(r.worktreeDir()).toBe('/workspace/repo'));
+  });
+
+  it('is the named directory when the host names one', async () => {
+    const r = await import('./roots.js');
+
+    withVars({ NANOCLAW_WORKER_SESSION: '1', NANOCLAW_WORKTREE_DIR: '/somewhere/repo/' }, () =>
+      expect(r.worktreeDir()).toBe('/somewhere/repo'),
+    );
   });
 });

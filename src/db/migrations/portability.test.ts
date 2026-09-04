@@ -2,6 +2,12 @@ import fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import { migrations } from './index.js';
+import { moduleWorkerDelegation } from './module-worker-delegation.js';
+
+// A module-lane migration registers at runtime, so it never enters
+// `migrations`. The portability policy still governs it, so name it here —
+// otherwise moving a migration into the lane silently exempts it.
+const allMigrations = [...migrations, moduleWorkerDelegation];
 
 const FROZEN_SQLITE_ONLY = new Set([
   'initial-v2-schema',
@@ -37,12 +43,12 @@ const BANNED_PORTABLE_SQL = [
 
 describe('central migration portability policy', () => {
   it('freezes SQLite-only status to the pre-boundary migration set', () => {
-    const actual = migrations.filter((migration) => migration.sqliteOnly).map((migration) => migration.name);
+    const actual = allMigrations.filter((migration) => migration.sqliteOnly).map((migration) => migration.name);
     expect(new Set(actual)).toEqual(FROZEN_SQLITE_ONLY);
   });
 
   it('requires every post-boundary migration to be async and portable', () => {
-    for (const migration of migrations.filter((candidate) => !candidate.sqliteOnly)) {
+    for (const migration of allMigrations.filter((candidate) => !candidate.sqliteOnly)) {
       expect(migration.up.constructor.name, migration.name).toBe('AsyncFunction');
       const source = String(migration.up);
       for (const banned of BANNED_PORTABLE_SQL) expect(source, `${migration.name}: ${banned}`).not.toMatch(banned);

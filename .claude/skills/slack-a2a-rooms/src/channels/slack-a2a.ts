@@ -25,6 +25,7 @@
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { setBotInboundPolicy, type SlackBotInboundPolicy } from './slack-a2a-guard.js';
+import { isThreadExempt } from './thread-exemptions.js';
 
 export const DEFAULT_MAX_HOPS = 6;
 
@@ -102,7 +103,11 @@ export function createA2aRoomPolicy(getConfig: () => A2aConfig = readA2aConfig):
       }
       const key = `${ctx.instanceKey}:${room}`;
       const count = hops.get(key) ?? 0;
-      if (count >= maxHops) {
+      // A thread some feature has claimed as a deliberate bot-to-bot loop is
+      // not counted against the cap. The claim is made elsewhere and asked for
+      // here, so this file names no feature.
+      const exempt = ctx.threadId !== null && isThreadExempt('slack', ctx.platformId, ctx.threadId);
+      if (!exempt && count >= maxHops) {
         log.info('slack-a2a: hop limit reached — dropping bot messages until a human speaks', {
           room,
           botId: ctx.botId,
@@ -119,7 +124,11 @@ export function createA2aRoomPolicy(getConfig: () => A2aConfig = readA2aConfig):
         // The guard fires this only after downstream accepted the message —
         // a throw in the host's onInbound must not consume budget for a
         // message that never reached a session.
-        onAccepted: () => hops.set(key, count + 1),
+        // An exempt thread spends no budget either, so a loop inside it cannot
+        // starve the rest of the room.
+        onAccepted: () => {
+          if (!exempt) hops.set(key, count + 1);
+        },
       };
     },
     onHumanInbound(ctx) {

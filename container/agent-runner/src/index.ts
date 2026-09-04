@@ -38,13 +38,46 @@ import { createProvider, type ProviderName } from './providers/factory.js';
 import { resolvePluginServer } from './plugin-mcp.js';
 import type { McpServerConfig } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
-import { AGENT_DIR, EXTRA_DIR, IS_HOSTED } from './roots.js';
+import { AGENT_DIR, EXTRA_DIR, IS_HOSTED, worktreeDir } from './roots.js';
 
 function log(msg: string): void {
   console.error(`[agent-runner] ${msg}`);
 }
 
-const CWD = AGENT_DIR;
+/**
+ * Where the agent stands.
+ *
+ * `AGENT_DIR` for every ordinary session, exactly as before. A helper session
+ * stands in its repository's working copy instead, so the provider's own
+ * project walk loads THAT repository's CLAUDE.md, skills and settings — which
+ * is the whole reason a helper exists (A7). `AGENT_DIR` keeps holding its
+ * memory; it simply stops being where the process stands.
+ */
+function resolveCwd(): { cwd: string; inWorktree: boolean } {
+  const worktree = worktreeDir();
+  return worktree ? { cwd: worktree, inWorktree: true } : { cwd: AGENT_DIR, inWorktree: false };
+}
+
+/**
+ * The composed project document, read directly.
+ *
+ * A helper's walk no longer passes through `AGENT_DIR`, so the host's composed
+ * instructions cannot reach it by file discovery any more. They are folded into
+ * the system prompt instead, which leaves the target repository's own document
+ * to load the ordinary way.
+ */
+function readComposedProjectDoc(): string {
+  const composed = path.join(AGENT_DIR, 'CLAUDE.md');
+  try {
+    return fs.readFileSync(composed, 'utf-8').trim();
+  } catch (error) {
+    // Absent, the helper runs with the target repository's instructions and
+    // none of its own. That is a working session with a missing half, so it
+    // has to be said out loud.
+    log(`No composed project document at ${composed}: ${error instanceof Error ? error.message : String(error)}`);
+    return '';
+  }
+}
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -65,10 +98,14 @@ async function main(): Promise<void> {
   // with every instruction source inlined, no imports. Memory is supplied
   // separately by each provider's native lifecycle hook.
   const taskId = getTaskSeriesId();
-  const instructions = buildSystemPromptAddendum(
+  const { cwd, inWorktree } = resolveCwd();
+  const addendum = buildSystemPromptAddendum(
     config.assistantName || undefined,
     taskId ? { kind: 'task', taskId } : { kind: 'chat' },
   );
+  const composed = inWorktree ? readComposedProjectDoc() : '';
+  const instructions = composed ? `${addendum}\n\n${composed}` : addendum;
+  if (inWorktree) log(`Working copy: ${cwd}`);
 
   // Discover additional directories mounted at /workspace/extra/*
   const additionalDirectories: string[] = [];
@@ -125,7 +162,7 @@ async function main(): Promise<void> {
     await runPollLoop({
       provider,
       providerName,
-      cwd: CWD,
+      cwd,
       systemContext: { instructions },
     });
   } finally {

@@ -115,3 +115,21 @@ export const SESSION_CONTEXT_PATH = root('NANOCLAW_SESSION_CONTEXT_PATH', '/app/
 
 /** True when this process is running outside a container. */
 export const IS_HOSTED: boolean = Boolean((process.env.NANOCLAW_AGENT_DIR ?? '').trim());
+
+/**
+ * The repository working copy a helper session stands in, or null.
+ *
+ * Two shapes, one answer. A container gets the mount at the fixed path; a host
+ * process gets a real directory named by the variable. Either way the HOST
+ * states the role by setting `NANOCLAW_WORKER_SESSION`, because being a helper
+ * is a fact about the session and not about which directories happen to exist —
+ * a future mount at `/workspace/repo` for an unrelated reason must not turn an
+ * ordinary session into a helper's.
+ *
+ * Resolved per call, the way `agentDir()` and `currentRoot` are: a test suite
+ * sets the variables after this module has already loaded.
+ */
+export function worktreeDir(): string | null {
+  const isWorker = (process.env.NANOCLAW_WORKER_SESSION ?? '').trim();
+  return isWorker ? root('NANOCLAW_WORKTREE_DIR', '/workspace/repo') : null;
+}

@@ -7,8 +7,10 @@ import {
   type MessageInRow,
 } from './db/messages-in.js';
 import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
+import { getSessionRouting } from './db/session-routing.js';
 import { clearStaleProcessingAcks } from './db/container-state.js';
 import { touchHeartbeat } from './heartbeat.js';
+import { worktreeDir } from './roots.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import { renderFooter } from './telemetry/index.js';
 import {
@@ -578,6 +580,9 @@ export async function processQuery(
           // A corrective retry handles delivery only; its result is not a
           // second run summary.
           if (routing.taskRun && !taskBlockNudged) await autoAppendTaskLog(event.text);
+          // A helper session captures the same final text as its report draft.
+          // Automatic, so B1's "the helper must not have to remember" holds.
+          if (worktreeDir()) await recordWorkerReportDraft(event.text);
           if (resultBlocks === 0 && event.isError === true && !routing.taskRun) {
             // Non-retryable error turn (e.g. a 403 billing_error) with no
             // <message> envelope: deliver the notice instead of dropping it as
@@ -1132,13 +1137,30 @@ export async function autoAppendTaskLog(text: string): Promise<void> {
   log('Task run log auto-appended from final text');
 }
 
+/**
+ * A helper's report draft, captured from the turn's final text.
+ *
+ * The sibling above APPENDS to a run log. This one OVERWRITES a draft, because
+ * only the last statement is the answer (B2). Nothing is delivered here: the
+ * host reads the draft once, when the task ends, so a helper never has to
+ * remember to report and a crashed one still does.
+ */
+export async function recordWorkerReportDraft(text: string): Promise<void> {
+  const body = stripInternalTags(text).trim();
+  if (!body) return;
+  await writeMessageOut({
+    id: generateId(),
+    kind: 'system',
+    content: JSON.stringify({ action: 'worker_report_draft', text: body }),
+  });
+}
+
 async function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): Promise<void> {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
-  // Resolve thread_id per-destination from the most recent inbound message
-  // that came from this same channel+platform. In agent-shared sessions,
-  // different destinations have different thread contexts — using a single
-  // routing.threadId would stamp one channel's thread onto another.
+  // Per-destination, never the turn's own `routing.threadId`: an agent-shared
+  // session reaches several channels, and one thread would stamp one channel's
+  // thread onto another.
   const destRouting = resolveDestinationThread(channelType, platformId);
   // Channel destinations only. An agent-to-agent message is machine input,
   // and a telemetry line appended to it is noise the receiving agent has to
@@ -1160,19 +1182,39 @@ async function sendToDestination(dest: DestinationEntry, body: string, routing: 
 }
 
 /**
- * Find the thread_id and message id from the most recent inbound message
- * matching the given channel+platform. Returns null if no match found.
+ * Find the thread_id and message id to reply on for one destination.
+ *
+ * The session thread wins when the session's own channel AND platform both
+ * match the destination. That is the rule `send_message` applies, and the two
+ * doors must agree. A worker lent a conversation has no inbound row until the
+ * counterparty speaks, so only the session thread keeps its first post inside
+ * the thread it was lent.
+ *
+ * Otherwise the thread comes from the most recent inbound message on that
+ * channel+platform. Per-destination on purpose: an agent-shared session reaches
+ * several channels, and one session thread would stamp one channel's thread
+ * onto another.
+ *
+ * @returns Null when neither source names a route.
  */
 function resolveDestinationThread(
   channelType: string,
   platformId: string,
 ): { threadId: string | null; inReplyTo: string | null } | null {
+  // Held outside the try so a later failure still returns what the first read
+  // found. The session lookup is the second of two reads, and losing the
+  // inbound route to it would post top-level rather than in the open thread.
+  let inbound: { threadId: string | null; inReplyTo: string | null } | null = null;
   try {
-    return getAgentMailbox().operations.getLatestInboundRoute(channelType, platformId);
+    inbound = getAgentMailbox().operations.getLatestInboundRoute(channelType, platformId);
+    const session = getSessionRouting();
+    const sessionThread =
+      session.channel_type === channelType && session.platform_id === platformId ? session.thread_id : null;
+    if (sessionThread) return { threadId: sessionThread, inReplyTo: inbound?.inReplyTo ?? null };
   } catch (err) {
     log(`resolveDestinationThread error: ${err instanceof Error ? err.message : String(err)}`);
   }
-  return null;
+  return inbound;
 }
 
 function sleep(ms: number): Promise<void> {
