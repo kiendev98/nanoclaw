@@ -302,7 +302,11 @@ function extractText(message: OutboundMessage): string | null {
   const content = message.content as Record<string, unknown> | string | undefined;
   if (typeof content === 'string') return content;
   if (content && typeof content === 'object' && typeof content.text === 'string') {
-    return content.text;
+    // The CLI has no styling affordance, so the footer is appended. Channels
+    // that can render it separately (Slack: a muted context block) read the
+    // same field and style it instead.
+    const footer = typeof content.footer === 'string' ? content.footer.trim() : '';
+    return footer ? `${content.text}\n\n${footer}` : content.text;
   }
   return null;
 }

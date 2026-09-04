@@ -6,6 +6,15 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
+import {
+  recordAccountName,
+  recordContextUsage,
+  recordContextTokens,
+  recordEffort,
+  recordModel,
+  recordRateLimits,
+  recordUtilization,
+} from '../message-footer.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
 import { shimCwd } from './cwd-shim.js';
 import { registerProvider } from './provider-registry.js';
@@ -48,6 +57,85 @@ export interface SdkRateLimitInfo {
  *
  * Returns null when the event is informational (do not disturb the turn).
  */
+/**
+ * Log what actually occupies the context window, once per turn.
+ *
+ * Diagnostic, and it exists because the percentage alone is unfalsifiable. A
+ * greeting reported 51% on a model whose id says 1M, which is either ~510k
+ * tokens of standing context or a `maxTokens` far below the raw window — and
+ * the two call for opposite responses. `percentage` cannot distinguish them;
+ * these fields can.
+ *
+ * `rawMaxTokens` is the model's full window and `maxTokens` is what Claude
+ * Code lets a conversation occupy after reserving room for output, so a large
+ * gap between them IS the answer.
+ */
+function logContextBreakdown(usage: unknown): void {
+  const u = usage as {
+    totalTokens?: number;
+    maxTokens?: number;
+    rawMaxTokens?: number;
+    percentage?: number;
+    model?: string;
+    categories?: Array<{ name?: string; tokens?: number }>;
+    memoryFiles?: Array<{ path?: string; tokens?: number }>;
+    mcpTools?: Array<{ serverName?: string; tokens?: number }>;
+  } | null;
+  if (!u) return;
+
+  const top = (rows: Array<{ tokens?: number }> | undefined, label: (row: never) => string): string =>
+    (rows ?? [])
+      .filter((row) => (row.tokens ?? 0) > 0)
+      .sort((a, b) => (b.tokens ?? 0) - (a.tokens ?? 0))
+      .slice(0, 8)
+      .map((row) => `${label(row as never)}=${row.tokens}`)
+      .join(' ');
+
+  // Server-grouped rather than per-tool: a dozen MCP servers produce hundreds
+  // of tool rows, and the question is which SERVER is expensive.
+  const perServer = new Map<string, number>();
+  for (const tool of u.mcpTools ?? []) {
+    const name = tool.serverName ?? 'unknown';
+    perServer.set(name, (perServer.get(name) ?? 0) + (tool.tokens ?? 0));
+  }
+
+  log(
+    `context: total=${u.totalTokens} max=${u.maxTokens} rawMax=${u.rawMaxTokens} pct=${u.percentage} model=${u.model}`,
+  );
+  log(`context categories: ${top(u.categories, (row: { name?: string }) => row.name ?? '?')}`);
+  log(`context memory files: ${top(u.memoryFiles, (row: { path?: string }) => row.path ?? '?')}`);
+  log(
+    `context mcp servers: ${[...perServer.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([name, tokens]) => `${name}=${tokens}`)
+      .join(' ')}`,
+  );
+}
+
+/**
+ * Invoke an optional zero-argument control method and hand its result to
+ * `onValue`, or do nothing at all.
+ *
+ * Every failure is swallowed deliberately: a missing method (older SDK, or a
+ * test double), a rejected control request, and a throwing handler. The only
+ * caller is footer telemetry, which must never delay a turn or fail one.
+ */
+function callIfAvailable<T>(
+  target: unknown,
+  method: string,
+  onValue: (value: T | undefined) => void,
+): void {
+  const fn = (target as Record<string, unknown> | null)?.[method];
+  if (typeof fn !== 'function') return;
+  try {
+    void Promise.resolve((fn as () => Promise<T>).call(target))
+      .then((value) => onValue(value))
+      .catch(() => {});
+  } catch {
+    // A synchronous throw from the control call itself.
+  }
+}
+
 export function classifyRateLimitEvent(
   info: SdkRateLimitInfo | undefined,
 ): { message: string; classification: 'rate_limit' | 'quota' } | null {
@@ -589,6 +677,8 @@ export class ClaudeProvider implements AgentProvider {
     });
 
     let aborted = false;
+    // Captured for the generator below, which cannot see `this`.
+    const configuredEffort = this.effort;
 
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
@@ -600,6 +690,48 @@ export class ClaudeProvider implements AgentProvider {
         yield { type: 'activity' };
 
         if (message.type === 'system' && message.subtype === 'init') {
+          // init reports the model the turn actually ran on. container.json's
+          // `model` is optional, so an install that pins nothing would
+          // otherwise have no model to show.
+          recordModel((message as { model?: string }).model);
+          // What nanoclaw asked for. init reports the model but not the
+          // effort, so this is the request, not a confirmation. Read from a
+          // captured const, never `this`: `translateEvents` is a plain
+          // generator declaration, so `this` is undefined inside it.
+          recordEffort(configuredEffort);
+          // The SDK's own answers for the other two footer fields, asked once
+          // per turn. `getContextUsage` is what `/context` prints — it divides
+          // by the USABLE window, not the raw one, so computing the ratio here
+          // would read low against the number the user sees in a terminal.
+          //
+          // Both are optional and fire-and-forget. They are control-protocol
+          // methods that arrived in a later SDK than the one this provider was
+          // written against, and the object is only a Query by contract — the
+          // recorded-turn tests drive this generator with a bare async
+          // iterable. Calling an absent method here throws INSIDE the event
+          // loop and kills the turn, so a cosmetic footer would take down
+          // every delivery on an older SDK.
+          callIfAvailable<{ totalTokens?: number }>(sdkResult, 'getContextUsage', (usage) => {
+            recordContextTokens(usage?.totalTokens);
+            logContextBreakdown(usage);
+          });
+          callIfAvailable<{ organization?: string }>(sdkResult, 'accountInfo', (info) => recordAccountName(info?.organization));
+          // The structured `/usage` payload, which carries the plan's
+          // rate-limit windows outright. The control request for it exists in
+          // the protocol but is not on the Query interface this SDK version
+          // types, so it is probed rather than called — `callIfAvailable`
+          // makes an absent method a no-op. This is the only source that can
+          // populate 5h/7d: `rate_limit_event` fires solely on CHANGE, and it
+          // has never fired on this account.
+          callIfAvailable<{ rate_limits?: Record<string, { utilization?: number | null } | null> }>(sdkResult, 'getUsage', (usage) => recordRateLimits(usage?.rate_limits));
+          // The model catalogue this CLI offers. ModelInfo carries no context
+          // window, so this cannot say what 165k SHOULD be — but it does say
+          // whether a non-[1m] opus row exists, which separates "165k is this
+          // model's window" from "the [1m] variant is not being served".
+          callIfAvailable(sdkResult, 'supportedModels', (models) => {
+            const rows = (models as Array<{ value?: string; resolvedModel?: string }> | undefined) ?? [];
+            log(`models: ${rows.map((m) => m.value ?? '?').join(' ')}`);
+          });
           yield { type: 'init', continuation: message.session_id };
         } else if (message.type === 'assistant') {
           // Surface each assistant message's text as it streams in. The final
@@ -618,6 +750,13 @@ export class ClaudeProvider implements AgentProvider {
           // result reports. Blocks split across ASSISTANT MESSAGES (a tool
           // call between them) remain unparseable mid-turn by design; the
           // poll-loop's midTurnSent===0 fallback and wrap-nudge cover that.
+          // Window occupancy, refreshed per assistant message rather than per
+          // result. Messages are delivered mid-turn, before any result
+          // exists, so reading it only from the result would put a
+          // turn-old percentage in every footer.
+          recordContextUsage(
+            (message as { message?: { usage?: Parameters<typeof recordContextUsage>[0] } }).message?.usage,
+          );
           const content = (message as { message?: { content?: Array<{ type?: string; text?: string }> } }).message
             ?.content;
           if (Array.isArray(content)) {
@@ -651,6 +790,12 @@ export class ClaudeProvider implements AgentProvider {
           //   'out_of_credits'  → genuinely out of credits (billing)
           //   otherwise         → a transient window limit that resets.
           const info = (message as { rate_limit_info?: SdkRateLimitInfo }).rate_limit_info;
+          // Recorded for the message footer before any classification. These
+          // events fire only when a value CHANGES, so an 'allowed' event is
+          // the only place the current utilization is ever reported —
+          // dropping it because the turn is healthy is how the footer would
+          // end up permanently blank.
+          recordUtilization(info?.rateLimitType, info?.utilization);
           const blocked = classifyRateLimitEvent(info);
           if (!blocked) {
             // Informational ('allowed' / 'allowed_warning') — never kill the turn.
