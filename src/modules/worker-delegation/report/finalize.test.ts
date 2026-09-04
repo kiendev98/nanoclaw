@@ -8,15 +8,15 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { closeDb, initTestDb } from '../../db/connection.js';
-import { runMigrations } from '../../db/migrations/index.js';
+import { closeDb, initTestDb } from '../../../db/connection.js';
+import { runMigrations } from '../../../db/migrations/index.js';
 
 const { delivered, failNextDelivery } = vi.hoisted(() => ({
   delivered: [] as Array<{ agentGroupId: string; sessionId: string; text: string; sender: string }>,
   failNextDelivery: { value: false },
 }));
 
-vi.mock('./notify.js', () => ({
+vi.mock('../notify.js', () => ({
   deliverToSession: (agentGroupId: string, sessionId: string, text: string, sender: string) => {
     if (failNextDelivery.value) {
       failNextDelivery.value = false;
@@ -28,9 +28,9 @@ vi.mock('./notify.js', () => ({
   replyToCaller: vi.fn().mockResolvedValue(undefined),
 }));
 
-const { createTask, getTask, setDraftAnswer } = await import('./db/worker-tasks.js');
+const { createTask, getTask, setDraftAnswer } = await import('../db/worker-tasks.js');
 const { finalizeWorkerTaskIfRunning } = await import('./finalize.js');
-import type { WorkerTask } from './types.js';
+import type { WorkerTask } from '../types.js';
 
 function aRunningTask(overrides: Partial<WorkerTask> = {}): WorkerTask {
   return {
@@ -132,7 +132,7 @@ describe('finalizeWorkerTaskIfRunning', () => {
   });
 
   it('keeps the open question through a failed delivery, so a retry still has it', async () => {
-    const { createQuestion, findOpenQuestion } = await import('./db/worker-questions.js');
+    const { createQuestion, findOpenQuestion } = await import('../db/worker-questions.js');
     await createTask(aRunningTask());
     await createQuestion({
       question_id: 'wq-1',

@@ -12,8 +12,8 @@
 import fs from 'fs';
 import path from 'path';
 
-import { envValue } from '../../env.js';
-import { log } from '../../log.js';
+import { envValue } from '../../../env.js';
+import { log } from '../../../log.js';
 
 const ROOTS_ENV_VAR = 'NANOCLAW_PROJECT_ROOTS';
 

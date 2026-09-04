@@ -13,8 +13,8 @@ import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
-import { log } from '../../log.js';
-import { WORKTREES_DIR } from '../../workspace.js';
+import { log } from '../../../log.js';
+import { WORKTREES_DIR } from '../../../workspace.js';
 
 export interface WorktreeHandle {
   worktreePath: string;

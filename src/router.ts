@@ -226,7 +226,7 @@ function safeParseContent(raw: string): { text?: string; sender?: string; sender
  */
 async function deliverToWorkerLentThread(event: InboundEvent, mg: MessagingGroup): Promise<boolean> {
   if (!(await hasTable(getDb(), 'worker_channel_grants'))) return false;
-  const { deliverToLentConversation } = await import('./modules/worker-delegation/inbound-route.js');
+  const { deliverToLentConversation } = await import('./modules/worker-delegation/lend/inbound-route.js');
   return deliverToLentConversation(
     {
       messagingGroupId: mg.id,

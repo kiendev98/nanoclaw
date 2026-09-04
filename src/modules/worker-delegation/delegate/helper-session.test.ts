@@ -8,15 +8,15 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { closeDb, initTestDb } from '../../db/connection.js';
-import { runMigrations } from '../../db/migrations/index.js';
+import { closeDb, initTestDb } from '../../../db/connection.js';
+import { runMigrations } from '../../../db/migrations/index.js';
 
 const { sessions, worktrees } = vi.hoisted(() => ({
   sessions: new Map<string, string>(),
   worktrees: [] as string[],
 }));
 
-vi.mock('../../session-manager.js', () => ({
+vi.mock('../../../session-manager.js', () => ({
   resolveSystemSession: (agentGroupId: string, threadId: string) => {
     const key = `${agentGroupId}\0${threadId}`;
     const existing = sessions.get(key);
@@ -38,9 +38,9 @@ vi.mock('./worktree.js', () => ({
   WorktreeError: class WorktreeError extends Error {},
 }));
 
-const { createHelper } = await import('./db/worker-helpers.js');
+const { createHelper } = await import('../db/worker-helpers.js');
 const { ensureHelperSession } = await import('./helper-session.js');
-import type { WorkerHelper } from './types.js';
+import type { WorkerHelper } from '../types.js';
 
 const helper: WorkerHelper = {
   helper_agent_group_id: 'ag-worker-nanoclaw',

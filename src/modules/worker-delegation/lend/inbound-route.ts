@@ -9,13 +9,13 @@
  * that turn in the SAME session, so being named still gets a reply, and there
  * is never a double one.
  */
-import { log } from '../../log.js';
-import { writeSessionMessage } from '../../session-manager.js';
-import { getSession } from '../../db/sessions.js';
-import { requestWake } from '../../request-wake.js';
-import type { InboundKind } from '../../mailbox/model.js';
-import { findLiveGrantForThread } from './db/worker-channel-grants.js';
-import { getTask } from './db/worker-tasks.js';
+import { log } from '../../../log.js';
+import { writeSessionMessage } from '../../../session-manager.js';
+import { getSession } from '../../../db/sessions.js';
+import { requestWake } from '../../../request-wake.js';
+import type { InboundKind } from '../../../mailbox/model.js';
+import { findLiveGrantForThread } from '../db/worker-channel-grants.js';
+import { getTask } from '../db/worker-tasks.js';
 
 export interface LentConversationMessage {
   messagingGroupId: string;

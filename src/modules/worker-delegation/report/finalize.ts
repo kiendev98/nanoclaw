@@ -7,14 +7,14 @@
  * fast path to the same call, not a second mechanism: both go through the
  * status transition in `claimTaskForFinalize`, and exactly one wins.
  */
-import { log } from '../../log.js';
-import { deleteDestination } from '../agent-to-agent/db/agent-destinations.js';
-import { releaseGrant } from './db/worker-channel-grants.js';
-import { deleteQuestionsForTask } from './db/worker-questions.js';
-import { claimTaskForFinalize, findRunningTask, releaseTaskClaim } from './db/worker-tasks.js';
-import { forgetLentThread } from './lent-threads.js';
-import { deliverToSession } from './notify.js';
-import type { WorkerTask } from './types.js';
+import { log } from '../../../log.js';
+import { deleteDestination } from '../../agent-to-agent/db/agent-destinations.js';
+import { releaseGrant } from '../db/worker-channel-grants.js';
+import { deleteQuestionsForTask } from '../db/worker-questions.js';
+import { claimTaskForFinalize, findRunningTask, releaseTaskClaim } from '../db/worker-tasks.js';
+import { forgetLentThread } from '../lend/lent-threads.js';
+import { deliverToSession } from '../notify.js';
+import type { WorkerTask } from '../types.js';
 
 /** Why the task ended. Only the wording differs; the delivery does not. */
 export type FinalizeReason = 'done' | 'session-ended';

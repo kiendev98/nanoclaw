@@ -8,22 +8,22 @@
  * corrected. The platform names the thread only once that post is delivered, so
  * the grant is written unbound and stamped by the post-delivery hook.
  */
-import { getMessagingGroup } from '../../db/messaging-groups.js';
-import { log } from '../../log.js';
-import { writeOutboundDirect, writeSessionRouting } from '../../session-manager.js';
-import type { Session } from '../../types.js';
-import { requestApproval } from '../approvals/index.js';
-import { createDestination, getDestinationByName, normalizeName } from '../agent-to-agent/db/agent-destinations.js';
-import { writeDestinations } from '../agent-to-agent/write-destinations.js';
-import { getAgentGroup } from '../../db/agent-groups.js';
-import { createGrant, findLiveGrantForSession } from './db/worker-channel-grants.js';
-import { findWorkerSession } from './db/worker-sessions.js';
-import { findRunningTask } from './db/worker-tasks.js';
-import { WORKER_LEND_CONVERSATION_ACTION } from './guard.js';
-import { generateId } from './ids.js';
-import { replyToCaller } from './notify.js';
-import type { MessagingGroup } from '../../types.js';
-import type { WorkerChannelGrant, WorkerSession, WorkerTask } from './types.js';
+import { getMessagingGroup } from '../../../db/messaging-groups.js';
+import { log } from '../../../log.js';
+import { writeOutboundDirect, writeSessionRouting } from '../../../session-manager.js';
+import type { Session } from '../../../types.js';
+import { requestApproval } from '../../approvals/index.js';
+import { createDestination, getDestinationByName, normalizeName } from '../../agent-to-agent/db/agent-destinations.js';
+import { writeDestinations } from '../../agent-to-agent/write-destinations.js';
+import { getAgentGroup } from '../../../db/agent-groups.js';
+import { createGrant, findLiveGrantForSession } from '../db/worker-channel-grants.js';
+import { findWorkerSession } from '../db/worker-sessions.js';
+import { findRunningTask } from '../db/worker-tasks.js';
+import { WORKER_LEND_CONVERSATION_ACTION } from '../guard.js';
+import { generateId } from '../ids.js';
+import { replyToCaller } from '../notify.js';
+import type { MessagingGroup } from '../../../types.js';
+import type { WorkerChannelGrant, WorkerSession, WorkerTask } from '../types.js';
 
 interface LendRequest {
   repository: string;

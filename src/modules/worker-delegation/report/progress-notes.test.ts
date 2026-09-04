@@ -6,16 +6,16 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { closeDb, initTestDb } from '../../db/connection.js';
-import { runMigrations } from '../../db/migrations/index.js';
-import type { Session } from '../../types.js';
+import { closeDb, initTestDb } from '../../../db/connection.js';
+import { runMigrations } from '../../../db/migrations/index.js';
+import type { Session } from '../../../types.js';
 
 const { delivered, refusals } = vi.hoisted(() => ({
   delivered: [] as string[],
   refusals: [] as string[],
 }));
 
-vi.mock('./notify.js', () => ({
+vi.mock('../notify.js', () => ({
   deliverToSession: (_agentGroupId: string, _sessionId: string, text: string) => {
     delivered.push(text);
     return Promise.resolve();
@@ -27,9 +27,9 @@ vi.mock('./notify.js', () => ({
 }));
 
 const { MAX_PROGRESS_NOTES, MIN_PROGRESS_NOTE_GAP_MS, createTask, spendProgressNoteAllowance } =
-  await import('./db/worker-tasks.js');
+  await import('../db/worker-tasks.js');
 const { sendProgressNote } = await import('./progress-notes.js');
-import type { WorkerTask } from './types.js';
+import type { WorkerTask } from '../types.js';
 
 const HELPER_SESSION = { id: 'sess-helper', agent_group_id: 'ag-helper' } as Session;
 
@@ -104,7 +104,7 @@ describe('spendProgressNoteAllowance', () => {
   });
 
   it('refuses once the task is no longer running', async () => {
-    const { claimTaskForFinalize } = await import('./db/worker-tasks.js');
+    const { claimTaskForFinalize } = await import('../db/worker-tasks.js');
     await claimTaskForFinalize('wt-1', new Date().toISOString());
     expect(await spendProgressNoteAllowance('wt-1', new Date())).toBe(false);
   });

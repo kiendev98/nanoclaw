@@ -5,12 +5,12 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createAgentGroup } from '../../db/agent-groups.js';
-import { closeDb, initTestDb } from '../../db/connection.js';
-import { createMessagingGroup } from '../../db/messaging-groups.js';
-import { runMigrations } from '../../db/migrations/index.js';
-import { createDestination, getDestinations } from '../agent-to-agent/db/agent-destinations.js';
-import type { Session } from '../../types.js';
+import { createAgentGroup } from '../../../db/agent-groups.js';
+import { closeDb, initTestDb } from '../../../db/connection.js';
+import { createMessagingGroup } from '../../../db/messaging-groups.js';
+import { runMigrations } from '../../../db/migrations/index.js';
+import { createDestination, getDestinations } from '../../agent-to-agent/db/agent-destinations.js';
+import type { Session } from '../../../types.js';
 
 const { refusals, outbound, routed } = vi.hoisted(() => ({
   refusals: [] as string[],
@@ -18,7 +18,7 @@ const { refusals, outbound, routed } = vi.hoisted(() => ({
   routed: [] as Array<{ group: string; session: string }>,
 }));
 
-vi.mock('./notify.js', () => ({
+vi.mock('../notify.js', () => ({
   deliverToSession: vi.fn().mockResolvedValue(undefined),
   replyToCaller: (_session: Session, text: string) => {
     refusals.push(text);
@@ -26,7 +26,7 @@ vi.mock('./notify.js', () => ({
   },
 }));
 
-vi.mock('../../session-manager.js', () => ({
+vi.mock('../../../session-manager.js', () => ({
   writeOutboundDirect: (
     _group: string,
     _session: string,
@@ -41,16 +41,16 @@ vi.mock('../../session-manager.js', () => ({
   },
 }));
 
-vi.mock('../agent-to-agent/write-destinations.js', () => ({
+vi.mock('../../agent-to-agent/write-destinations.js', () => ({
   writeDestinations: vi.fn().mockResolvedValue(undefined),
 }));
 
-const { createHelper } = await import('./db/worker-helpers.js');
-const { createWorkerSession } = await import('./db/worker-sessions.js');
-const { createTask } = await import('./db/worker-tasks.js');
-const { findLiveGrantForTask } = await import('./db/worker-channel-grants.js');
+const { createHelper } = await import('../db/worker-helpers.js');
+const { createWorkerSession } = await import('../db/worker-sessions.js');
+const { createTask } = await import('../db/worker-tasks.js');
+const { findLiveGrantForTask } = await import('../db/worker-channel-grants.js');
 const { lendConversation } = await import('./lend-conversation.js');
-import type { WorkerSession, WorkerTask } from './types.js';
+import type { WorkerSession, WorkerTask } from '../types.js';
 
 const NOW = new Date().toISOString();
 const PRINCIPAL: Session = {

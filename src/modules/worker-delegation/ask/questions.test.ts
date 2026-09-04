@@ -7,16 +7,16 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { closeDb, initTestDb } from '../../db/connection.js';
-import { runMigrations } from '../../db/migrations/index.js';
-import type { Session } from '../../types.js';
+import { closeDb, initTestDb } from '../../../db/connection.js';
+import { runMigrations } from '../../../db/migrations/index.js';
+import type { Session } from '../../../types.js';
 
 const { delivered, refusals } = vi.hoisted(() => ({
   delivered: [] as Array<{ sessionId: string; text: string }>,
   refusals: [] as string[],
 }));
 
-vi.mock('./notify.js', () => ({
+vi.mock('../notify.js', () => ({
   deliverToSession: (_agentGroupId: string, sessionId: string, text: string) => {
     delivered.push({ sessionId, text });
     return Promise.resolve();
@@ -27,10 +27,10 @@ vi.mock('./notify.js', () => ({
   },
 }));
 
-const { createTask } = await import('./db/worker-tasks.js');
-const { findOpenQuestion } = await import('./db/worker-questions.js');
+const { createTask } = await import('../db/worker-tasks.js');
+const { findOpenQuestion } = await import('../db/worker-questions.js');
 const { answerWorkerQuestion, askPrincipal } = await import('./questions.js');
-import type { WorkerTask } from './types.js';
+import type { WorkerTask } from '../types.js';
 
 const HELPER_SESSION = { id: 'sess-helper', agent_group_id: 'ag-helper' } as Session;
 const PRINCIPAL_SESSION = { id: 'sess-principal', agent_group_id: 'ag-principal' } as Session;

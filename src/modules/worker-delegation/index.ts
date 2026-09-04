@@ -8,6 +8,20 @@
  * `unguarded()` reason instead, so the choice is visible in the diff that made
  * it.
  *
+ * The folders follow the brief's own requirement groups, so a reader who knows
+ * a letter knows where to look. The files here are the kernel every group uses:
+ * this composition root, the row shapes, the id generator, both guarded
+ * actions, and the two ways to write into a session.
+ *
+ *   delegate/  hand work to a worker inside another repository (A)
+ *   report/    one report per task, drafts and progress notes (B)
+ *   ask/       a worker asks its principal, and is answered (C)
+ *   lend/      a worker holds one conversation with a counterparty (D)
+ *   db/        every table this module owns
+ *
+ * One edge crosses a folder: report/finalize releases the lent conversation,
+ * because a grant ends with the task that bounded it (D9).
+ *
  * Host integration points, all table-guarded so core runs without this module:
  *   - `container-runner.ts::buildMounts` mounts the session's worktree.
  *   - `container-runner.ts::finish` fires the terminal hook this registers,
@@ -23,20 +37,20 @@ import { writeSessionRouting } from '../../session-manager.js';
 import { unguarded } from '../../guard/index.js';
 import { registerApprovalHandler } from '../approvals/index.js';
 import { bindGrantThread } from './db/worker-channel-grants.js';
-import { delegateTask, requestDelegateTaskHold, validateDelegateTask } from './delegate-task.js';
-import { finalizeWorkerTaskIfRunning } from './finalize.js';
+import { delegateTask, requestDelegateTaskHold, validateDelegateTask } from './delegate/delegate-task.js';
+import { finalizeWorkerTaskIfRunning } from './report/finalize.js';
 import {
   WORKER_DELEGATE_ACTION,
   WORKER_LEND_CONVERSATION_ACTION,
   workerDelegate,
   workerLendConversation,
 } from './guard.js';
-import { lendConversation, requestLendConversationHold, validateLendConversation } from './lend-conversation.js';
-import { isLentThread, rememberLentThread } from './lent-threads.js';
+import { lendConversation, requestLendConversationHold, validateLendConversation } from './lend/lend-conversation.js';
+import { isLentThread, rememberLentThread } from './lend/lent-threads.js';
 import { replyToCaller } from './notify.js';
-import { sendProgressNote } from './progress-notes.js';
-import { askPrincipal, answerWorkerQuestion } from './questions.js';
-import { recordReportDraft, workerDone } from './report-draft.js';
+import { sendProgressNote } from './report/progress-notes.js';
+import { askPrincipal, answerWorkerQuestion } from './ask/questions.js';
+import { recordReportDraft, workerDone } from './report/report-draft.js';
 
 registerDeliveryAction(WORKER_DELEGATE_ACTION, delegateTask, {
   guardAction: workerDelegate,

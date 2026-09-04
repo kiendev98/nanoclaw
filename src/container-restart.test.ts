@@ -11,7 +11,7 @@ const mockKillContainer = vi.fn<(id: string, reason: string, onExit?: () => void
 const mockWakeContainer = vi.fn();
 vi.mock('./container-runner.js', () => ({
   isContainerRunning: (...args: unknown[]) => mockIsContainerRunning(args[0] as string),
-  killContainer: (...args: unknown[]) =>
+  restartContainer: (...args: unknown[]) =>
     mockKillContainer(args[0] as string, args[1] as string, args[2] as (() => void) | undefined),
   wakeContainer: (...args: unknown[]) => mockWakeContainer(...args),
 }));
@@ -106,7 +106,7 @@ describe('restartAgentGroupContainers', () => {
     expect(msg.onWake).toBe(true);
     expect(JSON.parse(msg.content).text).toBe('Resuming.');
 
-    // Should pass an onExit callback to killContainer
+    // Should pass an onExit callback to restartContainer
     expect(mockKillContainer).toHaveBeenCalledTimes(1);
     const onExit = mockKillContainer.mock.calls[0][2];
     expect(typeof onExit).toBe('function');

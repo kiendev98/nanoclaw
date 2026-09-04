@@ -11,17 +11,17 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createAgentGroup } from '../../db/agent-groups.js';
-import { closeDb, initTestDb } from '../../db/connection.js';
-import { runMigrations } from '../../db/migrations/index.js';
-import type { Session } from '../../types.js';
+import { createAgentGroup } from '../../../db/agent-groups.js';
+import { closeDb, initTestDb } from '../../../db/connection.js';
+import { runMigrations } from '../../../db/migrations/index.js';
+import type { Session } from '../../../types.js';
 
 const { refusals, holds } = vi.hoisted(() => ({
   refusals: [] as string[],
   holds: [] as Array<Record<string, unknown>>,
 }));
 
-vi.mock('./notify.js', () => ({
+vi.mock('../notify.js', () => ({
   deliverToSession: vi.fn().mockResolvedValue(undefined),
   replyToCaller: (_session: Session, text: string) => {
     refusals.push(text);
@@ -29,7 +29,7 @@ vi.mock('./notify.js', () => ({
   },
 }));
 
-vi.mock('../approvals/index.js', () => ({
+vi.mock('../../approvals/index.js', () => ({
   requestApproval: (opts: { payload: Record<string, unknown> }) => {
     holds.push(opts.payload);
     return Promise.resolve();
@@ -129,7 +129,7 @@ describe('delegateTask', () => {
   const request = { repository: 'nanoclaw', task: 'add a flag', threadId: 'thread-1' };
 
   it('creates the task and tells the caller one report is coming', async () => {
-    const { findRunningTask } = await import('./db/worker-tasks.js');
+    const { findRunningTask } = await import('../db/worker-tasks.js');
     await delegateTask(request, PRINCIPAL);
 
     expect(await findRunningTask('sess-worker')).toBeDefined();
@@ -140,7 +140,7 @@ describe('delegateTask', () => {
   // works one at a time. Accepting a second would leave the first running with
   // nobody left to report it.
   it('refuses a second task while the worker is still on the first', async () => {
-    const { findRunningTask } = await import('./db/worker-tasks.js');
+    const { findRunningTask } = await import('../db/worker-tasks.js');
     await delegateTask(request, PRINCIPAL);
     const first = await findRunningTask('sess-worker');
 

@@ -8,7 +8,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 const killContainer = vi.fn();
 vi.mock('./container-runner.js', () => ({
   isContainerRunning: vi.fn().mockReturnValue(true),
-  restartContainer: (sessionId: string, reason: string, onExit?: () => void) => killContainer(sessionId, reason, onExit),
+  restartContainer: (sessionId: string, reason: string, onExit?: () => void) =>
+    killContainer(sessionId, reason, onExit),
 }));
 
 const requestWake = vi.fn().mockResolvedValue(true);

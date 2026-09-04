@@ -10,13 +10,13 @@
  * missed one — C8's guarantee holds by construction rather than by a rule about
  * late answers.
  */
-import { log } from '../../log.js';
-import type { Session } from '../../types.js';
-import { consumeQuestion, createQuestion, findOpenQuestion, getQuestion } from './db/worker-questions.js';
-import { findRunningTask } from './db/worker-tasks.js';
-import { generateId } from './ids.js';
-import { deliverToSession, replyToCaller } from './notify.js';
-import type { WorkerQuestion } from './types.js';
+import { log } from '../../../log.js';
+import type { Session } from '../../../types.js';
+import { consumeQuestion, createQuestion, findOpenQuestion, getQuestion } from '../db/worker-questions.js';
+import { findRunningTask } from '../db/worker-tasks.js';
+import { generateId } from '../ids.js';
+import { deliverToSession, replyToCaller } from '../notify.js';
+import type { WorkerQuestion } from '../types.js';
 
 /** Called on a HELPER session. */
 export async function askPrincipal(content: Record<string, unknown>, session: Session): Promise<void> {

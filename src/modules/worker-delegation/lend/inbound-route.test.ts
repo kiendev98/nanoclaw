@@ -7,36 +7,36 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { closeDb, initTestDb } from '../../db/connection.js';
-import { runMigrations } from '../../db/migrations/index.js';
+import { closeDb, initTestDb } from '../../../db/connection.js';
+import { runMigrations } from '../../../db/migrations/index.js';
 
 const { written, wakes } = vi.hoisted(() => ({
   written: [] as Array<{ agentGroupId: string; sessionId: string; threadId: string | null }>,
   wakes: [] as string[],
 }));
 
-vi.mock('../../session-manager.js', () => ({
+vi.mock('../../../session-manager.js', () => ({
   writeSessionMessage: (agentGroupId: string, sessionId: string, msg: { threadId: string | null }) => {
     written.push({ agentGroupId, sessionId, threadId: msg.threadId });
     return Promise.resolve();
   },
 }));
 
-vi.mock('../../db/sessions.js', () => ({
+vi.mock('../../../db/sessions.js', () => ({
   getSession: (id: string) => Promise.resolve({ id, agent_group_id: 'ag-worker' }),
 }));
 
-vi.mock('../../request-wake.js', () => ({
+vi.mock('../../../request-wake.js', () => ({
   requestWake: (session: { id: string }) => {
     wakes.push(session.id);
     return Promise.resolve(true);
   },
 }));
 
-const { createGrant } = await import('./db/worker-channel-grants.js');
-const { createTask } = await import('./db/worker-tasks.js');
+const { createGrant } = await import('../db/worker-channel-grants.js');
+const { createTask } = await import('../db/worker-tasks.js');
 const { deliverToLentConversation } = await import('./inbound-route.js');
-import type { WorkerChannelGrant, WorkerTask } from './types.js';
+import type { WorkerChannelGrant, WorkerTask } from '../types.js';
 
 const NOW = new Date().toISOString();
 
@@ -117,7 +117,7 @@ describe('deliverToLentConversation', () => {
   });
 
   it('leaves a released thread to the ordinary fan-out', async () => {
-    const { releaseGrant } = await import('./db/worker-channel-grants.js');
+    const { releaseGrant } = await import('../db/worker-channel-grants.js');
     await createTask(task);
     await createGrant(grant);
     await releaseGrant('wt-1', NOW);

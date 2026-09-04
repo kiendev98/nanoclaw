@@ -6,11 +6,11 @@
  * Only the last statement is the answer (B2), and nothing here is ever
  * delivered: finalize reads the column once.
  */
-import { log } from '../../log.js';
-import type { Session } from '../../types.js';
-import { findRunningTask, setDraftAnswer } from './db/worker-tasks.js';
+import { log } from '../../../log.js';
+import type { Session } from '../../../types.js';
+import { findRunningTask, setDraftAnswer } from '../db/worker-tasks.js';
 import { finalizeWorkerTaskIfRunning } from './finalize.js';
-import { replyToCaller } from './notify.js';
+import { replyToCaller } from '../notify.js';
 
 function readText(content: Record<string, unknown>): string {
   return typeof content.text === 'string' ? content.text.trim() : '';

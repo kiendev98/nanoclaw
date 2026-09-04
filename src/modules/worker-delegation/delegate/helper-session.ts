@@ -13,20 +13,20 @@
  */
 import crypto from 'crypto';
 
-import { createAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
-import { getContainerConfig } from '../../db/container-configs.js';
-import { isUniqueViolation } from '../../db/errors.js';
-import { groupFolderExistsOnDisk } from '../../group-folder.js';
-import { initGroupFilesystem } from '../../group-init.js';
-import { log } from '../../log.js';
-import { resolveSystemSession } from '../../session-manager.js';
-import type { AgentGroup, Session } from '../../types.js';
-import { createHelper, getHelperByRepo } from './db/worker-helpers.js';
-import { generateId } from './ids.js';
-import { createWorkerSession, findWorkerSession, threadKey } from './db/worker-sessions.js';
+import { createAgentGroup, getAgentGroupByFolder } from '../../../db/agent-groups.js';
+import { getContainerConfig } from '../../../db/container-configs.js';
+import { isUniqueViolation } from '../../../db/errors.js';
+import { groupFolderExistsOnDisk } from '../../../group-folder.js';
+import { initGroupFilesystem } from '../../../group-init.js';
+import { log } from '../../../log.js';
+import { resolveSystemSession } from '../../../session-manager.js';
+import type { AgentGroup, Session } from '../../../types.js';
+import { createHelper, getHelperByRepo } from '../db/worker-helpers.js';
+import { generateId } from '../ids.js';
+import { createWorkerSession, findWorkerSession, threadKey } from '../db/worker-sessions.js';
 import type { ResolvedRepo } from './repo-registry.js';
 import { ensureWorktree } from './worktree.js';
-import type { WorkerHelper, WorkerSession } from './types.js';
+import type { WorkerHelper, WorkerSession } from '../types.js';
 
 /** Bounded, separator-free, and stable across restarts. */
 function workerThreadId(repoName: string, messagingGroupId: string, threadId: string | null): string {

@@ -7,10 +7,10 @@
  * seconds apart, and a note past either bound is dropped and logged rather than
  * queued (Q8).
  */
-import { log } from '../../log.js';
-import type { Session } from '../../types.js';
-import { MAX_PROGRESS_NOTES, findRunningTask, spendProgressNoteAllowance } from './db/worker-tasks.js';
-import { deliverToSession, replyToCaller } from './notify.js';
+import { log } from '../../../log.js';
+import type { Session } from '../../../types.js';
+import { MAX_PROGRESS_NOTES, findRunningTask, spendProgressNoteAllowance } from '../db/worker-tasks.js';
+import { deliverToSession, replyToCaller } from '../notify.js';
 
 export async function sendProgressNote(content: Record<string, unknown>, session: Session): Promise<void> {
   const text = typeof content.text === 'string' ? content.text.trim() : '';

@@ -8,19 +8,19 @@
  * container's own tool gate is inside the untrusted container and is bypassed
  * by writing the outbound system row directly.
  */
-import { getAgentGroup } from '../../db/agent-groups.js';
-import { log } from '../../log.js';
-import type { Session } from '../../types.js';
-import { requestApproval } from '../approvals/index.js';
-import { isUniqueViolation } from '../../db/errors.js';
-import { createTask, findRunningTask } from './db/worker-tasks.js';
+import { getAgentGroup } from '../../../db/agent-groups.js';
+import { log } from '../../../log.js';
+import type { Session } from '../../../types.js';
+import { requestApproval } from '../../approvals/index.js';
+import { isUniqueViolation } from '../../../db/errors.js';
+import { createTask, findRunningTask } from '../db/worker-tasks.js';
 import { ensureHelperAgentGroup, ensureHelperSession, providerOf } from './helper-session.js';
-import { deliverToSession, replyToCaller } from './notify.js';
-import { WORKER_DELEGATE_ACTION } from './guard.js';
-import { generateId } from './ids.js';
+import { deliverToSession, replyToCaller } from '../notify.js';
+import { WORKER_DELEGATE_ACTION } from '../guard.js';
+import { generateId } from '../ids.js';
 import { describeRefusal, isRepoRefusal, resolveRepo } from './repo-registry.js';
 import { WorktreeError } from './worktree.js';
-import type { WorkerTask } from './types.js';
+import type { WorkerTask } from '../types.js';
 
 interface DelegateRequest {
   repository: string;
