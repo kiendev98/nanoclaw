@@ -20,7 +20,6 @@ import { registerReconcileEnqueue } from './reconcile-feeds.js';
 import { createReconcileQueue, type InProcessReconcileQueue } from './reconcile-queue.js';
 import { reconcileSession } from './reconcile-session.js';
 import { sessionKey } from './reconcile.js';
-import { runDetachedFromMailboxContext } from './session-manager.js';
 
 export {
   ABSOLUTE_CEILING_MS,
@@ -72,10 +71,6 @@ export function startHostSweep(): void {
   running = true;
   queue = createReconcileQueue({
     reconcile: reconcileSession,
-    // A mail write enqueues from inside the mailbox session it just wrote to.
-    // The job runs later, when that session has closed, so it must not carry
-    // the session's held key into its own reconcile.
-    detachJobContext: runDetachedFromMailboxContext,
     singletons: {
       // Re-heal the egress network so already-running agents keep their
       // gateway hop if it was detached out-of-band. Best-effort: a heal

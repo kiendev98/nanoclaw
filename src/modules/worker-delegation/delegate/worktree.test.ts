@@ -23,7 +23,7 @@ const { workspaceRoot } = vi.hoisted(() => {
   return { workspaceRoot: root };
 });
 
-const { ensureWorktree, WorktreeError, workerBranchName } = await import('./worktree.js');
+const { ensureWorktree, WorktreeError, workerBranchName, workerWorktreePath } = await import('./worktree.js');
 
 let tmp: string;
 let repoPath: string;
@@ -210,6 +210,48 @@ describe('ensureWorktree with a submodule', () => {
     const again = ensureWorktree(repoPath, 'nanoclaw', 'sess-1');
 
     expect(fs.readFileSync(path.join(again.worktreePath, 'vendor/lib/in-progress.txt'), 'utf-8')).toBe('half-done\n');
+  });
+
+  // A stanza outlives the submodule it named. Both routes fail on it, and on
+  // every retry, so refusing would strand every worker on this repository.
+  it('leaves a stale .gitmodules stanza empty instead of refusing the task', () => {
+    git(repoPath, ['rm', '--quiet', '-r', 'vendor/lib']);
+    fs.writeFileSync(
+      path.join(repoPath, '.gitmodules'),
+      '[submodule "shared-lib"]\n\tpath = vendor/lib\n\turl = ./shared-lib\n',
+    );
+    git(repoPath, ['add', '.gitmodules']);
+    git(repoPath, ['commit', '--quiet', '-m', 'remove the submodule, keep the stanza']);
+
+    const handle = ensureWorktree(repoPath, 'nanoclaw', 'sess-1');
+
+    expect(fs.existsSync(path.join(handle.worktreePath, '.git'))).toBe(true);
+    expect(fs.existsSync(path.join(handle.worktreePath, 'vendor/lib/lib.txt'))).toBe(false);
+  });
+
+  // `git config --get-regexp` exits 1 on no match, which threw a raw git error
+  // carrying a host path — the one thing WorktreeError exists to prevent.
+  it('treats a .gitmodules with no path key as no submodules', () => {
+    fs.writeFileSync(path.join(repoPath, '.gitmodules'), '# nothing declared here\n');
+    git(repoPath, ['add', '.gitmodules']);
+    git(repoPath, ['commit', '--quiet', '-m', 'empty gitmodules']);
+
+    const handle = ensureWorktree(repoPath, 'nanoclaw', 'sess-2');
+
+    expect(fs.existsSync(path.join(handle.worktreePath, '.git'))).toBe(true);
+  });
+
+  // Both routes refuse a directory that already holds files, so an interrupted
+  // attempt would otherwise fail on every retry.
+  it('leaves a half-written submodule directory alone instead of refusing', () => {
+    const worktreePath = workerWorktreePath('nanoclaw', 'sess-3');
+    git(repoPath, ['worktree', 'add', '--quiet', '-b', workerBranchName('sess-3'), worktreePath]);
+    fs.writeFileSync(path.join(worktreePath, 'vendor/lib/leftover.txt'), 'half\n');
+
+    const handle = ensureWorktree(repoPath, 'nanoclaw', 'sess-3');
+
+    expect(handle.worktreePath).toBe(worktreePath);
+    expect(fs.readFileSync(path.join(worktreePath, 'vendor/lib/leftover.txt'), 'utf-8')).toBe('half\n');
   });
 
   // E3 again: the submodule refusal carries its own message, and the agent

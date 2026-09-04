@@ -54,13 +54,38 @@ function commitIdentity(repoName: string): { name: string; email: string } {
  */
 const GIT_TIMEOUT_MS = 30_000;
 
-function git(cwd: string, args: string[]): string {
+/**
+ * One budget for every submodule of one worktree, network fallbacks included.
+ *
+ * Each fallback clone reaches the remote on the same host thread. A per-call
+ * timeout bounds one clone and not the pass, so a repository with several
+ * uninitialized submodules could hold the host for a multiple of it.
+ */
+const SUBMODULE_BUDGET_MS = 60_000;
+
+function git(cwd: string, args: string[], timeoutMs: number = GIT_TIMEOUT_MS): string {
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: GIT_TIMEOUT_MS,
+    timeout: timeoutMs,
   }).trim();
+}
+
+/**
+ * Run git where a non-zero exit is an answer rather than a fault.
+ *
+ * `git config --get-regexp` exits 1 when nothing matches, and `rev-parse` exits
+ * 128 for a path that is not a gitlink. Both are states this module reads.
+ */
+function gitOrNull(cwd: string, args: string[]): string | null {
+  /* eslint-disable no-catch-all/no-catch-all -- the exit status is the result */
+  try {
+    return git(cwd, args);
+  } catch {
+    return null;
+  }
+  /* eslint-enable no-catch-all/no-catch-all */
 }
 
 interface DeclaredSubmodule {
@@ -83,12 +108,24 @@ interface DeclaredSubmodule {
  * A worktree of that store costs 8KB and reaches no network at all.
  */
 function ensureSubmodules(repoPath: string, worktreePath: string, repoName: string, helperSessionId: string): void {
+  const deadline = Date.now() + SUBMODULE_BUDGET_MS;
+
   for (const submodule of declaredSubmodules(worktreePath)) {
     const target = path.join(worktreePath, submodule.path);
     if (fs.existsSync(path.join(target, '.git'))) continue;
 
     try {
-      placeSubmodule(repoPath, worktreePath, submodule, target);
+      const unresolvable = placeSubmodule(repoPath, worktreePath, submodule, target, deadline);
+      if (!unresolvable) continue;
+      // A declaration this checkout cannot satisfy is the repository's shape,
+      // not a fault of the delegation. Refusing the task would strand every
+      // worker on a repository carrying one stale stanza.
+      log.warn('Worker submodule left empty', {
+        repoName,
+        helperSessionId,
+        submodule: submodule.path,
+        reason: unresolvable,
+      });
     } catch (err) {
       log.error('Worker submodule could not be checked out', {
         repoName,
@@ -113,7 +150,17 @@ function ensureSubmodules(repoPath: string, worktreePath: string, repoName: stri
 function declaredSubmodules(worktreePath: string): DeclaredSubmodule[] {
   if (!fs.existsSync(path.join(worktreePath, '.gitmodules'))) return [];
 
-  const config = git(worktreePath, ['config', '--file', '.gitmodules', '--get-regexp', '^submodule\\..*\\.path$']);
+  // `--get-regexp` exits 1 when nothing matches, which a `.gitmodules` holding
+  // only comments or a stanza without a path does. That is no submodules.
+  const config = gitOrNull(worktreePath, [
+    'config',
+    '--file',
+    '.gitmodules',
+    '--get-regexp',
+    '^submodule\\..*\\.path$',
+  ]);
+  if (config === null) return [];
+
   return config
     .split('\n')
     .map((line) => {
@@ -134,25 +181,45 @@ function declaredSubmodules(worktreePath: string): DeclaredSubmodule[] {
  * the superproject points at. Both cases need the remote, and nothing local
  * can answer them.
  */
-function placeSubmodule(repoPath: string, worktreePath: string, submodule: DeclaredSubmodule, target: string): void {
-  if (placeFromSourceClone(repoPath, worktreePath, submodule, target)) return;
-  git(worktreePath, ['submodule', 'update', '--init', '--', submodule.path]);
-}
-
-/** True when the submodule now stands in the worktree, taken from local objects. */
-function placeFromSourceClone(
+function placeSubmodule(
   repoPath: string,
   worktreePath: string,
   submodule: DeclaredSubmodule,
   target: string,
-): boolean {
+  deadline: number,
+): string | null {
+  // A stanza whose path is no longer a gitlink outlives the submodule it
+  // named. Neither route can satisfy it, and both fail on the retry too.
+  const commit = gitOrNull(worktreePath, ['rev-parse', `HEAD:${submodule.path}`]);
+  if (!commit) return 'the declared path is not a gitlink in HEAD';
+
+  // Both routes refuse a directory that already holds files, so an interrupted
+  // attempt would otherwise fail here forever.
+  if (holdsFiles(target)) return 'the path already holds files from an earlier attempt';
+
+  if (placeFromSourceClone(repoPath, submodule, target, commit)) return null;
+
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return 'the submodule budget was spent before this clone';
+
+  git(worktreePath, ['submodule', 'update', '--init', '--', submodule.path], remaining);
+  return null;
+}
+
+/** True when a path exists and is a directory holding at least one entry. */
+function holdsFiles(target: string): boolean {
+  return fs.existsSync(target) && fs.statSync(target).isDirectory() && fs.readdirSync(target).length > 0;
+}
+
+/** True when the submodule now stands in the worktree, taken from local objects. */
+function placeFromSourceClone(repoPath: string, submodule: DeclaredSubmodule, target: string, commit: string): boolean {
   const moduleDir = path.join(commonGitDir(repoPath), 'modules', submodule.name);
   if (!fs.existsSync(moduleDir)) return false;
 
   try {
-    const commit = git(worktreePath, ['rev-parse', `HEAD:${submodule.path}`]);
     git(moduleDir, ['worktree', 'add', '--detach', target, commit]);
   } catch (err) {
+    // The store exists but lacks this commit, so only the remote has it.
     log.info('Worker submodule not available locally, falling back to a clone', {
       submodule: submodule.path,
       err,

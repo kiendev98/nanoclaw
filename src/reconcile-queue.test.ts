@@ -29,27 +29,10 @@ afterEach(() => {
 });
 
 describe('reconcile queue', () => {
-  // A producer enqueues from inside a resource it holds, and the job runs
-  // after that resource is released. Carrying the hold into the job made a
-  // mailbox re-entrancy guard refuse a reconcile that was never nested.
-  it('runs a job detached from the context that enqueued it', async () => {
-    const held = new AsyncLocalStorage<string>();
-    const seen: Array<string | undefined> = [];
-    const queue = createReconcileQueue({
-      reconcile: async () => {
-        seen.push(held.getStore());
-      },
-      singletons: noopSingletons,
-      detachJobContext: (fn) => held.run('detached', fn),
-    });
-
-    held.run('enqueuer', () => queue.add(sessionKey('s-1')));
-    await queue.idle();
-
-    expect(seen).toEqual(['detached']);
-  });
-
-  it('inherits the enqueuer context when no detach is configured', async () => {
+  // Documents the property `reconcile-session.ts` compensates for: a job runs
+  // in the async context that enqueued it, so a hold the producer owned is
+  // still visible inside the job. Detaching here would hide a real nesting.
+  it('runs a job in the async context that enqueued it', async () => {
     const held = new AsyncLocalStorage<string>();
     const seen: Array<string | undefined> = [];
     const queue = createReconcileQueue({

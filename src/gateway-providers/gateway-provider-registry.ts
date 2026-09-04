@@ -138,7 +138,20 @@ export function registerGatewayProvider(kind: GatewayProviderKind, factory: Gate
   if (registry.has(kind)) {
     throw new Error(`Gateway provider already registered: ${kind}`);
   }
-  registry.set(kind, factory);
+  registry.set(kind, () => withDeclaredCredentials(factory()));
+}
+
+/**
+ * Read an absent `injectsCredentials` as true.
+ *
+ * Overlays are copied in by a skill and are never type-checked against this
+ * tree, so one written before the field existed reports `undefined`. Every
+ * gateway that predates it is a credential proxy. Reading absence as false
+ * would drop the token that proxy needs and withhold its own skill.
+ */
+function withDeclaredCredentials(provider: GatewayProvider): GatewayProvider {
+  const declared = (provider as { injectsCredentials?: boolean }).injectsCredentials;
+  return declared === undefined ? { ...provider, injectsCredentials: true } : provider;
 }
 
 export function getGatewayProviderFactory(kind: GatewayProviderKind): GatewayProviderFactory | undefined {

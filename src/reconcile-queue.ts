@@ -39,12 +39,6 @@ export interface ReconcileQueueOptions {
   singletons: Record<SingletonKey, () => Promise<void>>;
   /** Parallel reconciles. Default 1 — the serial profile of the sweep loop. */
   concurrency?: number;
-  /**
-   * Wrap a dispatched job so it starts detached from the context that enqueued
-   * it. A producer may enqueue from inside a resource it holds, and the job
-   * must not inherit that hold. Defaults to running the job as-is.
-   */
-  detachJobContext?: <T>(fn: () => T) => T;
 }
 
 interface Delayed {
@@ -56,7 +50,6 @@ class InProcessReconcileQueue implements ReconcileQueue {
   private readonly reconcile: ReconcileFn;
   private readonly singletons: Record<SingletonKey, () => Promise<void>>;
   private readonly concurrency: number;
-  private readonly detachJobContext: <T>(fn: () => T) => T;
 
   private readonly ready: ReconcileKey[] = [];
   private readonly readySet = new Set<ReconcileKey>();
@@ -72,7 +65,6 @@ class InProcessReconcileQueue implements ReconcileQueue {
     this.reconcile = options.reconcile;
     this.singletons = options.singletons;
     this.concurrency = options.concurrency ?? 1;
-    this.detachJobContext = options.detachJobContext ?? ((fn) => fn());
   }
 
   add(key: ReconcileKey): void {
@@ -135,9 +127,7 @@ class InProcessReconcileQueue implements ReconcileQueue {
       this.readySet.delete(key);
       this.active++;
       this.runningKeys.add(key);
-      this.detachJobContext(() => {
-        void this.run(key);
-      });
+      void this.run(key);
     }
   }
 

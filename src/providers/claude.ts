@@ -24,6 +24,7 @@
 import { resolveClaudeExecutable } from './claude-executable.js';
 import { readEnvFile } from '../env.js';
 import { getGatewayProvider } from '../gateway-providers/index.js';
+import { log } from '../log.js';
 import { registerProviderContainerConfig } from './provider-container-registry.js';
 
 registerProviderContainerConfig('claude', (ctx) => {
@@ -31,18 +32,21 @@ registerProviderContainerConfig('claude', (ctx) => {
   const env: Record<string, string> = {};
   if (dotenv.ANTHROPIC_BASE_URL) {
     const gateway = getGatewayProvider();
-    // Refuse the spawn rather than ship a token nothing rewrites. The silent
-    // shape is worse: the agent sends `Bearer placeholder`, every turn fails
-    // auth inside the runtime, and the host logs nothing.
-    if (!gateway.injectsCredentials) {
-      throw new Error(
-        `ANTHROPIC_BASE_URL is set, but the '${gateway.kind}' gateway injects no credentials. ` +
-          'The agent would send a placeholder token to that endpoint. ' +
-          'Unset ANTHROPIC_BASE_URL, or set NANOCLAW_GATEWAY_PROVIDER=onecli.',
-      );
+    if (gateway.injectsCredentials) {
+      env.ANTHROPIC_BASE_URL = dotenv.ANTHROPIC_BASE_URL;
+      env.ANTHROPIC_AUTH_TOKEN = 'placeholder';
+    } else {
+      // Drop the pair rather than ship a token nothing rewrites, and rather
+      // than refuse. A throw here runs before the gateway seam, so it aborts
+      // every spawn and leaves the message pending through retry after retry.
+      // That is the failure the `direct` default exists to remove.
+      // Dropping it leaves the runtime on its own credentials, which is what
+      // a gateway injecting nothing already assumes.
+      log.warn('ANTHROPIC_BASE_URL ignored — the selected gateway injects no credentials', {
+        gateway: gateway.kind,
+        hint: 'Unset ANTHROPIC_BASE_URL, or set NANOCLAW_GATEWAY_PROVIDER=onecli.',
+      });
     }
-    env.ANTHROPIC_BASE_URL = dotenv.ANTHROPIC_BASE_URL;
-    env.ANTHROPIC_AUTH_TOKEN = 'placeholder';
   }
 
   // Where THIS host keeps `claude`, for a runner executing outside a

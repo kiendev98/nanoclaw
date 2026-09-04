@@ -100,16 +100,21 @@ describe('claude provider container config', () => {
     expect(contribution.env?.ANTHROPIC_AUTH_TOKEN).toBe('placeholder');
   });
 
-  // The silent failure this guard replaces: an install that kept its OneCLI
-  // base URL after the default gateway changed sent `Bearer placeholder` to
-  // that proxy, and every agent turn failed auth with no host-side error.
-  it('refuses the spawn when the gateway rewrites no Authorization header', () => {
+  // An install that kept its OneCLI base URL after the default gateway changed
+  // would otherwise send `Bearer placeholder` to that proxy and fail auth every
+  // turn. Dropping the pair leaves the runtime on its own credentials.
+  //
+  // This must not throw. The contribution runs before the gateway seam, so a
+  // throw aborts every spawn and leaves the message pending through retry after
+  // retry — the failure the `direct` default exists to remove.
+  it('drops the proxy pair when the gateway rewrites no Authorization header', async () => {
     install.baseUrl = 'https://proxy.example/v1';
     install.injectsCredentials = false;
 
-    expect(() => getProviderContainerConfig('claude')!(contextWith(binDir))).toThrow(
-      /NANOCLAW_GATEWAY_PROVIDER=onecli/,
-    );
+    const contribution = await getProviderContainerConfig('claude')!(contextWith(binDir));
+
+    expect(contribution.env?.ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(contribution.env?.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
   });
 
   it('contributes no proxy env when .env declares no base URL', async () => {
