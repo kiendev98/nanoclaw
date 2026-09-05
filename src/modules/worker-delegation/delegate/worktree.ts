@@ -126,14 +126,39 @@ function ensureSubmodules(repoPath: string, worktreePath: string, repoName: stri
   // subprocess per iteration for an answer already held.
   const modulesRoot = sourceModulesRoot(repoPath, repoName, helperSessionId);
   const deadline = Date.now() + SUBMODULE_BUDGET_MS;
+  const prunable: string[] = [];
 
   for (const submodule of declared) {
     const target = path.join(worktreePath, submodule.path);
-    if (fs.existsSync(path.join(target, '.git'))) continue;
+    // One outcome is not the repository's shape and does not heal: a worktree
+    // that took neither the lock nor the withdrawal. Reading the directory back
+    // is what makes a retry find that residual, because it carries a `.git` and
+    // a check on that alone skips it forever.
+    const standing = submoduleStanding(modulesRoot, submodule, target);
+    if (standing === 'sound') continue;
+    if (standing === 'prunable') {
+      log.error('Worker submodule holds an unlocked worktree', {
+        repoName,
+        helperSessionId,
+        submodule: submodule.path,
+      });
+      prunable.push(submodule.path);
+      continue;
+    }
 
     try {
       const unresolvable = placeSubmodule(worktreePath, modulesRoot, submodule, target, deadline);
       if (!unresolvable) continue;
+      if (submoduleStanding(modulesRoot, submodule, target) === 'prunable') {
+        log.error('Worker submodule holds an unlocked worktree', {
+          repoName,
+          helperSessionId,
+          submodule: submodule.path,
+          reason: unresolvable,
+        });
+        prunable.push(submodule.path);
+        continue;
+      }
       // A declaration this checkout cannot satisfy is the repository's shape,
       // not a fault of the delegation. Refusing the task would strand every
       // worker on a repository carrying one stale stanza. The path is usually
@@ -156,6 +181,69 @@ function ensureSubmodules(repoPath: string, worktreePath: string, repoName: stri
       );
     }
   }
+
+  // Refusing inside the loop would fail the whole pass for one broken
+  // submodule, and every sound one after it would never be placed. Collecting
+  // keeps each submodule's fault to itself and still puts a person in the loop
+  // before a worker writes into a directory one prune from deletion.
+  if (prunable.length > 0) {
+    throw new WorktreeError(
+      `The ${prunable.map((entry) => `"${entry}"`).join(', ')} submodule of "${repoName}" holds a worktree that is neither locked nor withdrawn. The operator has the details.`,
+    );
+  }
+}
+
+/**
+ * How a submodule directory stands before this pass touches it.
+ *
+ * `sound` is the skip: either the directory is a checkout no prune can reach,
+ * or it is a worktree the source store holds locked. `prunable` is the residual
+ * a failed lock and a failed withdrawal leave behind — it carries a `.git`, so
+ * a check on that alone reads it as placed and never looks again.
+ */
+function submoduleStanding(
+  modulesRoot: string | null,
+  submodule: DeclaredSubmodule,
+  target: string,
+): 'absent' | 'sound' | 'prunable' {
+  if (!fs.existsSync(path.join(target, '.git'))) return 'absent';
+  if (modulesRoot === null) return 'sound';
+
+  const moduleDir = path.join(modulesRoot, submodule.name);
+  if (!fs.existsSync(moduleDir)) return 'sound';
+  return isPrunableWorktree(moduleDir, target) ? 'prunable' : 'sound';
+}
+
+/**
+ * Does the store list this path as a worktree it does not hold locked?
+ *
+ * `worktree list --porcelain` prints one block per worktree, a `worktree <path>`
+ * line first and a bare `locked` line when the lock took. A cloned submodule is
+ * an ordinary directory and appears in no block, so absence reads as sound.
+ */
+function isPrunableWorktree(moduleDir: string, target: string): boolean {
+  const listed = gitOrNull(moduleDir, ['worktree', 'list', '--porcelain']);
+  if (listed === null) return false;
+
+  const wanted = realPath(target);
+  for (const block of listed.split('\n\n')) {
+    const lines = block.split('\n');
+    const head = lines.find((line) => line.startsWith('worktree '));
+    if (head === undefined || realPath(head.slice('worktree '.length)) !== wanted) continue;
+    return !lines.some((line) => line === 'locked' || line.startsWith('locked '));
+  }
+  return false;
+}
+
+/** git prints the resolved path, and the caller builds an unresolved one. */
+function realPath(target: string): string {
+  /* eslint-disable no-catch-all/no-catch-all -- an unresolvable path is the result */
+  try {
+    return fs.realpathSync(target);
+  } catch {
+    return path.resolve(target);
+  }
+  /* eslint-enable no-catch-all/no-catch-all */
 }
 
 /**
@@ -217,15 +305,9 @@ function placeSubmodule(
 
   const placement = placeFromSourceClone(modulesRoot, submodule, target, commit);
   if (placement === 'placed') return null;
-  if (placement === 'unlocked') {
-    // Two git failures on one directory is a broken store, and what it leaves
-    // does not heal: the target now carries a `.git`, so the skip at the top
-    // of the pass takes it on every retry and no later run looks at it again.
-    // Warning would name a prunable worktree once and then run a worker in it
-    // in silence. Refusing is the same answer this module already gives when
-    // neither route can supply a submodule, and it puts a person in the loop.
-    throw new Error('the submodule worktree could not be locked, and could not be withdrawn');
-  }
+  // The caller reads the directory back rather than trusting this word for it,
+  // so the same answer reaches a retry that never runs this function again.
+  if (placement === 'unlocked') return 'the submodule worktree could not be locked, and could not be withdrawn';
 
   const remaining = deadline - Date.now();
   if (remaining < MIN_SUBMODULE_CLONE_MS) return 'the submodule budget was spent before this clone';

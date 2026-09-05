@@ -376,6 +376,54 @@ describe('ensureWorktree with a submodule', () => {
     expect((thrown as Error).message).not.toContain(tmp);
   });
 
+  // A refusal that only fires once is the same silence with an extra step. The
+  // helper session is never persisted, so the retry is the module's own normal
+  // path, and the residual carries a `.git` that a presence check skips.
+  it('refuses the same submodule again on the retry, never adopting the residual', () => {
+    const moduleDir = path.join(repoPath, '.git', 'modules', 'shared-lib');
+    gitFault.fail = (args, cwd) => cwd === moduleDir && (args.includes('lock') || args.includes('remove'));
+
+    expect(() => withFileProtocol(() => ensureWorktree(repoPath, 'nanoclaw', 'sess-stuck-twice'))).toThrow(
+      WorktreeError,
+    );
+
+    let thrown: unknown;
+    try {
+      withFileProtocol(() => ensureWorktree(repoPath, 'nanoclaw', 'sess-stuck-twice'));
+    } catch (err) {
+      thrown = err;
+    }
+    gitFault.fail = null;
+
+    expect(thrown).toBeInstanceOf(WorktreeError);
+    expect((thrown as Error).message).toContain('vendor/lib');
+  });
+
+  // Every other failure mode here warns and moves on, so one broken submodule
+  // must not cost the worker a sound one declared beside it.
+  it('places a sound submodule even when another one cannot be locked', () => {
+    git(repoPath, [
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '--quiet',
+      '--name',
+      'second-lib',
+      modulePath,
+      'vendor/second',
+    ]);
+    git(repoPath, ['commit', '--quiet', '-m', 'add a second submodule']);
+    const brokenDir = path.join(repoPath, '.git', 'modules', 'shared-lib');
+    gitFault.fail = (args, cwd) => cwd === brokenDir && (args.includes('lock') || args.includes('remove'));
+
+    const worktreePath = workerWorktreePath('nanoclaw', 'sess-partial');
+    expect(() => withFileProtocol(() => ensureWorktree(repoPath, 'nanoclaw', 'sess-partial'))).toThrow(WorktreeError);
+    gitFault.fail = null;
+
+    expect(fs.readFileSync(path.join(worktreePath, 'vendor/second/lib.txt'), 'utf-8')).toBe('shared\n');
+  });
+
   // Every submodule of the pass takes the network route from here, and the
   // local route returns before the line that reports a fallback. Silence would
   // leave a clone-per-worker install with nothing naming the cause.
