@@ -469,6 +469,21 @@ function extractAttachmentFiles(
  */
 const activeMailboxKeys = new AsyncLocalStorage<ReadonlySet<string>>();
 
+/**
+ * The guard above refused this call. Typed so a caller can tell it apart.
+ *
+ * The set is carried in async context, so work queued from inside a session
+ * inherits that session's key and is refused even when it runs after the
+ * session closed. Such a caller is not deadlocking and has no repair to make.
+ * It should stand down and let its next pass run, not report a fault.
+ */
+export class MailboxNestingError extends Error {
+  constructor(keyId: string) {
+    super(`Nested mailbox session for ${keyId} — serialized implementations would deadlock here`);
+    this.name = 'MailboxNestingError';
+  }
+}
+
 /** Run one host operation against a session mailbox. The implementation owns persistence.
  *
  * Never call this (directly or via helpers like writeSessionMessage) from
@@ -503,7 +518,7 @@ async function runMailboxSession<T>(
   const keyId = `${agentGroupId}/${sessionId}`;
   const held = activeMailboxKeys.getStore();
   if (held?.has(keyId)) {
-    throw new Error(`Nested mailbox session for ${keyId} — serialized implementations would deadlock here`);
+    throw new MailboxNestingError(keyId);
   }
   if (provision) store.prepare(key);
   else if (!(await store.exists(key))) return undefined;

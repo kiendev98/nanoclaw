@@ -14,10 +14,22 @@ import {
   updateContainerConfigJson,
 } from './db/container-configs.js';
 import { closeDb, createAgentGroup, getDb, initTestDb, runMigrations } from './db/index.js';
+import { resetGatewayProvider } from './gateway-providers/index.js';
 import { PERSONA_PREPEND_FILE } from './group-persona.js';
 import { log } from './log.js';
 import { composeGroupProjectDoc, DEFAULT_PROJECT_DOC, type ProjectDocSpec } from './project-doc-compose.js';
 import type { AgentGroup } from './types.js';
+
+// The composer reads the install's gateway to decide whether a credential
+// skill's prose is true here. Injected rather than configured, so the suite
+// never depends on `.env` or on a reachable gateway.
+function useGateway(injectsCredentials: boolean): void {
+  resetGatewayProvider({
+    kind: injectsCredentials ? 'fake-proxy' : 'fake-direct',
+    injectsCredentials,
+    contribute: async () => ({}),
+  });
+}
 
 const CLAUDE_SPEC: ProjectDocSpec = {
   fileName: 'CLAUDE.md',
@@ -51,12 +63,14 @@ async function compose(ag: AgentGroup, spec: ProjectDocSpec = CLAUDE_SPEC): Prom
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  useGateway(true);
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
   fs.mkdirSync(TEST_ROOT, { recursive: true });
   await runMigrations(await initTestDb());
 });
 
 afterEach(async () => {
+  resetGatewayProvider(null);
   await closeDb();
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
 });
@@ -249,6 +263,7 @@ describe('composeGroupProjectDoc skill selection', () => {
   // Red if the walk stops filtering: the document would teach a skill whose
   // SKILL.md syncSkillSymlinks did not plant, which is a live contradiction.
   it('omits resident prose for a skill the group did not select', async () => {
+    useGateway(true);
     const ag = await seed('ag-skills-off', 'skills-off-group');
     await updateContainerConfigJson(ag.id, 'skills', ['welcome']);
 
@@ -258,12 +273,36 @@ describe('composeGroupProjectDoc skill selection', () => {
     expect(doc).toContain('# NanoClaw Module: core');
   });
 
-  it('inlines every shipping skill at the default selection', async () => {
+  it('inlines a credential skill when the gateway injects credentials', async () => {
+    useGateway(true);
     const ag = await seed('ag-skills-all', 'skills-all-group');
 
     const doc = await compose(ag);
 
     expect(doc).toContain('# NanoClaw Skill: onecli-gateway');
+  });
+
+  // The agent was told a proxy adds real credentials and forbidden to ask the
+  // user for a token. Under a gateway that proxies nothing that is a dead end.
+  it('omits the credential skill when the gateway injects nothing', async () => {
+    useGateway(false);
+    const ag = await seed('ag-skills-direct', 'skills-direct-group');
+
+    const doc = await compose(ag);
+
+    expect(doc).not.toContain('# NanoClaw Skill: onecli-gateway');
+    expect(doc).toContain('# NanoClaw Module: core');
+  });
+
+  it('keeps a credential skill out even when the group selected it by name', async () => {
+    useGateway(false);
+    const ag = await seed('ag-skills-named', 'skills-named-group');
+    await updateContainerConfigJson(ag.id, 'skills', ['onecli-gateway', 'welcome']);
+
+    const doc = await compose(ag);
+
+    expect(doc).not.toContain('# NanoClaw Skill: onecli-gateway');
+    expect(doc).toContain('# NanoClaw Module: core');
   });
 });
 

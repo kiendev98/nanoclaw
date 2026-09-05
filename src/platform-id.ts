@@ -23,3 +23,26 @@ export function namespacedPlatformId(channel: string, raw: string): string {
   if (channel === 'deltachat') return raw;
   return `${channel}:${raw}`;
 }
+
+/**
+ * The thread id an adapter addresses, built from the platform id of the chat
+ * and the raw id of the message that opened the thread.
+ *
+ * A Chat SDK adapter emits and accepts `<platform id>:<raw message id>`, and
+ * `channelIdFromThreadId` inverts exactly that. Posting returns the raw id
+ * alone, so anything that keeps a thread id from a post it made has to build
+ * the rest. An adapter refuses the raw id, because it decodes an id it never
+ * encoded.
+ *
+ * Native adapters carry no channel prefix and their own thread shapes, which
+ * this rule does not know. Their ids pass through untouched.
+ *
+ * @param platformId The chat address, as the adapter emits it.
+ * @param rawMessageId The id the platform gave the message that opened the
+ * thread. An id already carrying the platform prefix is returned unchanged.
+ */
+export function qualifiedThreadId(platformId: string, rawMessageId: string): string {
+  if (!platformId.includes(':')) return rawMessageId;
+  if (rawMessageId.startsWith(`${platformId}:`)) return rawMessageId;
+  return `${platformId}:${rawMessageId}`;
+}

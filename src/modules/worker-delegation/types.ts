@@ -66,7 +66,11 @@ export interface WorkerChannelGrant {
   platform_id: string;
   /** The outbound message whose delivery starts the thread. */
   root_message_id: string;
-  /** `''` until that root post is delivered and the platform names its thread. */
+  /**
+   * The thread the root post started, in the shape its adapter addresses —
+   * `qualifiedThreadId`, never the raw id delivery returns. `''` until that
+   * post is delivered and the platform names its thread.
+   */
   thread_id: string;
   local_destination_name: string;
   granted_by_session_id: string;

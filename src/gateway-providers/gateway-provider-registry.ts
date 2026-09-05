@@ -101,6 +101,16 @@ export interface GatewayProvider {
   /** Identity, for logs and selection — never a branch above the seam. */
   readonly kind: string;
   /**
+   * Whether this gateway supplies the agent's credentials at request time.
+   * A model provider config that ships a placeholder token depends on it,
+   * because nothing rewrites the Authorization header when it is false.
+   * Stated as a capability so a consumer never has to read `kind`.
+   *
+   * Read it through `injectsCredentials()`, never off the object: an overlay
+   * written before this field existed omits it, and absence is not false.
+   */
+  readonly injectsCredentials: boolean;
+  /**
    * Called per spawn, before composition validates the spec. Fail-closed: a
    * throw aborts the spawn, the inbound message stays pending, and the next
    * sweep tick retries — a session without its gateway is a session without
@@ -132,6 +142,28 @@ export function registerGatewayProvider(kind: GatewayProviderKind, factory: Gate
     throw new Error(`Gateway provider already registered: ${kind}`);
   }
   registry.set(kind, factory);
+}
+
+/**
+ * Whether this gateway supplies the agent's credentials, reading an absent
+ * declaration as true.
+ *
+ * Overlays are copied in by a skill and are never type-checked against this
+ * tree, so one written before the field existed reports `undefined`. Every
+ * gateway that predates it is a credential proxy. Reading absence as false
+ * would drop the token that proxy needs and withhold its own skill.
+ *
+ * The default is applied here rather than by wrapping the provider at
+ * registration, because no wrapper survives every overlay shape. A spread
+ * loses the prototype methods of a class instance. `Object.create` keeps them
+ * and rebinds `this` to the wrapper, so an instance reading its own state —
+ * a private field above all — throws on the first call. A Proxy needs a
+ * binding trap and still changes what `Object.keys` reports. One exported
+ * predicate hands every caller the same answer and hands the provider back
+ * untouched, exactly as its author wrote it.
+ */
+export function injectsCredentials(provider: GatewayProvider): boolean {
+  return (provider as { injectsCredentials?: boolean }).injectsCredentials !== false;
 }
 
 export function getGatewayProviderFactory(kind: GatewayProviderKind): GatewayProviderFactory | undefined {

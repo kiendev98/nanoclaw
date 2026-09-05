@@ -8,15 +8,27 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ContainerConfig } from './container-config.js';
+import { resetGatewayProvider } from './gateway-providers/index.js';
 import { log } from './log.js';
-import { stageSkillsPlugin, syncSkillSymlinks } from './skill-delivery.js';
+import { selectedSkillNames, stageSkillsPlugin, syncSkillSymlinks } from './skill-delivery.js';
 
 vi.mock('./log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
 }));
+
+function useGateway(injectsCredentials: boolean): void {
+  resetGatewayProvider({
+    kind: injectsCredentials ? 'fake-proxy' : 'fake-direct',
+    injectsCredentials,
+    contribute: async () => ({}),
+  });
+}
+
+beforeEach(() => useGateway(true));
+afterEach(() => resetGatewayProvider(null));
 
 const containerConfig: ContainerConfig = {
   mcpServers: {},
@@ -102,5 +114,38 @@ describe('stageSkillsPlugin', () => {
     stageSkillsPlugin(sessDir, { ...containerConfig, skills: ['no-such-skill'] } as ContainerConfig);
 
     expect(fs.existsSync(path.join(sessDir, 'plugin', 'skills', 'no-such-skill'))).toBe(false);
+  });
+});
+
+describe('selectedSkillNames', () => {
+  // The delivery routes and the composed project document read this one list,
+  // so a skill the gateway cannot support must leave from here.
+  it('drops a credential skill when the gateway injects nothing', () => {
+    useGateway(false);
+
+    const names = selectedSkillNames({
+      ...containerConfig,
+      skills: ['onecli-gateway', 'welcome'],
+    } as ContainerConfig);
+
+    expect(names).toEqual(['welcome']);
+  });
+
+  it('keeps a credential skill when the gateway injects credentials', () => {
+    const names = selectedSkillNames({
+      ...containerConfig,
+      skills: ['onecli-gateway', 'welcome'],
+    } as ContainerConfig);
+
+    expect(names).toEqual(['onecli-gateway', 'welcome']);
+  });
+
+  it('drops it from the shipped catalog too, not only a named selection', () => {
+    useGateway(false);
+
+    const names = selectedSkillNames({ ...containerConfig, skills: 'all' } as unknown as ContainerConfig);
+
+    expect(names).not.toContain('onecli-gateway');
+    expect(names).toContain('welcome');
   });
 });

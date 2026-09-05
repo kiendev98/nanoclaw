@@ -18,6 +18,23 @@ vi.mock('../log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
 }));
 
+// The two inputs the proxy pair depends on: what `.env` declares, and what the
+// install's gateway does about credentials.
+const install = vi.hoisted(() => ({ baseUrl: '', injectsCredentials: true }));
+
+vi.mock('../env.js', () => ({
+  readEnvFile: () => (install.baseUrl ? { ANTHROPIC_BASE_URL: install.baseUrl } : {}),
+}));
+// Only the lookup is faked. The predicate stays real, so a change to how an
+// undeclared field is read reaches this test instead of passing through a stub.
+vi.mock('../gateway-providers/index.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../gateway-providers/index.js')>()),
+  getGatewayProvider: () => ({
+    kind: install.injectsCredentials ? 'onecli' : 'direct',
+    injectsCredentials: install.injectsCredentials,
+  }),
+}));
+
 function contextWith(pathEnv: string): Parameters<NonNullable<ReturnType<typeof getProviderContainerConfig>>>[0] {
   return {
     sessionDir: '/tmp/session',
@@ -32,6 +49,8 @@ let binDir: string;
 
 beforeEach(() => {
   binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-claude-bin-'));
+  install.baseUrl = '';
+  install.injectsCredentials = true;
 });
 
 describe('claude provider container config', () => {
@@ -73,6 +92,41 @@ describe('claude provider container config', () => {
     const contribution = await getProviderContainerConfig('claude')!(contextWith(binDir));
 
     expect(contribution.env?.NANOCLAW_PROVIDER_EXECUTABLE).toBeUndefined();
+  });
+
+  it('contributes the proxy pair when the gateway injects credentials', async () => {
+    install.baseUrl = 'https://proxy.example/v1';
+
+    const contribution = await getProviderContainerConfig('claude')!(contextWith(binDir));
+
+    expect(contribution.env?.ANTHROPIC_BASE_URL).toBe('https://proxy.example/v1');
+    expect(contribution.env?.ANTHROPIC_AUTH_TOKEN).toBe('placeholder');
+  });
+
+  // An install that kept its OneCLI base URL after the default gateway changed
+  // would otherwise send `Bearer placeholder` to that proxy and fail auth every
+  // turn. Dropping the pair leaves the runtime on its own credentials.
+  //
+  // This must not throw. The contribution runs before the gateway seam, so a
+  // throw aborts every spawn and leaves the message pending through retry after
+  // retry — the failure the `direct` default exists to remove.
+  it('drops the proxy pair when the gateway rewrites no Authorization header', async () => {
+    install.baseUrl = 'https://proxy.example/v1';
+    install.injectsCredentials = false;
+
+    const contribution = await getProviderContainerConfig('claude')!(contextWith(binDir));
+
+    expect(contribution.env?.ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(contribution.env?.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+  });
+
+  it('contributes no proxy env when .env declares no base URL', async () => {
+    install.injectsCredentials = false;
+
+    const contribution = await getProviderContainerConfig('claude')!(contextWith(binDir));
+
+    expect(contribution.env?.ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(contribution.env?.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
   });
 
   it('keeps looking past a directory and finds a real binary later on PATH', async () => {

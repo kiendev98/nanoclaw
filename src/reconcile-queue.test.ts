@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'async_hooks';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createReconcileQueue } from './reconcile-queue.js';
@@ -27,6 +29,25 @@ afterEach(() => {
 });
 
 describe('reconcile queue', () => {
+  // Documents the property `reconcile-session.ts` compensates for: a job runs
+  // in the async context that enqueued it, so a hold the producer owned is
+  // still visible inside the job. Detaching here would hide a real nesting.
+  it('runs a job in the async context that enqueued it', async () => {
+    const held = new AsyncLocalStorage<string>();
+    const seen: Array<string | undefined> = [];
+    const queue = createReconcileQueue({
+      reconcile: async () => {
+        seen.push(held.getStore());
+      },
+      singletons: noopSingletons,
+    });
+
+    held.run('enqueuer', () => queue.add(sessionKey('s-1')));
+    await queue.idle();
+
+    expect(seen).toEqual(['enqueuer']);
+  });
+
   it('coalesces adds for a waiting key into one run', async () => {
     const runs: string[] = [];
     const gate = deferred();

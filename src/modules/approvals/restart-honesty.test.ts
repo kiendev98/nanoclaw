@@ -66,6 +66,7 @@ const source: GatewayApprovalSource & { decide?: ReturnType<typeof vi.fn>; listP
 
 const fakeProvider: GatewayProvider = {
   kind: 'fake-for-tests',
+  injectsCredentials: true,
   async contribute() {
     throw new Error('not under test');
   },

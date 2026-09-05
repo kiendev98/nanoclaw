@@ -5,7 +5,16 @@ vi.mock('../log.js', () => ({
 }));
 vi.mock('../config.js', () => ({ ONECLI_URL: 'http://localhost:1', ONECLI_API_KEY: 'unused' }));
 
+import { getGatewayProviderFactory } from './gateway-provider-registry.js';
 import { contributionFromArgs } from './onecli.js';
+
+describe('the onecli gateway provider', () => {
+  // A model provider that ships a placeholder token reads this flag, so the
+  // proxy that rewrites the Authorization header has to declare it.
+  it('declares that it injects credentials', () => {
+    expect(getGatewayProviderFactory('onecli')!().injectsCredentials).toBe(true);
+  });
+});
 
 describe('contributionFromArgs', () => {
   it('types the closed grammar the SDK emits: -e pairs and ro mounts', () => {

@@ -35,7 +35,7 @@ import { getSessionClaim } from './db/coordination.js';
 import { getSession, isTaskThread, updateSession } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { log } from './log.js';
-import { heartbeatPath, withExistingMailboxSession } from './session-manager.js';
+import { heartbeatPath, MailboxNestingError, withExistingMailboxSession } from './session-manager.js';
 import { getContainerStartedAtMs, isContainerRunning, killContainer, restartContainer } from './container-runner.js';
 import { requestWake } from './request-wake.js';
 import type { Session } from './types.js';
@@ -155,6 +155,18 @@ async function reconcileActiveSession(session: Session): Promise<void> {
       await maintainSessionMailbox(mailbox, session, agentGroup.id);
     });
   } catch (err) {
+    // The queue dispatches a job in the async context that enqueued it. A
+    // reconcile enqueued from inside a mailbox session inherits that session's
+    // key, so the guard refuses it even when the session has already closed.
+    // Nothing is wrong and nothing is lost. The 60s resync runs this session
+    // again from a clean context, so stand down rather than report a fault.
+    if (err instanceof MailboxNestingError) {
+      log.debug('Session mailbox busy this pass — the resync floor covers it', {
+        agentGroupId: agentGroup.id,
+        sessionId: session.id,
+      });
+      return;
+    }
     log.error('Session mailbox sweep failed', {
       agentGroupId: agentGroup.id,
       sessionId: session.id,

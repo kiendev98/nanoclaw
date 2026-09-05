@@ -15,17 +15,38 @@
  *   - ANTHROPIC_BASE_URL — so the SDK knows where to call
  *   - ANTHROPIC_AUTH_TOKEN=placeholder — so the SDK adds an
  *     Authorization: Bearer header for OneCLI to overwrite
+ *
+ * That pair only works behind a gateway that injects credentials, so this
+ * config reads the gateway capability before it contributes the pair. The
+ * check belongs here, on the side that ships the placeholder: the gateway seam
+ * is model-provider-neutral and must not learn any `ANTHROPIC_*` name.
  */
 import { resolveClaudeExecutable } from './claude-executable.js';
 import { readEnvFile } from '../env.js';
+import { getGatewayProvider, injectsCredentials } from '../gateway-providers/index.js';
+import { log } from '../log.js';
 import { registerProviderContainerConfig } from './provider-container-registry.js';
 
 registerProviderContainerConfig('claude', (ctx) => {
   const dotenv = readEnvFile(['ANTHROPIC_BASE_URL']);
   const env: Record<string, string> = {};
   if (dotenv.ANTHROPIC_BASE_URL) {
-    env.ANTHROPIC_BASE_URL = dotenv.ANTHROPIC_BASE_URL;
-    env.ANTHROPIC_AUTH_TOKEN = 'placeholder';
+    const gateway = getGatewayProvider();
+    if (injectsCredentials(gateway)) {
+      env.ANTHROPIC_BASE_URL = dotenv.ANTHROPIC_BASE_URL;
+      env.ANTHROPIC_AUTH_TOKEN = 'placeholder';
+    } else {
+      // Drop the pair rather than ship a token nothing rewrites, and rather
+      // than refuse. A throw here runs before the gateway seam, so it aborts
+      // every spawn and leaves the message pending through retry after retry.
+      // That is the failure the `direct` default exists to remove.
+      // Dropping it leaves the runtime on its own credentials, which is what
+      // a gateway injecting nothing already assumes.
+      log.warn('ANTHROPIC_BASE_URL ignored — the selected gateway injects no credentials', {
+        gateway: gateway.kind,
+        hint: 'Unset ANTHROPIC_BASE_URL, or set NANOCLAW_GATEWAY_PROVIDER=onecli.',
+      });
+    }
   }
 
   // Where THIS host keeps `claude`, for a runner executing outside a

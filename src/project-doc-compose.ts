@@ -23,6 +23,7 @@ import { parseSkillSelection, sanitizeStoredMcpServers } from './container-confi
 import { getContainerConfig } from './db/container-configs.js';
 import { readGroupPersona } from './group-persona.js';
 import { log } from './log.js';
+import { skillFitsGateway } from './skill-delivery.js';
 import type { AgentGroup } from './types.js';
 
 /** One `# <name>` block of the composed document. */
@@ -153,6 +154,10 @@ export async function composeGroupProjectDoc(group: AgentGroup, groupDir: string
   if (fs.existsSync(skillsHostDir)) {
     for (const skillName of fs.readdirSync(skillsHostDir).sort()) {
       if (selectedSkills !== 'all' && !selectedSkills.includes(skillName)) continue;
+      // Same precondition the delivery routes apply. The document must not
+      // teach a skill the agent never receives, and it must not state a
+      // credential flow this install does not run.
+      if (!skillFitsGateway(skillName)) continue;
       const hostFragment = path.join(skillsHostDir, skillName, 'instructions.md');
       if (!fs.existsSync(hostFragment)) continue;
       push(`NanoClaw Skill: ${skillName}`, fs.readFileSync(hostFragment, 'utf-8'), true);

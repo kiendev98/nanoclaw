@@ -84,6 +84,7 @@ function onecliApprovalSource(): GatewayApprovalSource {
 
 registerGatewayProvider('onecli', () => ({
   kind: 'onecli',
+  injectsCredentials: true,
   approvals: onecliApprovalSource,
   async contribute({ key, groupName }) {
     // OneCLI agent identifier is always the agent group id — stable across

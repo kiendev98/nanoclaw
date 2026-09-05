@@ -18,9 +18,26 @@
 import fs from 'fs';
 import path from 'path';
 
+import { getGatewayProvider, injectsCredentials } from './gateway-providers/index.js';
 import { log } from './log.js';
 
 import type { ContainerConfig } from './container-config.js';
+
+/**
+ * Skills whose prose is only true behind a credential-injecting gateway.
+ *
+ * `onecli-gateway` tells the agent that a proxy adds real credentials, and it
+ * forbids asking the user for a token. Under a gateway that injects nothing
+ * the agent follows that instruction into a dead end: a plain 401, no
+ * `connect_url`, and no permission to ask. Withhold the skill instead of
+ * hedging its text, so what the agent reads matches the runtime it got.
+ */
+const CREDENTIAL_GATEWAY_SKILLS = new Set(['onecli-gateway']);
+
+/** Whether the install's gateway satisfies this skill's runtime precondition. */
+export function skillFitsGateway(skillName: string): boolean {
+  return !CREDENTIAL_GATEWAY_SKILLS.has(skillName) || injectsCredentials(getGatewayProvider());
+}
 
 /**
  * Stage the shared skills as a loadable plugin in the session workspace.
@@ -132,14 +149,19 @@ export function syncSkillSymlinks(claudeDir: string, containerConfig: ContainerC
 }
 
 /**
- * Resolve the group's skill selection to concrete names — `'all'` recomputes
- * from `container/skills/` so newly-added upstream skills appear automatically.
+ * Resolve the group's skill selection to the names this install can deliver —
+ * `'all'` recomputes from `container/skills/` so newly-added upstream skills
+ * appear automatically, and a skill the gateway cannot support drops out here.
+ *
+ * One choke point on purpose: both routes above and every surfaces-providing
+ * provider read this list, so the selection cannot disagree with itself.
  */
 export function selectedSkillNames(containerConfig: ContainerConfig): string[] {
-  if (containerConfig.skills !== 'all') return containerConfig.skills;
+  if (containerConfig.skills !== 'all') return containerConfig.skills.filter(skillFitsGateway);
   const sharedSkillsDir = path.join(process.cwd(), 'container', 'skills');
   return fs.existsSync(sharedSkillsDir)
     ? fs.readdirSync(sharedSkillsDir).filter((e) => {
+        if (!skillFitsGateway(e)) return false;
         try {
           return fs.statSync(path.join(sharedSkillsDir, e)).isDirectory();
         } catch {

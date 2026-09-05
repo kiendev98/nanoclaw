@@ -38,6 +38,12 @@ the person happens to be around.
 review loop. You may lend only a destination you already hold, and the worker
 gets the one conversation your opening message starts.
 
+**Your opening message opens the thread. It does not make the request.** Do not
+mention or address the counterparty in it. That belongs to the message the
+worker sends, and the worker decides whether the work needs one. A mention here
+fires the notification before the request exists, so a request that never lands
+leaves the counterparty holding a pointer to nothing.
+
 **A worker asking for a conversation is a lend request, not a question.** This
 one overrides the rule above about answering questions yourself. Call
 `lend_conversation`. Saying yes with `answer_worker_question` grants nothing,
@@ -70,5 +76,11 @@ something you can forget, and never something to do early.
 is still running.** Finished means the work is done, not that you have nothing
 to say this turn.
 
-**Progress notes are rationed on purpose.** Five per task, ten seconds apart.
-They exist for a milestone worth interrupting for, not for narration.
+**Send at least one progress note once the task passes its first real
+milestone.** Exploration finished, a blocker found, and a draft started all
+qualify. A long task that reports nothing until the end leaves your principal
+with nothing to say.
+
+**Progress notes are rationed, not banned.** Five per task, ten seconds apart.
+They exist for a milestone worth interrupting for, not for narration. The cap
+stops narration. It is not a reason to send none.

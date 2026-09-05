@@ -1,8 +1,9 @@
 /**
  * Gateway provider selection.
  *
- * `NANOCLAW_GATEWAY_PROVIDER` is read once, at first use, and defaults to
- * `onecli` — an install that never sets it behaves exactly as it always has.
+ * `NANOCLAW_GATEWAY_PROVIDER` is read once, at first use. The default lives on
+ * `DEFAULT_GATEWAY_PROVIDER_KIND` below, which is the one place that states it
+ * and the reason for it.
  * One active provider per install; a configured kind with no registered
  * provider throws the same operator-error shape as an unknown runtime driver,
  * for the same reason: a host configured for one gateway must not silently
@@ -23,7 +24,18 @@ import {
 // Side-effect import: the barrel overlays append their registration to.
 import './installed.js';
 
-const DEFAULT_GATEWAY_PROVIDER_KIND = 'onecli';
+/**
+ * This fork defaults to `direct` where upstream defaults to `onecli`, because
+ * it runs the agent on the host under the `local` driver: the agent
+ * authenticates as the user through the local `claude`, so there is no
+ * credential for a broker to inject. Keeping `onecli` as the default made
+ * every spawn depend on a network call that can only fail here — and it is
+ * fail-closed, so a 401 aborted the spawn before the driver ran at all.
+ *
+ * `onecli` is still registered. Set NANOCLAW_GATEWAY_PROVIDER=onecli to use it,
+ * which is what an isolating driver needs.
+ */
+const DEFAULT_GATEWAY_PROVIDER_KIND = 'direct';
 
 export function configuredGatewayProviderKind(env: NodeJS.ProcessEnv = process.env): GatewayProviderKind {
   const configured =

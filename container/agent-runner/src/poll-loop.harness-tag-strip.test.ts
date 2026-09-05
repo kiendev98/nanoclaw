@@ -117,6 +117,36 @@ describe('harness tag artifacts stripped from deliveries (wiring)', () => {
     expect(pushes).toHaveLength(0);
   });
 
+  // A worker reports through `finish_task`, and its closing text is captured
+  // as the report draft. Counting that as undelivered nudged it to re-send
+  // through `<message to="...">`, which is not a door a worker has.
+  it('does not nudge a worker whose final text carries no message block', async () => {
+    process.env.NANOCLAW_WORKER_SESSION = '1';
+    try {
+      const { query, pushes } = makeResultQuery({
+        type: 'result',
+        text: 'Task reported. Gate open at PR #9.',
+      });
+
+      await processQuery(query, ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+      expect(pushes).toHaveLength(0);
+    } finally {
+      delete process.env.NANOCLAW_WORKER_SESSION;
+    }
+  });
+
+  it('still nudges an ordinary session whose final text carries no message block', async () => {
+    const { query, pushes } = makeResultQuery({
+      type: 'result',
+      text: 'Task reported. Gate open at PR #9.',
+    });
+
+    await processQuery(query, ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    expect(pushes).toHaveLength(1);
+  });
+
   it('sanitizes bare error-result text before it reaches messages_out', async () => {
     const { query, pushes } = makeResultQuery({
       type: 'result',

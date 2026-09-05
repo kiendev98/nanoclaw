@@ -158,7 +158,7 @@ export const sendProgressNote: McpToolDefinition = {
   tool: {
     name: 'send_progress_note',
     description:
-      'Send one early note about a milestone. It is marked as progress and is never relayed to the person, so it is not your report. At most five per task, ten seconds apart; anything past that is dropped. Do not narrate.',
+      'Send one early note about a milestone. Send at least one once the task passes its first real milestone, such as exploration finishing or a blocker appearing. It is marked as progress and is never relayed to the person, so it is not your report. At most five per task, ten seconds apart. Anything past that is dropped. Do not narrate.',
     inputSchema: {
       type: 'object' as const,
       properties: { text: { type: 'string', description: 'The milestone, in one or two sentences.' } },
@@ -183,7 +183,11 @@ export const lendConversation: McpToolDefinition = {
       properties: {
         repository: { type: 'string', description: 'The repository whose worker gets the conversation.' },
         destination: { type: 'string', description: 'One of your own destination names.' },
-        text: { type: 'string', description: 'The opening message. It is posted as a new top-level message.' },
+        text: {
+          type: 'string',
+          description:
+            'The opening message. It starts the thread the worker gets, and it is posted as a new top-level message. Do not mention or address the counterparty here. That belongs to the message the worker sends.',
+        },
       },
       required: ['repository', 'destination', 'text'],
     },

@@ -57,6 +57,7 @@ vi.mock('../../../session-manager.js', () => ({
 }));
 
 const { createGrant, findLiveGrantForTask } = await import('../db/worker-channel-grants.js');
+const { isLentThread } = await import('./lent-threads.js');
 const { createQuestion, findOpenQuestion } = await import('../db/worker-questions.js');
 const { bindLentConversationThread } = await import('./bind-grant.js');
 
@@ -139,12 +140,37 @@ describe('bindLentConversationThread', () => {
 
     await bindLentConversationThread(aRootPost(), PRINCIPAL, { firstDelivery: false, platformMsgId: '1788.42' });
 
-    expect((await findLiveGrantForTask('wt-1'))?.thread_id).toBe('1788.42');
+    expect((await findLiveGrantForTask('wt-1'))?.thread_id).toBe('slack:C123:1788.42');
     expect(delivered).toHaveLength(1);
     expect(delivered[0]!.agentGroupId).toBe('ag-worker');
     expect(delivered[0]!.sessionId).toBe('sess-worker');
     expect(delivered[0]!.sender).toBe('principal');
     expect(delivered[0]!.text).toContain('conversation');
+  });
+
+  // The platform names the thread with the raw id of the post that started it,
+  // and its adapter addresses that thread as `<platform id>:<raw id>`. A grant
+  // holding the raw id hands the adapter a thread id it refuses, so every
+  // message the worker sends is dropped and no reply routes back.
+  it('binds the grant to the thread id the adapter addresses, not the raw message id', async () => {
+    await createGrant(aGrant());
+
+    await bindLentConversationThread(aRootPost(), PRINCIPAL, { firstDelivery: false, platformMsgId: '1788.42' });
+
+    const bound = await findLiveGrantForTask('wt-1');
+    expect(bound?.thread_id).toBe('slack:C123:1788.42');
+    expect(isLentThread('slack', 'slack:C123', 'slack:C123:1788.42')).toBe(true);
+  });
+
+  // A native adapter carries its own address format and its own thread shape,
+  // neither of which this module knows. Composing one would invent an address.
+  it('leaves the raw id alone for a platform address that carries no channel prefix', async () => {
+    await createGrant(aGrant({ channel_type: 'signal', platform_id: '+15551234567' }));
+    const rootPost = { ...aRootPost(), channelType: 'signal', platformId: '+15551234567' };
+
+    await bindLentConversationThread(rootPost, PRINCIPAL, { firstDelivery: false, platformMsgId: '1788.42' });
+
+    expect((await findLiveGrantForTask('wt-1'))?.thread_id).toBe('1788.42');
   });
 
   // The worker spawned with no destinations, so its system prompt states it
@@ -262,7 +288,7 @@ describe('bindLentConversationThread', () => {
     expect(warnings.at(-1)).toContain('did not go through');
     expect(warnings.at(-1)).toContain('the conversation is live');
     expect(warnings.at(-1)).not.toContain('worker session is gone');
-    expect((await findLiveGrantForTask('wt-1'))?.thread_id).toBe('1788.42');
+    expect((await findLiveGrantForTask('wt-1'))?.thread_id).toBe('slack:C123:1788.42');
   });
 
   // The question is closed before the notice, so a failed notice costs the
