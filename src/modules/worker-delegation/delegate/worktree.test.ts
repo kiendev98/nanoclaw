@@ -399,6 +399,30 @@ describe('ensureWorktree with a submodule', () => {
     expect((thrown as Error).message).toContain('vendor/lib');
   });
 
+  // The check itself runs git, and git can decline to answer. Reading silence
+  // as "sound" would readopt the residual on the one pass that happened to hit
+  // a hiccup — the same silent adoption, through the fix rather than around it.
+  it('refuses a residual it cannot check, rather than reading silence as sound', () => {
+    const moduleDir = path.join(repoPath, '.git', 'modules', 'shared-lib');
+    gitFault.fail = (args, cwd) => cwd === moduleDir && (args.includes('lock') || args.includes('remove'));
+    expect(() => withFileProtocol(() => ensureWorktree(repoPath, 'nanoclaw', 'sess-blind'))).toThrow(WorktreeError);
+
+    // The residual is in place. Now the question about it is the one that fails.
+    gitFault.fail = (args, cwd) => cwd === moduleDir && args.includes('list');
+
+    let thrown: unknown;
+    try {
+      withFileProtocol(() => ensureWorktree(repoPath, 'nanoclaw', 'sess-blind'));
+    } catch (err) {
+      thrown = err;
+    }
+    gitFault.fail = null;
+
+    expect(thrown).toBeInstanceOf(WorktreeError);
+    expect((thrown as Error).message).toContain('vendor/lib');
+    expect((thrown as Error).message).not.toContain(tmp);
+  });
+
   // Every other failure mode here warns and moves on, so one broken submodule
   // must not cost the worker a sound one declared beside it.
   it('places a sound submodule even when another one cannot be locked', () => {

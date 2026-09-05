@@ -126,59 +126,13 @@ function ensureSubmodules(repoPath: string, worktreePath: string, repoName: stri
   // subprocess per iteration for an answer already held.
   const modulesRoot = sourceModulesRoot(repoPath, repoName, helperSessionId);
   const deadline = Date.now() + SUBMODULE_BUDGET_MS;
-  const prunable: string[] = [];
+  const context = { repoName, helperSessionId };
+  const unsound: string[] = [];
 
   for (const submodule of declared) {
     const target = path.join(worktreePath, submodule.path);
-    // One outcome is not the repository's shape and does not heal: a worktree
-    // that took neither the lock nor the withdrawal. Reading the directory back
-    // is what makes a retry find that residual, because it carries a `.git` and
-    // a check on that alone skips it forever.
-    const standing = submoduleStanding(modulesRoot, submodule, target);
-    if (standing === 'sound') continue;
-    if (standing === 'prunable') {
-      log.error('Worker submodule holds an unlocked worktree', {
-        repoName,
-        helperSessionId,
-        submodule: submodule.path,
-      });
-      prunable.push(submodule.path);
-      continue;
-    }
-
-    try {
-      const unresolvable = placeSubmodule(worktreePath, modulesRoot, submodule, target, deadline);
-      if (!unresolvable) continue;
-      if (submoduleStanding(modulesRoot, submodule, target) === 'prunable') {
-        log.error('Worker submodule holds an unlocked worktree', {
-          repoName,
-          helperSessionId,
-          submodule: submodule.path,
-          reason: unresolvable,
-        });
-        prunable.push(submodule.path);
-        continue;
-      }
-      // A declaration this checkout cannot satisfy is the repository's shape,
-      // not a fault of the delegation. Refusing the task would strand every
-      // worker on a repository carrying one stale stanza. The path is usually
-      // left empty, and the reason says when it is not.
-      log.warn('Worker submodule not placed', {
-        repoName,
-        helperSessionId,
-        submodule: submodule.path,
-        reason: unresolvable,
-      });
-    } catch (err) {
-      log.error('Worker submodule could not be checked out', {
-        repoName,
-        helperSessionId,
-        submodule: submodule.path,
-        err,
-      });
-      throw new WorktreeError(
-        `Could not check out the "${submodule.path}" submodule of "${repoName}". The operator has the details.`,
-      );
+    if (settleSubmodule(worktreePath, modulesRoot, submodule, target, deadline, context) === 'unsound') {
+      unsound.push(submodule.path);
     }
   }
 
@@ -186,11 +140,72 @@ function ensureSubmodules(repoPath: string, worktreePath: string, repoName: stri
   // submodule, and every sound one after it would never be placed. Collecting
   // keeps each submodule's fault to itself and still puts a person in the loop
   // before a worker writes into a directory one prune from deletion.
-  if (prunable.length > 0) {
+  if (unsound.length > 0) {
     throw new WorktreeError(
-      `The ${prunable.map((entry) => `"${entry}"`).join(', ')} submodule of "${repoName}" holds a worktree that is neither locked nor withdrawn. The operator has the details.`,
+      `The ${unsound.map((entry) => `"${entry}"`).join(', ')} submodule of "${repoName}" holds a worktree this pass could not clear. The operator has the details.`,
     );
   }
+}
+
+interface SubmoduleContext {
+  repoName: string;
+  helperSessionId: string;
+}
+
+/**
+ * Fill one submodule, or say a person has to look at it.
+ *
+ * The standing is read before the placement and again after a failed one, so
+ * one directory gets the same answer on the first pass and on every retry. A
+ * retry is the module's normal path: the refusal below stops the helper session
+ * from being written, and the next attempt walks the same tree again.
+ */
+function settleSubmodule(
+  worktreePath: string,
+  modulesRoot: string | null,
+  submodule: DeclaredSubmodule,
+  target: string,
+  deadline: number,
+  context: SubmoduleContext,
+): 'settled' | 'unsound' {
+  const standing = submoduleStanding(modulesRoot, submodule, target);
+  if (standing === 'sound') return 'settled';
+  if (standing !== 'absent') return reportUnsound(standing, submodule, context);
+
+  try {
+    const unresolvable = placeSubmodule(worktreePath, modulesRoot, submodule, target, deadline);
+    if (!unresolvable) return 'settled';
+
+    const after = submoduleStanding(modulesRoot, submodule, target);
+    if (after !== 'sound' && after !== 'absent') return reportUnsound(after, submodule, context, unresolvable);
+
+    // A declaration this checkout cannot satisfy is the repository's shape,
+    // not a fault of the delegation. Refusing the task would strand every
+    // worker on a repository carrying one stale stanza. The path is usually
+    // left empty, and the reason says when it is not.
+    log.warn('Worker submodule not placed', { ...context, submodule: submodule.path, reason: unresolvable });
+    return 'settled';
+  } catch (err) {
+    log.error('Worker submodule could not be checked out', { ...context, submodule: submodule.path, err });
+    throw new WorktreeError(
+      `Could not check out the "${submodule.path}" submodule of "${context.repoName}". The operator has the details.`,
+    );
+  }
+}
+
+/** The one place that logs a directory the pass will refuse over. */
+function reportUnsound(
+  standing: 'prunable' | 'unverified',
+  submodule: DeclaredSubmodule,
+  context: SubmoduleContext,
+  reason?: string,
+): 'unsound' {
+  const message =
+    standing === 'prunable'
+      ? 'Worker submodule holds an unlocked worktree'
+      : 'Worker submodule could not be checked against the source store';
+  log.error(message, { ...context, submodule: submodule.path, reason });
+  return 'unsound';
 }
 
 /**
@@ -200,18 +215,26 @@ function ensureSubmodules(repoPath: string, worktreePath: string, repoName: stri
  * or it is a worktree the source store holds locked. `prunable` is the residual
  * a failed lock and a failed withdrawal leave behind — it carries a `.git`, so
  * a check on that alone reads it as placed and never looks again.
+ *
+ * `unverified` is the answer git would not give. It is not `sound`: an earlier
+ * pass could have left a residual while the store still answered, so a store
+ * that cannot answer now is no evidence about the directory. Reading silence as
+ * sound would readopt the residual this whole check exists to catch.
  */
 function submoduleStanding(
   modulesRoot: string | null,
   submodule: DeclaredSubmodule,
   target: string,
-): 'absent' | 'sound' | 'prunable' {
+): 'absent' | 'sound' | 'prunable' | 'unverified' {
   if (!fs.existsSync(path.join(target, '.git'))) return 'absent';
-  if (modulesRoot === null) return 'sound';
+  if (modulesRoot === null) return 'unverified';
 
   const moduleDir = path.join(modulesRoot, submodule.name);
   if (!fs.existsSync(moduleDir)) return 'sound';
-  return isPrunableWorktree(moduleDir, target) ? 'prunable' : 'sound';
+
+  const listed = gitOrNull(moduleDir, ['worktree', 'list', '--porcelain']);
+  if (listed === null) return 'unverified';
+  return listsUnlocked(listed, target) ? 'prunable' : 'sound';
 }
 
 /**
@@ -221,10 +244,7 @@ function submoduleStanding(
  * line first and a bare `locked` line when the lock took. A cloned submodule is
  * an ordinary directory and appears in no block, so absence reads as sound.
  */
-function isPrunableWorktree(moduleDir: string, target: string): boolean {
-  const listed = gitOrNull(moduleDir, ['worktree', 'list', '--porcelain']);
-  if (listed === null) return false;
-
+function listsUnlocked(listed: string, target: string): boolean {
   const wanted = realPath(target);
   for (const block of listed.split('\n\n')) {
     const lines = block.split('\n');
