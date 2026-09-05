@@ -183,7 +183,11 @@ export const lendConversation: McpToolDefinition = {
       properties: {
         repository: { type: 'string', description: 'The repository whose worker gets the conversation.' },
         destination: { type: 'string', description: 'One of your own destination names.' },
-        text: { type: 'string', description: 'The opening message. It is posted as a new top-level message.' },
+        text: {
+          type: 'string',
+          description:
+            'The opening message. It starts the thread the worker gets, and it is posted as a new top-level message. Do not mention or address the counterparty here. The worker mentions them in the message that carries the request.',
+        },
       },
       required: ['repository', 'destination', 'text'],
     },
