@@ -25,7 +25,10 @@ const install = vi.hoisted(() => ({ baseUrl: '', injectsCredentials: true }));
 vi.mock('../env.js', () => ({
   readEnvFile: () => (install.baseUrl ? { ANTHROPIC_BASE_URL: install.baseUrl } : {}),
 }));
-vi.mock('../gateway-providers/index.js', () => ({
+// Only the lookup is faked. The predicate stays real, so a change to how an
+// undeclared field is read reaches this test instead of passing through a stub.
+vi.mock('../gateway-providers/index.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../gateway-providers/index.js')>()),
   getGatewayProvider: () => ({
     kind: install.injectsCredentials ? 'onecli' : 'direct',
     injectsCredentials: install.injectsCredentials,

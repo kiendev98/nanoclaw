@@ -18,7 +18,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { getGatewayProvider } from './gateway-providers/index.js';
+import { getGatewayProvider, injectsCredentials } from './gateway-providers/index.js';
 import { log } from './log.js';
 
 import type { ContainerConfig } from './container-config.js';
@@ -36,7 +36,7 @@ const CREDENTIAL_GATEWAY_SKILLS = new Set(['onecli-gateway']);
 
 /** Whether the install's gateway satisfies this skill's runtime precondition. */
 export function skillFitsGateway(skillName: string): boolean {
-  return !CREDENTIAL_GATEWAY_SKILLS.has(skillName) || getGatewayProvider().injectsCredentials;
+  return !CREDENTIAL_GATEWAY_SKILLS.has(skillName) || injectsCredentials(getGatewayProvider());
 }
 
 /**

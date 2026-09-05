@@ -961,11 +961,26 @@ function chatRowWrittenSince(afterSeq: number): boolean {
 function workerReportedSince(afterSeq: number): boolean {
   try {
     return getUndeliveredMessages().some(
-      (message) =>
-        (message.seq ?? 0) > afterSeq && message.kind === 'system' && message.content.includes('"worker_done"'),
+      (message) => (message.seq ?? 0) > afterSeq && message.kind === 'system' && isWorkerDone(message.content),
     );
   } catch (err) {
     log(`workerReportedSince failed: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
+/**
+ * The action a system row carries, read from the field rather than the text.
+ *
+ * `writeWorkerAction` gives every worker action this one shape, and a progress
+ * note carries agent-authored prose in it. A note that quotes the tool name
+ * would match a substring test, and the turn it belongs to would then have its
+ * undelivered reply swallowed — the failure the caller exists to prevent.
+ */
+function isWorkerDone(content: string): boolean {
+  try {
+    return (JSON.parse(content) as { action?: string }).action === 'worker_done';
+  } catch {
     return false;
   }
 }

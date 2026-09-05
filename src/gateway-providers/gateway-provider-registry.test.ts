@@ -1,23 +1,30 @@
 import { describe, expect, it } from 'vitest';
 
 import type { GatewayApprovalSource, GatewayContribution, GatewayProvider } from './gateway-provider-registry.js';
-import { getGatewayProviderFactory, registerGatewayProvider } from './gateway-provider-registry.js';
+import { getGatewayProviderFactory, injectsCredentials, registerGatewayProvider } from './gateway-provider-registry.js';
 
 const CONTRIBUTION: GatewayContribution = { env: {} };
 
 /**
- * An overlay written before `injectsCredentials` existed, as a class rather
- * than an object literal.
+ * An overlay written before `injectsCredentials` existed, as a stateful class
+ * rather than an object literal.
  *
  * Nothing in this tree is shaped like this, and that is the point: overlays are
  * copied in by a skill and are never type-checked against this tree, so the
- * registry has to survive a shape it has never seen.
+ * registry has to survive a shape it has never seen. The private field is what
+ * makes the shape hostile — it resolves on the instance itself, so any wrapper
+ * that rebinds `this` throws the first time `contribute` is called.
  */
 class LegacyOverlayGateway {
   readonly kind = 'test-legacy-overlay';
+  readonly #contribution: GatewayContribution;
+
+  constructor(contribution: GatewayContribution) {
+    this.#contribution = contribution;
+  }
 
   async contribute(): Promise<GatewayContribution> {
-    return CONTRIBUTION;
+    return this.#contribution;
   }
 
   approvals(): GatewayApprovalSource {
@@ -39,25 +46,30 @@ describe('an undeclared injectsCredentials', () => {
       () => ({ kind: 'test-plain-overlay' }) as unknown as GatewayProvider,
     );
 
-    expect(provider.injectsCredentials).toBe(true);
+    expect(injectsCredentials(provider)).toBe(true);
   });
 
-  // A spread copies own enumerable properties only. A class instance reaching
-  // the caller without `contribute` throws on its first spawn, and one without
-  // `approvals` leaves every credentialed action hanging until the gateway
-  // times out — neither failure names the registry that caused it.
-  it('keeps the methods of a class-instance overlay', async () => {
-    const provider = provide('test-legacy-overlay', () => new LegacyOverlayGateway() as unknown as GatewayProvider);
+  it('reads a declared false as false, and a declared true as true', () => {
+    const off = { kind: 'test-declared-off', injectsCredentials: false } as unknown as GatewayProvider;
+    const on = { kind: 'test-declared-on', injectsCredentials: true } as unknown as GatewayProvider;
 
-    expect(provider.injectsCredentials).toBe(true);
-    expect(typeof provider.contribute).toBe('function');
-    expect(typeof provider.approvals).toBe('function');
+    expect(injectsCredentials(off)).toBe(false);
+    expect(injectsCredentials(on)).toBe(true);
+  });
+
+  // The default is read, never wrapped, so the registry hands back the object
+  // the overlay's author wrote. A spread would drop a class instance's methods;
+  // `Object.create` keeps them and rebinds `this`, so a private field throws;
+  // a Proxy changes what `Object.keys` reports. None of that can happen to an
+  // object nobody copied.
+  it('hands a class-instance overlay back untouched, state and keys included', async () => {
+    const instance = new LegacyOverlayGateway(CONTRIBUTION);
+    const provider = provide('test-legacy-overlay', () => instance as unknown as GatewayProvider);
+
+    expect(provider).toBe(instance as unknown as GatewayProvider);
+    expect(injectsCredentials(provider)).toBe(true);
     await expect(provider.contribute({} as never)).resolves.toBe(CONTRIBUTION);
-  });
-
-  it('leaves a provider that declares the field untouched', () => {
-    const declared = { kind: 'test-declared', injectsCredentials: false } as unknown as GatewayProvider;
-
-    expect(provide('test-declared', () => declared)).toBe(declared);
+    expect(typeof provider.approvals).toBe('function');
+    expect(Object.keys(provider)).toEqual(['kind']);
   });
 });

@@ -356,19 +356,38 @@ describe('ensureWorktree with a submodule', () => {
   });
 
   // The withdrawal can fail too, and then the path holds an unlocked worktree
-  // no route may overwrite. That is the one outcome the caller must not read as
-  // success: the warning names it, and nothing claims the submodule is placed.
-  it('reports a submodule it could neither lock nor withdraw, rather than claiming it', () => {
+  // that carries a `.git`, so the skip at the top of the pass takes it on every
+  // retry. Warning would name a prunable worktree once and then run a worker in
+  // it in silence, so this refuses, and the refusal names no host path.
+  it('refuses a submodule it could neither lock nor withdraw', () => {
     const moduleDir = path.join(repoPath, '.git', 'modules', 'shared-lib');
     gitFault.fail = (args, cwd) => cwd === moduleDir && (args.includes('lock') || args.includes('remove'));
 
-    const handle = withFileProtocol(() => ensureWorktree(repoPath, 'nanoclaw', 'sess-stuck'));
+    let thrown: unknown;
+    try {
+      withFileProtocol(() => ensureWorktree(repoPath, 'nanoclaw', 'sess-stuck'));
+    } catch (err) {
+      thrown = err;
+    }
     gitFault.fail = null;
 
-    expect(fs.existsSync(path.join(handle.worktreePath, '.git'))).toBe(true);
+    expect(thrown).toBeInstanceOf(WorktreeError);
+    expect((thrown as Error).message).toContain('vendor/lib');
+    expect((thrown as Error).message).not.toContain(tmp);
+  });
+
+  // Every submodule of the pass takes the network route from here, and the
+  // local route returns before the line that reports a fallback. Silence would
+  // leave a clone-per-worker install with nothing naming the cause.
+  it('says so when it cannot locate the submodule store at all', () => {
+    gitFault.fail = (args, cwd) => args.includes('--git-common-dir') && cwd === repoPath;
+
+    withFileProtocol(() => ensureWorktree(repoPath, 'nanoclaw', 'sess-nostore'));
+    gitFault.fail = null;
+
     expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
-      'Worker submodule not placed',
-      expect.objectContaining({ reason: expect.stringContaining('could not be locked') }),
+      'Worker submodule store could not be located — every submodule will clone',
+      expect.objectContaining({ repoName: 'nanoclaw' }),
     );
   });
 

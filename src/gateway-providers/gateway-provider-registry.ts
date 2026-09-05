@@ -105,6 +105,9 @@ export interface GatewayProvider {
    * A model provider config that ships a placeholder token depends on it,
    * because nothing rewrites the Authorization header when it is false.
    * Stated as a capability so a consumer never has to read `kind`.
+   *
+   * Read it through `injectsCredentials()`, never off the object: an overlay
+   * written before this field existed omits it, and absence is not false.
    */
   readonly injectsCredentials: boolean;
   /**
@@ -138,29 +141,29 @@ export function registerGatewayProvider(kind: GatewayProviderKind, factory: Gate
   if (registry.has(kind)) {
     throw new Error(`Gateway provider already registered: ${kind}`);
   }
-  registry.set(kind, () => withDeclaredCredentials(factory()));
+  registry.set(kind, factory);
 }
 
 /**
- * Read an absent `injectsCredentials` as true.
+ * Whether this gateway supplies the agent's credentials, reading an absent
+ * declaration as true.
  *
  * Overlays are copied in by a skill and are never type-checked against this
  * tree, so one written before the field existed reports `undefined`. Every
  * gateway that predates it is a credential proxy. Reading absence as false
  * would drop the token that proxy needs and withhold its own skill.
  *
- * The default is layered, never spread. A spread copies own enumerable
- * properties only, so an overlay written as a class instance would reach the
- * caller with `contribute` and `approvals` gone — the first spawn throws, or
- * a credentialed action hangs until the gateway times out. Delegating to the
- * provider leaves every method, getter and inherited member where it was.
+ * The default is applied here rather than by wrapping the provider at
+ * registration, because no wrapper survives every overlay shape. A spread
+ * loses the prototype methods of a class instance. `Object.create` keeps them
+ * and rebinds `this` to the wrapper, so an instance reading its own state —
+ * a private field above all — throws on the first call. A Proxy needs a
+ * binding trap and still changes what `Object.keys` reports. One exported
+ * predicate hands every caller the same answer and hands the provider back
+ * untouched, exactly as its author wrote it.
  */
-function withDeclaredCredentials(provider: GatewayProvider): GatewayProvider {
-  const declared = (provider as { injectsCredentials?: boolean }).injectsCredentials;
-  if (declared !== undefined) return provider;
-  return Object.create(provider, {
-    injectsCredentials: { value: true, enumerable: true, writable: false, configurable: false },
-  }) as GatewayProvider;
+export function injectsCredentials(provider: GatewayProvider): boolean {
+  return (provider as { injectsCredentials?: boolean }).injectsCredentials !== false;
 }
 
 export function getGatewayProviderFactory(kind: GatewayProviderKind): GatewayProviderFactory | undefined {

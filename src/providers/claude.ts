@@ -23,7 +23,7 @@
  */
 import { resolveClaudeExecutable } from './claude-executable.js';
 import { readEnvFile } from '../env.js';
-import { getGatewayProvider } from '../gateway-providers/index.js';
+import { getGatewayProvider, injectsCredentials } from '../gateway-providers/index.js';
 import { log } from '../log.js';
 import { registerProviderContainerConfig } from './provider-container-registry.js';
 
@@ -32,7 +32,7 @@ registerProviderContainerConfig('claude', (ctx) => {
   const env: Record<string, string> = {};
   if (dotenv.ANTHROPIC_BASE_URL) {
     const gateway = getGatewayProvider();
-    if (gateway.injectsCredentials) {
+    if (injectsCredentials(gateway)) {
       env.ANTHROPIC_BASE_URL = dotenv.ANTHROPIC_BASE_URL;
       env.ANTHROPIC_AUTH_TOKEN = 'placeholder';
     } else {

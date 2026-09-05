@@ -124,7 +124,7 @@ function ensureSubmodules(repoPath: string, worktreePath: string, repoName: stri
   // One `rev-parse` for the pass. The value is a property of the source clone
   // and cannot change inside the loop, so asking per submodule spends a
   // subprocess per iteration for an answer already held.
-  const modulesRoot = sourceModulesRoot(repoPath);
+  const modulesRoot = sourceModulesRoot(repoPath, repoName, helperSessionId);
   const deadline = Date.now() + SUBMODULE_BUDGET_MS;
 
   for (const submodule of declared) {
@@ -217,7 +217,15 @@ function placeSubmodule(
 
   const placement = placeFromSourceClone(modulesRoot, submodule, target, commit);
   if (placement === 'placed') return null;
-  if (placement === 'unlocked') return 'the submodule worktree could not be locked, and could not be withdrawn';
+  if (placement === 'unlocked') {
+    // Two git failures on one directory is a broken store, and what it leaves
+    // does not heal: the target now carries a `.git`, so the skip at the top
+    // of the pass takes it on every retry and no later run looks at it again.
+    // Warning would name a prunable worktree once and then run a worker in it
+    // in silence. Refusing is the same answer this module already gives when
+    // neither route can supply a submodule, and it puts a person in the loop.
+    throw new Error('the submodule worktree could not be locked, and could not be withdrawn');
+  }
 
   const remaining = deadline - Date.now();
   if (remaining < MIN_SUBMODULE_CLONE_MS) return 'the submodule budget was spent before this clone';
@@ -291,9 +299,18 @@ function withdrawWorktree(moduleDir: string, target: string): boolean {
  * Where the source clone keeps its initialized submodules, or null when git
  * cannot say — in which case only the clone route is left.
  */
-function sourceModulesRoot(repoPath: string): string | null {
+function sourceModulesRoot(repoPath: string, repoName: string, helperSessionId: string): string | null {
   const commonDir = gitOrNull(repoPath, ['rev-parse', '--git-common-dir']);
-  if (commonDir === null) return null;
+  if (commonDir === null) {
+    // Every submodule of this pass now takes the network route, and the local
+    // route is skipped before the line that reports a fallback. Without this
+    // the pass reaches the remote for every submodule and logs no reason.
+    log.warn('Worker submodule store could not be located — every submodule will clone', {
+      repoName,
+      helperSessionId,
+    });
+    return null;
+  }
   return path.join(path.resolve(repoPath, commonDir), 'modules');
 }
 
