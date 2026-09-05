@@ -1,5 +1,6 @@
 import { registerMigration } from '../../../db/migrations/index.js';
 import { moduleWorkerDelegation } from '../../../db/migrations/module-worker-delegation.js';
+import { moduleWorkerDelegationGrantThreads } from '../../../db/migrations/module-worker-delegation-grant-threads.js';
 
 let registered = false;
 
@@ -17,5 +18,8 @@ let registered = false;
 export function registerWorkerMigration(): void {
   if (registered) return;
   registerMigration(moduleWorkerDelegation);
+  // Registration order is run order for a module lane, and this one reads the
+  // table the first one creates.
+  registerMigration(moduleWorkerDelegationGrantThreads);
   registered = true;
 }

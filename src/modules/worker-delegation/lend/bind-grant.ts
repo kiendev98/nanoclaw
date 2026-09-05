@@ -8,6 +8,7 @@
 import type { PostDeliveryInfo } from '../../../delivery.js';
 import { log } from '../../../log.js';
 import type { OutboundMessage } from '../../../mailbox/index.js';
+import { qualifiedThreadId } from '../../../platform-id.js';
 import { writeSessionRouting } from '../../../session-manager.js';
 import type { Session } from '../../../types.js';
 import { bindGrantThread, findGrantByRootMessage } from '../db/worker-channel-grants.js';
@@ -143,17 +144,23 @@ export async function bindLentConversationThread(
     return;
   }
 
-  const grant = await bindGrantThread(msg.id, info.platformMsgId);
+  // Delivery names the post, not the thread it started. Every reader of this
+  // column addresses the adapter with it — the worker's routing, the inbound
+  // lookup, the admission exemption — so it has to hold the id the adapter
+  // itself emits, which the raw one is not.
+  const threadId = qualifiedThreadId(msg.platformId ?? '', info.platformMsgId);
+
+  const grant = await bindGrantThread(msg.id, threadId);
   if (!grant) return;
 
   // The grant was unbound when routing was last written, so the worker still
   // has no thread to continue. Re-project now that the platform has named it.
   await writeSessionRouting(grant.helper_agent_group_id, grant.helper_session_id);
-  log.info('Lent conversation bound to its thread', { threadId: info.platformMsgId });
+  log.info('Lent conversation bound to its thread', { threadId });
   // A review loop is bot-to-bot, and a channel's admission policy stops after
   // a few consecutive bot turns unless a human speaks. Claim this one thread,
   // so every other room keeps the cap.
-  rememberLentThread(msg.channelType, msg.platformId, info.platformMsgId);
+  rememberLentThread(msg.channelType, msg.platformId, threadId);
 
   const closedQuestionId = await closeAnsweredQuestion(grant.helper_session_id);
 

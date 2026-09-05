@@ -26,7 +26,8 @@ export type WakeReason =
   | 'cli'
   | 'approval-response'
   | 'adoption'
-  | 'worker-delegation';
+  | 'worker-delegation'
+  | 'delivery-failure';
 
 export async function requestWake(session: Session, _reason: WakeReason): Promise<boolean> {
   return wakeContainer(session);

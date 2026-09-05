@@ -3,11 +3,12 @@ import { describe, expect, it } from 'vitest';
 
 import { migrations } from './index.js';
 import { moduleWorkerDelegation } from './module-worker-delegation.js';
+import { moduleWorkerDelegationGrantThreads } from './module-worker-delegation-grant-threads.js';
 
 // A module-lane migration registers at runtime, so it never enters
 // `migrations`. The portability policy still governs it, so name it here —
 // otherwise moving a migration into the lane silently exempts it.
-const allMigrations = [...migrations, moduleWorkerDelegation];
+const allMigrations = [...migrations, moduleWorkerDelegation, moduleWorkerDelegationGrantThreads];
 
 const FROZEN_SQLITE_ONLY = new Set([
   'initial-v2-schema',

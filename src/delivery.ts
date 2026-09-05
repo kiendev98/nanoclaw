@@ -24,7 +24,8 @@ import { isUnguarded, type Unguarded } from './guard/index.js';
 import { fanOutboundMessage } from './modules/cross-session-context/index.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
-import { clearOutbox, readOutboxFiles, withExistingMailboxSession } from './session-manager.js';
+import { clearOutbox, readOutboxFiles, withExistingMailboxSession, writeSessionMessage } from './session-manager.js';
+import { requestWake } from './request-wake.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
 import type { OutboundFile } from './channels/adapter.js';
 import type { PendingApproval, Session } from './types.js';
@@ -62,6 +63,43 @@ async function recordAttemptRow(messageId: string, sessionId: string, err: unkno
     return null;
   }
   /* eslint-enable no-catch-all/no-catch-all */
+}
+
+/**
+ * Tell the session that wrote a message that nobody will ever receive it.
+ *
+ * `markDeliveryFailed` writes one row in a table only the host reads, so the
+ * sender hears nothing at all. An agent that waits on a reply then waits for
+ * good: observed, a worker posted a review request that three attempts had
+ * already dropped, and reported it as sent.
+ *
+ * The notice names the message and the platform error, because the agent has to
+ * decide between sending it again and reporting the loss. It wakes the session
+ * for the same reason a reply does.
+ */
+async function tellSenderTheMessageWasDropped(
+  agentGroupId: string,
+  session: Session,
+  msg: { id: string; channelType: string | null; platformId: string | null },
+  err: unknown,
+): Promise<void> {
+  const reason = err instanceof Error ? err.message : String(err);
+  const target = msg.channelType && msg.platformId ? `${msg.channelType} ${msg.platformId}` : 'its destination';
+  await writeSessionMessage(agentGroupId, session.id, {
+    // Derived from the dropped message, so a repeated notice is one row.
+    id: `drop-${msg.id}`,
+    kind: 'chat',
+    timestamp: new Date().toISOString(),
+    platformId: agentGroupId,
+    channelType: 'agent',
+    threadId: null,
+    content: JSON.stringify({
+      text: `Your message ${msg.id} to ${target} was never delivered. It failed ${MAX_DELIVERY_ATTEMPTS} times and has been dropped: ${reason}. Nobody received it, so send it again or report the loss.`,
+      sender: 'system',
+      senderId: 'system',
+    }),
+  });
+  await requestWake(session, 'delivery-failure');
 }
 
 async function clearAttemptRow(messageId: string): Promise<void> {
@@ -304,6 +342,17 @@ async function drainSession(session: Session): Promise<void> {
             err: markErr,
           });
         }
+        /* eslint-disable no-catch-all/no-catch-all -- a notice must never break the rest of the queue */
+        try {
+          await tellSenderTheMessageWasDropped(agentGroup.id, session, msg, err);
+        } catch (noticeErr) {
+          log.error('Failed to tell a session its message was dropped', {
+            messageId: msg.id,
+            sessionId: session.id,
+            err: noticeErr,
+          });
+        }
+        /* eslint-enable no-catch-all/no-catch-all */
       } else {
         log.warn('Message delivery failed, will retry', {
           messageId: msg.id,

@@ -21,6 +21,7 @@ import {
   type Message as ChatMessage,
 } from 'chat';
 import { log } from '../log.js';
+import { qualifiedThreadId } from '../platform-id.js';
 import { appendFooter, readFooter } from './message-footer.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
@@ -198,7 +199,7 @@ export function attachAppContext(
  */
 export function normalizeDmThreadId(threadId: string, messageId: string): string {
   if (threadId.endsWith(':') && messageId && !messageId.includes(':')) {
-    return threadId + messageId;
+    return qualifiedThreadId(threadId.slice(0, -1), messageId);
   }
   return threadId;
 }

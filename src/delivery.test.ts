@@ -49,6 +49,14 @@ function now(): string {
   return new Date().toISOString();
 }
 
+/** The text of every message the host wrote back into a session. */
+function inboundTexts(agentGroupId: string, sessionId: string): string[] {
+  const db = new Database(inboundDbPath(agentGroupId, sessionId), { readonly: true });
+  const rows = db.prepare('SELECT content FROM messages_in ORDER BY seq').all() as Array<{ content: string }>;
+  db.close();
+  return rows.map((row) => JSON.parse(row.content).text as string);
+}
+
 async function seedAgentAndChannel(): Promise<void> {
   await createAgentGroup({
     id: 'ag-1',
@@ -256,6 +264,44 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     // Verify the message is in the delivered table with 'failed' status
     const delivered = await withMailboxSession('ag-1', session.id, (mailbox) => mailbox.getDeliveredIds());
     expect(delivered.has('out-flaky')).toBe(true);
+  });
+
+  it('tells the sending session when a message is dropped for good', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'out-dropped');
+
+    setDeliveryAdapter({
+      async deliver() {
+        throw new Error('Invalid Slack thread ID: 1788596827.545309');
+      },
+    });
+
+    // A retry may still work, so the sender is told nothing yet.
+    await deliverSessionMessages(session);
+    await deliverSessionMessages(session);
+    expect(inboundTexts('ag-1', session.id)).toEqual([]);
+
+    await deliverSessionMessages(session);
+    const notices = inboundTexts('ag-1', session.id);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain('out-dropped');
+    expect(notices[0]).toContain('Invalid Slack thread ID: 1788596827.545309');
+  });
+
+  it('writes one drop notice however often the session is polled after', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'out-dropped-once');
+
+    setDeliveryAdapter({
+      async deliver() {
+        throw new Error('network timeout');
+      },
+    });
+
+    for (let i = 0; i < 5; i++) await deliverSessionMessages(session);
+    expect(inboundTexts('ag-1', session.id)).toHaveLength(1);
   });
 
   it('does not acknowledge a message when no channel adapter is registered (#2995)', async () => {
