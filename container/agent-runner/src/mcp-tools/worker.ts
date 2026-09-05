@@ -186,7 +186,7 @@ export const lendConversation: McpToolDefinition = {
         text: {
           type: 'string',
           description:
-            'The opening message. It starts the thread the worker gets, and it is posted as a new top-level message. Do not mention or address the counterparty here. The worker mentions them in the message that carries the request.',
+            'The opening message. It starts the thread the worker gets, and it is posted as a new top-level message. Do not mention or address the counterparty here. That belongs to the message the worker sends.',
         },
       },
       required: ['repository', 'destination', 'text'],
