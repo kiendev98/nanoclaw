@@ -63,6 +63,16 @@ const GIT_TIMEOUT_MS = 30_000;
  */
 const SUBMODULE_BUDGET_MS = 60_000;
 
+/**
+ * The least a clone can be given and still mean anything.
+ *
+ * One budget covers every submodule of a pass, so a slow first clone can leave
+ * the next one a few milliseconds. Running git with that is a hard failure
+ * dressed as a timeout: the submodule was resolvable and was only starved.
+ * Below this, the pass reports the budget spent, which warns and continues.
+ */
+const MIN_SUBMODULE_CLONE_MS = 5_000;
+
 function git(cwd: string, args: string[], timeoutMs: number = GIT_TIMEOUT_MS): string {
   return execFileSync('git', args, {
     cwd,
@@ -108,19 +118,27 @@ interface DeclaredSubmodule {
  * A worktree of that store costs 8KB and reaches no network at all.
  */
 function ensureSubmodules(repoPath: string, worktreePath: string, repoName: string, helperSessionId: string): void {
+  const declared = declaredSubmodules(worktreePath);
+  if (declared.length === 0) return;
+
+  // One `rev-parse` for the pass. The value is a property of the source clone
+  // and cannot change inside the loop, so asking per submodule spends a
+  // subprocess per iteration for an answer already held.
+  const modulesRoot = sourceModulesRoot(repoPath);
   const deadline = Date.now() + SUBMODULE_BUDGET_MS;
 
-  for (const submodule of declaredSubmodules(worktreePath)) {
+  for (const submodule of declared) {
     const target = path.join(worktreePath, submodule.path);
     if (fs.existsSync(path.join(target, '.git'))) continue;
 
     try {
-      const unresolvable = placeSubmodule(repoPath, worktreePath, submodule, target, deadline);
+      const unresolvable = placeSubmodule(worktreePath, modulesRoot, submodule, target, deadline);
       if (!unresolvable) continue;
       // A declaration this checkout cannot satisfy is the repository's shape,
       // not a fault of the delegation. Refusing the task would strand every
-      // worker on a repository carrying one stale stanza.
-      log.warn('Worker submodule left empty', {
+      // worker on a repository carrying one stale stanza. The path is usually
+      // left empty, and the reason says when it is not.
+      log.warn('Worker submodule not placed', {
         repoName,
         helperSessionId,
         submodule: submodule.path,
@@ -182,8 +200,8 @@ function declaredSubmodules(worktreePath: string): DeclaredSubmodule[] {
  * can answer them.
  */
 function placeSubmodule(
-  repoPath: string,
   worktreePath: string,
+  modulesRoot: string | null,
   submodule: DeclaredSubmodule,
   target: string,
   deadline: number,
@@ -197,10 +215,12 @@ function placeSubmodule(
   // attempt would otherwise fail here forever.
   if (holdsFiles(target)) return 'the path already holds files from an earlier attempt';
 
-  if (placeFromSourceClone(repoPath, submodule, target, commit)) return null;
+  const placement = placeFromSourceClone(modulesRoot, submodule, target, commit);
+  if (placement === 'placed') return null;
+  if (placement === 'unlocked') return 'the submodule worktree could not be locked, and could not be withdrawn';
 
   const remaining = deadline - Date.now();
-  if (remaining <= 0) return 'the submodule budget was spent before this clone';
+  if (remaining < MIN_SUBMODULE_CLONE_MS) return 'the submodule budget was spent before this clone';
 
   git(worktreePath, ['submodule', 'update', '--init', '--', submodule.path], remaining);
   return null;
@@ -211,10 +231,25 @@ function holdsFiles(target: string): boolean {
   return fs.existsSync(target) && fs.statSync(target).isDirectory() && fs.readdirSync(target).length > 0;
 }
 
-/** True when the submodule now stands in the worktree, taken from local objects. */
-function placeFromSourceClone(repoPath: string, submodule: DeclaredSubmodule, target: string, commit: string): boolean {
-  const moduleDir = path.join(commonGitDir(repoPath), 'modules', submodule.name);
-  if (!fs.existsSync(moduleDir)) return false;
+/**
+ * What the local route did with one submodule.
+ *
+ * `unavailable` is the caller's cue to reach the remote. `unlocked` is not: the
+ * worktree was added, could not be locked, and could not be withdrawn either,
+ * so the path now holds a directory no route may overwrite.
+ */
+type SourcePlacement = 'placed' | 'unavailable' | 'unlocked';
+
+/** The submodule taken from local objects, or why the caller must clone instead. */
+function placeFromSourceClone(
+  modulesRoot: string | null,
+  submodule: DeclaredSubmodule,
+  target: string,
+  commit: string,
+): SourcePlacement {
+  if (modulesRoot === null) return 'unavailable';
+  const moduleDir = path.join(modulesRoot, submodule.name);
+  if (!fs.existsSync(moduleDir)) return 'unavailable';
 
   try {
     git(moduleDir, ['worktree', 'add', '--detach', target, commit]);
@@ -224,24 +259,42 @@ function placeFromSourceClone(repoPath: string, submodule: DeclaredSubmodule, ta
       submodule: submodule.path,
       err,
     });
-    return false;
+    return 'unavailable';
   }
 
   try {
     git(moduleDir, ['worktree', 'lock', target]);
+    return 'placed';
   } catch (err) {
-    // A prune inside the submodule discards this directory and the worker's
-    // uncommitted work in it.
-    // The superproject worktree carries the same risk for the same reason.
-    log.error('Worker submodule worktree could not be locked', { submodule: submodule.path, target, err });
+    // An unlocked worktree is one prune away from losing the worker's work.
+    // Reporting it as placed hides that for the life of the worker, so
+    // withdraw it while it is still empty and let the clone route answer.
+    // A cloned submodule is an ordinary directory that no prune can reach.
+    log.error('Worker submodule worktree could not be locked — withdrawing it', {
+      submodule: submodule.path,
+      target,
+      err,
+    });
   }
 
-  return true;
+  return withdrawWorktree(moduleDir, target) ? 'unavailable' : 'unlocked';
 }
 
-/** The git directory worktrees share, which is where an initialized submodule lives. */
-function commonGitDir(repoPath: string): string {
-  return path.resolve(repoPath, git(repoPath, ['rev-parse', '--git-common-dir']));
+/** True when a worktree this pass just added is gone again, so another route may run. */
+function withdrawWorktree(moduleDir: string, target: string): boolean {
+  if (gitOrNull(moduleDir, ['worktree', 'remove', '--force', target]) !== null) return true;
+  log.error('Worker submodule worktree could not be withdrawn after a failed lock', { moduleDir, target });
+  return false;
+}
+
+/**
+ * Where the source clone keeps its initialized submodules, or null when git
+ * cannot say — in which case only the clone route is left.
+ */
+function sourceModulesRoot(repoPath: string): string | null {
+  const commonDir = gitOrNull(repoPath, ['rev-parse', '--git-common-dir']);
+  if (commonDir === null) return null;
+  return path.join(path.resolve(repoPath, commonDir), 'modules');
 }
 
 /** `nanoclaw/worker/<session>` — unique per session, so git enforces A8. */

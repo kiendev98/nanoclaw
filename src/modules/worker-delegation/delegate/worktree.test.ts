@@ -5,6 +5,11 @@
  * visibly calls. The properties worth pinning — one worktree per session, a
  * second call adopting the first, a refusal that carries no host path — are
  * all properties of git's own behaviour.
+ *
+ * `gitFault` is the exception, and it is a different thing from a mock. Git
+ * runs for real; the hook injects the failures git will not produce on demand
+ * — a lock that will not take, a withdrawal that will not run — and records
+ * the calls a redundancy claim has to count.
  */
 import { execFileSync } from 'child_process';
 import fs from 'fs';
@@ -13,14 +18,46 @@ import path from 'path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { log } from '../../../log.js';
+
 // `WORKTREES_DIR` is derived once at module load, so the workspace root has to
 // be set before the import below — not mocked. Replacing the whole module
 // would starve its other importers of the roots they read at load too.
-const { workspaceRoot } = vi.hoisted(() => {
+const { workspaceRoot, gitFault } = vi.hoisted(() => {
   const tmpRoot = (process.env.TMPDIR || '/tmp').replace(/\/+$/, '');
   const root = `${tmpRoot}/nanoclaw-worktree-test-${process.pid}`;
   process.env.NANOCLAW_WORKSPACE_DIR = root;
-  return { workspaceRoot: root };
+  return {
+    workspaceRoot: root,
+    gitFault: {
+      fail: null as ((args: string[], cwd: string) => boolean) | null,
+      onCall: null as ((args: string[]) => void) | null,
+      seen: [] as string[][],
+    },
+  };
+});
+
+// Every case here drives real git, and the setup commits a real submodule.
+// The 5s default is a comfortable fit alone and not under a full parallel
+// suite, where this file was timing out on load rather than on behaviour.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 30_000 });
+
+vi.mock('../../../log.js', () => ({
+  log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
+}));
+
+vi.mock('child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('child_process')>();
+  return {
+    ...actual,
+    execFileSync: (file: string, args: string[], options?: { cwd?: string }) => {
+      const cwd = options?.cwd ?? '';
+      gitFault.seen.push(args);
+      gitFault.onCall?.(args);
+      if (gitFault.fail?.(args, cwd)) throw new Error(`injected git failure: ${args.join(' ')}`);
+      return (actual.execFileSync as (...rest: unknown[]) => unknown)(file, args, options);
+    },
+  };
 });
 
 const { ensureWorktree, WorktreeError, workerBranchName, workerWorktreePath } = await import('./worktree.js');
@@ -32,7 +69,35 @@ function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
+/** How many times the pass asked git for one answer. */
+function callsMatching(token: string): number {
+  return gitFault.seen.filter((args) => args.includes(token)).length;
+}
+
+/**
+ * Let the fallback clone reach a `file://` submodule, which git refuses by
+ * default. Set through the environment rather than global config, so the
+ * operator's own git is untouched.
+ */
+function withFileProtocol<T>(fn: () => T): T {
+  process.env.GIT_CONFIG_COUNT = '1';
+  process.env.GIT_CONFIG_KEY_0 = 'protocol.file.allow';
+  process.env.GIT_CONFIG_VALUE_0 = 'always';
+  try {
+    return fn();
+  } finally {
+    delete process.env.GIT_CONFIG_COUNT;
+    delete process.env.GIT_CONFIG_KEY_0;
+    delete process.env.GIT_CONFIG_VALUE_0;
+  }
+}
+
 beforeEach(() => {
+  gitFault.fail = null;
+  gitFault.onCall = null;
+  gitFault.seen = [];
+  vi.mocked(log.warn).mockClear();
+  vi.mocked(log.error).mockClear();
   // The workspace root is fixed for the file, so each test starts from an empty
   // one — otherwise a session id reused across tests adopts the last one's copy.
   fs.rmSync(workspaceRoot, { recursive: true, force: true });
@@ -49,6 +114,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   fs.rmSync(tmp, { recursive: true, force: true });
   fs.rmSync(workspaceRoot, { recursive: true, force: true });
 });
@@ -271,5 +337,84 @@ describe('ensureWorktree with a submodule', () => {
     expect((thrown as Error).message).toContain('vendor/lib');
     expect((thrown as Error).message).toContain('nanoclaw');
     expect((thrown as Error).message).not.toContain(tmp);
+  });
+
+  // A lock that does not take leaves a worktree one prune away from taking the
+  // worker's uncommitted work with it. Reporting that as placed hides the risk
+  // for the life of the worker, so the pass gives the directory back while it
+  // is still empty and lets the clone answer — a clone is an ordinary
+  // directory, and no prune reaches one.
+  it('withdraws a submodule worktree it could not lock, and clones instead', () => {
+    const moduleDir = path.join(repoPath, '.git', 'modules', 'shared-lib');
+    gitFault.fail = (args, cwd) => args.includes('lock') && cwd === moduleDir;
+
+    const handle = withFileProtocol(() => ensureWorktree(repoPath, 'nanoclaw', 'sess-lock'));
+    gitFault.fail = null;
+
+    expect(fs.readFileSync(path.join(handle.worktreePath, 'vendor/lib/lib.txt'), 'utf-8')).toBe('shared\n');
+    expect(git(moduleDir, ['worktree', 'list', '--porcelain'])).not.toContain(handle.worktreePath);
+  });
+
+  // The withdrawal can fail too, and then the path holds an unlocked worktree
+  // no route may overwrite. That is the one outcome the caller must not read as
+  // success: the warning names it, and nothing claims the submodule is placed.
+  it('reports a submodule it could neither lock nor withdraw, rather than claiming it', () => {
+    const moduleDir = path.join(repoPath, '.git', 'modules', 'shared-lib');
+    gitFault.fail = (args, cwd) => cwd === moduleDir && (args.includes('lock') || args.includes('remove'));
+
+    const handle = withFileProtocol(() => ensureWorktree(repoPath, 'nanoclaw', 'sess-stuck'));
+    gitFault.fail = null;
+
+    expect(fs.existsSync(path.join(handle.worktreePath, '.git'))).toBe(true);
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      'Worker submodule not placed',
+      expect.objectContaining({ reason: expect.stringContaining('could not be locked') }),
+    );
+  });
+
+  // One budget covers the whole pass, so a slow first clone can leave the next
+  // one a few milliseconds. Running git with that is a hard failure dressed as
+  // a timeout: the submodule was resolvable and was only starved.
+  it('warns instead of aborting when the budget is spent before a clone', () => {
+    fs.rmSync(path.join(repoPath, '.git', 'modules', 'shared-lib'), { recursive: true, force: true });
+    const start = Date.now();
+    let now = start;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    // Spend the budget after the deadline is set and before the clone is timed.
+    gitFault.onCall = (args) => {
+      if (args.includes('HEAD:vendor/lib')) now = start + 59_990;
+    };
+
+    const handle = withFileProtocol(() => ensureWorktree(repoPath, 'nanoclaw', 'sess-budget'));
+
+    expect(fs.existsSync(path.join(handle.worktreePath, 'vendor/lib/lib.txt'))).toBe(false);
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      'Worker submodule not placed',
+      expect.objectContaining({ reason: expect.stringContaining('budget was spent') }),
+    );
+  });
+
+  // The common git directory is a property of the source clone. Asking per
+  // submodule spends a subprocess an iteration for an answer already held.
+  it('asks for the common git directory once for the whole pass', () => {
+    git(repoPath, [
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '--quiet',
+      '--name',
+      'second-lib',
+      modulePath,
+      'vendor/second',
+    ]);
+    git(repoPath, ['commit', '--quiet', '-m', 'add a second submodule']);
+    gitFault.seen = [];
+
+    const handle = ensureWorktree(repoPath, 'nanoclaw', 'sess-two');
+
+    expect(fs.existsSync(path.join(handle.worktreePath, 'vendor/lib/lib.txt'))).toBe(true);
+    expect(fs.existsSync(path.join(handle.worktreePath, 'vendor/second/lib.txt'))).toBe(true);
+    expect(callsMatching('--git-common-dir')).toBe(1);
   });
 });

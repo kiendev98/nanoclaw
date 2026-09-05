@@ -148,10 +148,19 @@ export function registerGatewayProvider(kind: GatewayProviderKind, factory: Gate
  * tree, so one written before the field existed reports `undefined`. Every
  * gateway that predates it is a credential proxy. Reading absence as false
  * would drop the token that proxy needs and withhold its own skill.
+ *
+ * The default is layered, never spread. A spread copies own enumerable
+ * properties only, so an overlay written as a class instance would reach the
+ * caller with `contribute` and `approvals` gone — the first spawn throws, or
+ * a credentialed action hangs until the gateway times out. Delegating to the
+ * provider leaves every method, getter and inherited member where it was.
  */
 function withDeclaredCredentials(provider: GatewayProvider): GatewayProvider {
   const declared = (provider as { injectsCredentials?: boolean }).injectsCredentials;
-  return declared === undefined ? { ...provider, injectsCredentials: true } : provider;
+  if (declared !== undefined) return provider;
+  return Object.create(provider, {
+    injectsCredentials: { value: true, enumerable: true, writable: false, configurable: false },
+  }) as GatewayProvider;
 }
 
 export function getGatewayProviderFactory(kind: GatewayProviderKind): GatewayProviderFactory | undefined {

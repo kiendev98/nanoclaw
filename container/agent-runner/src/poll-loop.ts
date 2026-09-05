@@ -572,6 +572,9 @@ export async function processQuery(
             // carries content, the wrap-nudge fires so the model re-sends
             // and the retry streams through the mid-turn door.
             turnDelivered: emitsMidTurnText ? midTurnSent > 0 || chatRowWrittenSince(turnStartSeq) : undefined,
+            // Read at the turn boundary, like turnDelivered, and only for a
+            // worker: no other session writes this row.
+            workerReported: worktreeDir() ? workerReportedSince(turnStartSeq) : undefined,
           });
           const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
           // One-door task delivery: the final text becomes the run log entry
@@ -764,6 +767,13 @@ export interface ResultDispatchOptions {
    * retry, never a direct result-door send.
    */
   turnDelivered?: boolean;
+  /**
+   * Did this worker call `finish_task` in this turn? Only meaningful in a
+   * worker session. It divides a worker's closing text, which is the report
+   * restated and needs no door, from bare text on an intermediate turn, which
+   * is an undelivered reply exactly as it is in any other session.
+   */
+  workerReported?: boolean;
 }
 /**
  * `<internal>…</internal>` spans are explicitly not-for-delivery scratchpad.
@@ -940,6 +950,42 @@ function chatRowWrittenSince(afterSeq: number): boolean {
 }
 
 /**
+ * Has this worker reported after `afterSeq`? `finish_task` writes a system row
+ * rather than a chat row, so the chat probe above cannot see it.
+ *
+ * It separates a worker's two bare-text endings. Closing text after the report
+ * is the report restated, and there is nothing left to deliver. Bare text with
+ * no report is an ordinary undelivered turn. Fail-open to false, like the chat
+ * probe: a spurious coax beats a silently swallowed reply.
+ */
+function workerReportedSince(afterSeq: number): boolean {
+  try {
+    return getUndeliveredMessages().some(
+      (message) =>
+        (message.seq ?? 0) > afterSeq && message.kind === 'system' && message.content.includes('"worker_done"'),
+    );
+  } catch (err) {
+    log(`workerReportedSince failed: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
+/**
+ * Does this session hold a destination it could have wrapped a block for?
+ *
+ * A worker spawns with none, and a lend adds exactly one. Fail-open to true:
+ * an unreadable destination table must not suppress the nudge.
+ */
+function sessionHoldsDestination(): boolean {
+  try {
+    return getAllDestinations().length > 0;
+  } catch (err) {
+    log(`sessionHoldsDestination failed: ${err instanceof Error ? err.message : String(err)}`);
+    return true;
+  }
+}
+
+/**
  * Does messages_out already hold a chat row with this exact destination and
  * body, written in the seq window (afterSeq, uptoSeq]? Used by the mid-turn
  * door's cross-segment echo guard. Content equality is exact: the door writes
@@ -1077,7 +1123,14 @@ export async function dispatchResultText(
   // counting that as undelivered nudged it toward a door it does not have.
   // A worker that did write a block is a different case and still warns: the
   // block went nowhere, and only this line says so.
-  const workerEndedWithBareText = !!worktreeDir() && resultBlocks === 0;
+  //
+  // Two of its turns are not that ending, and each keeps the ordinary nudge.
+  // A worker holding a lent conversation HAS a door, so bare prose there is a
+  // reply that never left. A worker that has not reported this turn is still
+  // mid-task, whatever it holds. Suppressing either dropped the text in
+  // silence: the scratchpad log is not a delivery.
+  const workerEndedWithBareText =
+    !!worktreeDir() && resultBlocks === 0 && (!sessionHoldsDestination() || options?.workerReported === true);
   const hasUnwrapped = !routing.taskRun && !anythingDelivered && !!scratchpad && !workerEndedWithBareText;
   if (hasUnwrapped) {
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
